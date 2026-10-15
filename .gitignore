@@ -9,3 +9,6 @@ node_modules/
 data_roots.txt
 tests/vendor_data.json
 web/_tmp_test/
+
+.vercel
+.env*
