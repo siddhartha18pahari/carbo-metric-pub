@@ -320,3 +320,30 @@ def test_point_lists_are_refused_not_guessed(tmp_path):
     p.write_text("\n".join(rows))
     with pytest.raises(ValueError, match="full"):
         read_map(str(p))
+
+
+# ---------------------------------------------------------------- smoothing
+def test_spectral_smoothing_is_savitzky_golay():
+    from scipy.signal import savgol_filter
+    from qcarbon.fitter import smooth_spectra
+    cube = np.random.default_rng(3).normal(100, 5, (4, 5, 150))
+    for w, o in [(5, 2), (11, 3), (21, 4)]:
+        cfg = Config(smooth_window=w, smooth_order=o)
+        np.testing.assert_allclose(smooth_spectra(cube, cfg), savgol_filter(cube, w, o, axis=-1, mode="interp"), atol=1e-8)
+
+
+def test_spatial_averaging_keeps_a_flat_map_flat_and_cuts_noise():
+    from qcarbon.fitter import smooth_spectra
+    flat = np.full((6, 9, 4), 7.0)
+    assert np.allclose(smooth_spectra(flat, Config(spatial_kernel=5)), 7.0)       # edges renormalised
+    noise = np.random.default_rng(4).normal(0, 1, (40, 40, 50))
+    assert smooth_spectra(noise, Config(spatial_kernel=3)).std() < 0.5 * noise.std()
+
+
+def test_smoothing_settings_are_checked_and_saved():
+    with pytest.raises(ValueError):
+        Config(smooth_window=8).check()                  # even window
+    with pytest.raises(ValueError):
+        Config(spatial_kernel=4).check()
+    cfg = Config(smooth_window=9, smooth_order=3, spatial_kernel=5)
+    assert Config.from_ini(cfg.to_ini()).to_dict() == cfg.to_dict()

@@ -3,6 +3,7 @@
 // the instrument shows (maps, ratios, valid points, quality, statistics) plus
 // the splat and particle views.
 
+import { smoothSpectra } from "./engine/core.js";
 import { $, $$, el, api, apiUpload, videoSrc, setLocalBackend, isBrowserOnly, f32, download, debounce, fmt, summary, otsu, toast, hidpi, quantile, niceTicks } from "./util.js";
 import { MapView } from "./mapview.js";
 import { SpectrumPlot, HistogramPlot, DensityPlot, PEAK_COLOURS } from "./plots.js";
@@ -173,6 +174,15 @@ function evalFit(p) {
   return { baseline: base, comps, total };
 }
 
+// the spectra the last fit actually saw (smoothed when smoothing was on)
+function fitCube() {
+  const c = S.fit && S.fit.config;
+  if (!S.cube || !c || !(c.smooth_window || c.spatial_kernel)) return null;
+  const key = `${S.ds.id}/${c.smooth_window}/${c.smooth_order}/${c.spatial_kernel}`;
+  if (S.cubeFitKey !== key) { S.cubeFit = Float32Array.from(smoothSpectra(S.cube, S.ny, S.nx, S.k, c)); S.cubeFitKey = key; }
+  return S.cubeFit;
+}
+
 function renderCursor() {
   const p = S.hover ?? S.pinned;
   cursorPlot.emptyText = S.fit && S.fit.resultsOnly ? "This file holds fitted values only: no spectra to show" : null;
@@ -187,8 +197,9 @@ function renderCursor() {
     return;
   }
   if (p == null || !S.cube) { cursorPlot.setData(null); $("#cursor-table").textContent = ""; $("#cursor-info").textContent = ""; return; }
-  const raw = S.cube.subarray(p * S.k, (p + 1) * S.k);
-  const d = { wn: S.wn, raw, range: S.fit ? S.fit.range : [S.cfg.range_lo, S.cfg.range_hi] };
+  const raw = S.cube.subarray(p * S.k, (p + 1) * S.k), sm = fitCube();
+  const d = { wn: S.wn, raw: sm ? sm.subarray(p * S.k, (p + 1) * S.k) : raw, raw0: sm ? raw : null,
+              range: S.fit ? S.fit.range : [S.cfg.range_lo, S.cfg.range_hi] };
   if (S.fit) d.fit = evalFit(p);
   cursorPlot.setData(d);
   const i = Math.floor(p / S.nx), j = p % S.nx;
@@ -436,6 +447,9 @@ function fillSide() {
   $("#cfg-lo").value = c.range_lo; $("#cfg-hi").value = c.range_hi;
   $("#cfg-skip").checked = c.skip_fitting;
   $("#cfg-auto").checked = c.auto_shapes !== false;
+  $("#cfg-sgw").value = String(c.smooth_window || 0); $("#cfg-sgo").value = String(c.smooth_order ?? 2);
+  $("#cfg-sgo").disabled = !c.smooth_window;
+  $("#cfg-spatial").value = String(c.spatial_kernel || 0);
   const np = $("#cfg-npeaks"); np.textContent = "";
   for (let n = 1; n <= 8; n++) np.append(el("option", { value: n, selected: n === c.peaks.length }, n));
   buildConstraints(); buildPeaks(); buildRatio();
@@ -481,6 +495,9 @@ $("#cfg-lo").onchange = e => { S.cfg.range_lo = parseFloat(e.target.value); onPr
 $("#cfg-hi").onchange = e => { S.cfg.range_hi = parseFloat(e.target.value); onProcessing(); };
 $("#cfg-skip").onchange = e => { S.cfg.skip_fitting = e.target.checked; onProcessing(); };
 $("#cfg-auto").onchange = e => { S.cfg.auto_shapes = e.target.checked; onProcessing(); };
+$("#cfg-sgw").onchange = e => { S.cfg.smooth_window = +e.target.value; $("#cfg-sgo").disabled = !S.cfg.smooth_window; onProcessing(); };
+$("#cfg-sgo").onchange = e => { S.cfg.smooth_order = +e.target.value; if (S.cfg.smooth_window) onProcessing(); };
+$("#cfg-spatial").onchange = e => { S.cfg.spatial_kernel = +e.target.value; onProcessing(); };
 $("#cfg-names").onchange = () => buildPeaks();
 $("#cfg-npeaks").onchange = e => {
   const n = +e.target.value, c = S.cfg;
@@ -1091,7 +1108,7 @@ function reportFigures() {
   let overlay = null;
   maps.forEach((src, i) => {
     const host = offscreen(520, 440), mv = new MapView(host, {});
-    Object.assign(mv, { cmap: src.cmap, scale: src.scale, manual: src.manual, smooth: src.smooth });
+    Object.assign(mv, { cmap: src.cmap, scale: src.scale, manual: src.manual, smooth: src.smooth, filter: src.filter });
     mv.setGeometry({ nx: S.nx, ny: S.ny, x: S.x, y: S.y });
     const r = resolve(S.specs[i]);
     mv.setTitle(r.title);
@@ -1102,7 +1119,10 @@ function reportFigures() {
   });
   let host = offscreen(760, 360);
   const sp = new SpectrumPlot(host);
-  if (S.pinned != null && S.cube) sp.setData({ wn: S.wn, raw: S.cube.subarray(S.pinned * S.k, (S.pinned + 1) * S.k), range: S.fit.range, fit: evalFit(S.pinned) });
+  if (S.pinned != null && S.cube) {
+    const sm = fitCube(), raw = S.cube.subarray(S.pinned * S.k, (S.pinned + 1) * S.k);
+    sp.setData({ wn: S.wn, raw: sm ? sm.subarray(S.pinned * S.k, (S.pinned + 1) * S.k) : raw, raw0: sm ? raw : null, range: S.fit.range, fit: evalFit(S.pinned) });
+  }
   figs.cursor = onDark(sp.canvas); host.remove();
   host = offscreen(520, 360);
   const hp = new HistogramPlot(host); hp.setData(hist.d); figs.hist = onDark(hp.canvas); host.remove();

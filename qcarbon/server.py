@@ -21,7 +21,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import splat as splat_mod
 from .config import Config
-from .fitter import fit_spectra
+from .fitter import fit_spectra, smooth_spectra
 from .labspec import TEXT_EXT, RamanMap, VideoImage, find_video, read_l6v, read_map
 from .library import APP_DIR, Library, item_id
 from .results import export_table, quality, ratios, statistics, valid_mask
@@ -206,7 +206,7 @@ def _fit_payload(ds: Dataset) -> dict:
 def _fit_worker(ds: Dataset, cfg: Config):
     job = ds.fit_job
     try:
-        Y = ds.map.cube.reshape(-1, ds.map.wn.size)
+        Y = smooth_spectra(ds.map.cube, cfg).reshape(-1, ds.map.wn.size)
         res = fit_spectra(Y, ds.map.wn, cfg, progress=lambda f: job.__setitem__("progress", f))
         with ds.lock:
             ds.fit, ds.fit_cfg = res, cfg

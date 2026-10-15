@@ -4,7 +4,7 @@
 // Splat 3D needs the Python engine and stays in the desktop version.
 
 import { readMap, readL6v, TEXT_EXT } from "./readers.js";
-import { prepareFit, finishFit, lmBatch } from "./core.js";
+import { prepareFit, finishFit, lmBatch, smoothSpectra } from "./core.js";
 import { DEFAULT_CONFIG, toIni, fromIni } from "./config.js";
 
 const DS = new Map();
@@ -121,8 +121,9 @@ async function runFit(ds, cfg) {
   const job = ds.job = { state: "running", progress: 0, started: Date.now() };
   try {
     await new Promise(r => setTimeout(r, 0));          // let the status paint
-    const t0 = performance.now(), P = ds.map.nx * ds.map.ny;
-    const st = prepareFit(ds.map.cube, P, ds.map.wn, cfg);
+    const t0 = performance.now(), m = ds.map, P = m.nx * m.ny;
+    const cube = cfg.smooth_window || cfg.spatial_kernel ? smoothSpectra(m.cube, m.ny, m.nx, m.wn.length, cfg) : m.cube;
+    const st = prepareFit(cube, P, m.wn, cfg);
     job.progress = 0.05;
     const iters = new Int32Array(P);
     await parallelLM(st, iters, f => { job.progress = 0.05 + 0.95 * f; });

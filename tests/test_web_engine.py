@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 
 from qcarbon.config import Config
-from qcarbon.fitter import fit_spectra, shape_eval
+from qcarbon.fitter import fit_spectra, shape_eval, smooth_spectra
 from qcarbon.labspec import read_map
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -18,7 +18,9 @@ NODE = shutil.which("node")
 
 
 @pytest.mark.skipif(NODE is None, reason="Node.js not installed")
-def test_browser_engine_matches_python(tmp_path):
+@pytest.mark.parametrize("overrides", [{}, {"smooth_window": 9, "smooth_order": 3, "spatial_kernel": 3}],
+                         ids=["raw", "smoothed"])
+def test_browser_engine_matches_python(tmp_path, overrides):
     rng = np.random.default_rng(7)
     wn = np.linspace(1000, 1800, 240)
     ny, nx = 14, 16
@@ -35,11 +37,12 @@ def test_browser_engine_matches_python(tmp_path):
     p = tmp_path / "synthetic map.txt"
     p.write_text("\n".join(lines) + "\n")
 
-    out = subprocess.run([NODE, os.path.join(HERE, "js", "fit_file.mjs"), str(p)],
+    out = subprocess.run([NODE, os.path.join(HERE, "js", "fit_file.mjs"), str(p), json.dumps(overrides)],
                          capture_output=True, text=True, check=True)
     js = json.loads(out.stdout)
     m = read_map(str(p))
-    r = fit_spectra(m.cube.reshape(-1, m.wn.size), m.wn, Config())
+    cfg = Config(**overrides)
+    r = fit_spectra(smooth_spectra(m.cube, cfg).reshape(-1, m.wn.size), m.wn, cfg)
     assert (js["ny"], js["nx"]) == m.cube.shape[:2]
     assert np.allclose(js["x"], m.x) and np.allclose(js["y"], m.y)
     assert js["held"] == r.held

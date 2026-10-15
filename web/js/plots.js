@@ -74,6 +74,7 @@ export class SpectrumPlot extends Base {
     const main = { ...F, h: F.h - resH - (resH ? 6 : 0) };
     let lo = Infinity, hi = -Infinity;
     for (let i = 0; i < wn.length; i++) if (inX(i)) { lo = Math.min(lo, d.raw[i]); hi = Math.max(hi, d.raw[i]); }
+    if (d.raw0) for (let i = 0; i < wn.length; i++) if (inX(i)) { lo = Math.min(lo, d.raw0[i]); hi = Math.max(hi, d.raw0[i]); }
     if (d.fit) for (let i = 0; i < wn.length; i++) if (inX(i)) hi = Math.max(hi, d.fit.total[i]);
     const pad = (hi - lo) * 0.08 || 1; const yr = [Math.min(0, lo - pad), hi + pad];
     const { X, Y } = this.axes(main, xr, yr, { yl: "Intensity (counts)" });
@@ -102,6 +103,7 @@ export class SpectrumPlot extends Base {
       });
       line(d.fit.baseline, "#8fa8cc", 1, [4, 3]);
     }
+    if (d.raw0) line(d.raw0, "rgba(150,170,205,.35)", 1);   // the raw spectrum behind its smoothed version
     line(d.raw, "rgba(230,236,255,.85)", 1);
     if (d.fit) line(d.fit.total, "#ff3b4e", 1.8);
     // peak labels at fitted centres, rotated like LabSpec

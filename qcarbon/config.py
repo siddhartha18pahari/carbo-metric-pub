@@ -73,6 +73,9 @@ class Config:
     ])
     skip_fitting: bool = False       # True: shapes held at their starting values
     auto_shapes: bool = True         # shapes from the mean spectrum; hold those one pixel cannot determine
+    smooth_window: int = 0           # Savitzky-Golay along Raman shift before the fit; 0 = off, else odd
+    smooth_order: int = 2
+    spatial_kernel: int = 0          # Gaussian average of neighbouring spectra: 0 = off, 3, 5 or 7
     ratio_num: str = "D3"
     ratio_den: str = "G"
     max_iter: int = 60
@@ -82,6 +85,11 @@ class Config:
             raise ValueError("spectral range: high must exceed low")
         if not -1 <= self.baseline_order <= 6:
             raise ValueError("baseline order must be between -1 (none) and 6")
+        if self.smooth_window and (self.smooth_window < 3 or self.smooth_window % 2 == 0
+                                   or not 0 <= self.smooth_order < self.smooth_window):
+            raise ValueError("smoothing window must be odd, at least 3, and larger than the order")
+        if self.spatial_kernel not in (0, 3, 5, 7):
+            raise ValueError("spatial averaging must be off, 3, 5 or 7 pixels")
         names = [p.name for p in self.peaks]
         if len(set(names)) != len(names):
             raise ValueError("peak names must be unique")
@@ -114,7 +122,8 @@ class Config:
             "fit_separately": str(self.fit_separately),
             "range_lo": str(self.range_lo), "range_hi": str(self.range_hi),
             "skip_fitting": str(self.skip_fitting), "auto_shapes": str(self.auto_shapes),
-            "max_iter": str(self.max_iter),
+            "smooth_window": str(self.smooth_window), "smooth_order": str(self.smooth_order),
+            "spatial_kernel": str(self.spatial_kernel), "max_iter": str(self.max_iter),
             "ratio": f"{self.ratio_num}/{self.ratio_den}",
         }
         for key in ("intensity", "ratio_i", "ratio_a"):
@@ -156,6 +165,8 @@ class Config:
             intensity=rng("intensity", base.intensity), ratio_i=rng("ratio_i", base.ratio_i),
             ratio_a=rng("ratio_a", base.ratio_a), peaks=peaks or base.peaks,
             skip_fitting=pr.getboolean("skip_fitting", False),
-            auto_shapes=pr.getboolean("auto_shapes", True), max_iter=pr.getint("max_iter", 60),
+            auto_shapes=pr.getboolean("auto_shapes", True),
+            smooth_window=pr.getint("smooth_window", 0), smooth_order=pr.getint("smooth_order", 2),
+            spatial_kernel=pr.getint("spatial_kernel", 0), max_iter=pr.getint("max_iter", 60),
             ratio_num=num.strip(), ratio_den=den.strip(),
         ).check()

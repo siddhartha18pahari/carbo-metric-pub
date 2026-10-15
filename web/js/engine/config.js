@@ -16,7 +16,8 @@ export const DEFAULT_CONFIG = {
     { name: "D3", pos: 1500, pos_min: 1490, pos_max: 1510, width: 100, width_min: 40, width_max: 200, shape: "Gauss", fit: true },
     { name: "D4", pos: 1200, pos_min: 1190, pos_max: 1210, width: 50, width_min: 20, width_max: 120, shape: "Lorentz", fit: true },
   ],
-  skip_fitting: false, auto_shapes: true, ratio_num: "D3", ratio_den: "G", max_iter: 60,
+  skip_fitting: false, auto_shapes: true, smooth_window: 0, smooth_order: 2, spatial_kernel: 0,
+  ratio_num: "D3", ratio_den: "G", max_iter: 60,
 };
 
 const py = v => (typeof v === "boolean" ? (v ? "True" : "False") : String(v));
@@ -27,7 +28,8 @@ export function toIni(cfg) {
   sec("processing", {
     baseline_order: cfg.baseline_order, fit_separately: cfg.fit_separately,
     range_lo: cfg.range_lo, range_hi: cfg.range_hi, skip_fitting: cfg.skip_fitting,
-    auto_shapes: cfg.auto_shapes !== false, max_iter: cfg.max_iter, ratio: `${cfg.ratio_num}/${cfg.ratio_den}`,
+    auto_shapes: cfg.auto_shapes !== false, smooth_window: cfg.smooth_window || 0, smooth_order: cfg.smooth_order ?? 2,
+    spatial_kernel: cfg.spatial_kernel || 0, max_iter: cfg.max_iter, ratio: `${cfg.ratio_num}/${cfg.ratio_den}`,
   });
   for (const key of ["intensity", "ratio_i", "ratio_a"]) sec(`constraint.${key}`, cfg[key]);
   cfg.peaks.forEach((p, i) => sec(`peak.${i + 1}`, p));
@@ -67,6 +69,7 @@ export function fromIni(text) {
     intensity: rng("intensity"), ratio_i: rng("ratio_i"), ratio_a: rng("ratio_a"),
     peaks: peaks.length ? peaks : base.peaks,
     skip_fitting: bool(pr.skip_fitting, false), auto_shapes: bool(pr.auto_shapes, true),
+    smooth_window: num(pr.smooth_window, 0), smooth_order: num(pr.smooth_order, 2), spatial_kernel: num(pr.spatial_kernel, 0),
     ratio_num: num_.trim(), ratio_den: den_.trim(), max_iter: num(pr.max_iter, 60),
   });
 }

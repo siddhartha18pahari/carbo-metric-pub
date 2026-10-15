@@ -49,6 +49,11 @@ The default configuration is a typical five-band carbon model: poly order 2 base
 ## Added
 
 - **Shapes from the mean spectrum** (Processing, on by default). See *D3* below.
+- **Smoothing, as options** (all off by default, so the fit sees the raw spectra as in Q-Carbon):
+  - *Smoothing (spectra)* in Processing: Savitzky–Golay along the Raman shift (5–21 points, order 2–4) before the fit. Spectra look cleaner; fitted values change little, and a wide window broadens narrow bands such as G.
+  - *Spatial averaging* in Processing: each spectrum averaged with its 3 × 3, 5 × 5 or 7 × 7 neighbours (Gaussian weights) before the fit. Weak-band maps such as D3 get much cleaner (3 × 3 cuts per-pixel noise about 2×), at the cost of resolution. Neighbouring points then share data, so per-point statistics overstate the number of independent points.
+  - *Filter* in each map's ⚙ menu: Gaussian or median, 3 × 3 or 5 × 5, over valid neighbours. Display and PNG only; statistics, histograms and data exports keep the raw per-pixel values.
+  - With either pre-fit option on, the cursor spectrum shows the smoothed spectrum the fit used, over the raw one, and Std. error and χ²ᵣ describe the smoothed spectra.
 - **Registered optical image.** The map is drawn on the `.l6v` white-light frame at its true stage position, with an opacity slider. The crosshair follows the cursor.
 - **Linked cursor.** Hovering any map updates all four maps, the spectrum and the optical image. Click to pin a point, and use the arrow keys to step through pixels. The spectrum shows each fitted band, the baseline and the residual. Drag to zoom.
 - **Exclude substrate (Otsu).** One click sets the intensity limit so bare substrate stops counting. On one test map the D3/G intensity ratio over all points is 0.37 ± 2.09; on the 3 325 particle points it is 0.060 ± 0.035. Per-pixel ratios on bare substrate are noise divided by noise.

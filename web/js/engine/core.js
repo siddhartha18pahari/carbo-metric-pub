@@ -297,6 +297,75 @@ export function lmBatch(job, Y, TH, iters, p0 = 0, p1 = null) {
 }
 
 // --------------------------------------------------------------------------
+// optional smoothing before the fit (as fitter.smooth_spectra)
+// --------------------------------------------------------------------------
+// (w, w) projection onto polynomials of `order` on offsets -h..h: row h is the
+// Savitzky-Golay filter, the other rows evaluate an end-window fit
+function sgHat(w, order) {
+  const h = (w - 1) / 2, q = order + 1, A = new Float64Array(w * q);
+  for (let i = 0; i < w; i++) for (let k = 0; k < q; k++) A[i * q + k] = (i - h) ** k;
+  const pA = pinv(A, w, q), H = new Float64Array(w * w);
+  for (let i = 0; i < w; i++) for (let j = 0; j < w; j++) {
+    let s = 0;
+    for (let k = 0; k < q; k++) s += A[i * q + k] * pA[k * w + j];
+    H[i * w + j] = s;
+  }
+  return H;
+}
+
+// cube (ny * nx * K, row-major) -> the spectra the fit sees, Float64Array
+export function smoothSpectra(cube, ny, nx, K, cfg) {
+  const P = ny * nx;
+  let Y = Float64Array.from(cube);
+  const w = cfg.smooth_window || 0;
+  if (w && K >= w) {
+    const H = sgHat(w, cfg.smooth_order ?? 2), h = (w - 1) / 2, out = new Float64Array(Y.length);
+    for (let p = 0; p < P; p++) {
+      const o = p * K;
+      for (let n = h; n < K - h; n++) {
+        let s = 0;
+        for (let i = 0; i < w; i++) s += H[h * w + i] * Y[o + n - h + i];
+        out[o + n] = s;
+      }
+      for (let n = 0; n < h; n++) {
+        let a = 0, b = 0;
+        for (let i = 0; i < w; i++) { a += H[n * w + i] * Y[o + i]; b += H[(h + 1 + n) * w + i] * Y[o + K - w + i]; }
+        out[o + n] = a; out[o + K - h + n] = b;
+      }
+    }
+    Y = out;
+  }
+  const k = cfg.spatial_kernel || 0;
+  if (k) {
+    const r = (k - 1) / 2, g = Array.from({ length: k }, (_, i) => Math.exp(-0.5 * ((i - r) / (k / 4)) ** 2));
+    // normalised 1-D Gaussian along Y (down the rows), then along X: the
+    // product kernel, renormalised wherever it hangs over the map edge
+    let out = new Float64Array(Y.length);
+    for (let i = 0; i < ny; i++) {
+      let den = 0;
+      for (let d = -r; d <= r; d++) if (i + d >= 0 && i + d < ny) den += g[d + r];
+      for (let j = 0; j < nx; j++) for (let c = 0; c < K; c++) {
+        let s = 0;
+        for (let d = -r; d <= r; d++) if (i + d >= 0 && i + d < ny) s += g[d + r] * Y[((i + d) * nx + j) * K + c];
+        out[(i * nx + j) * K + c] = s / den;
+      }
+    }
+    Y = out; out = new Float64Array(Y.length);
+    for (let j = 0; j < nx; j++) {
+      let den = 0;
+      for (let d = -r; d <= r; d++) if (j + d >= 0 && j + d < nx) den += g[d + r];
+      for (let i = 0; i < ny; i++) for (let c = 0; c < K; c++) {
+        let s = 0;
+        for (let d = -r; d <= r; d++) if (j + d >= 0 && j + d < nx) s += g[d + r] * Y[(i * nx + j + d) * K + c];
+        out[(i * nx + j) * K + c] = s / den;
+      }
+    }
+    Y = out;
+  }
+  return Y;
+}
+
+// --------------------------------------------------------------------------
 // the fit, split into prepare (starting point) and finish (areas, errors)
 // --------------------------------------------------------------------------
 export function otsu(v) {
@@ -334,6 +403,9 @@ export function checkConfig(cfg) {
     if (!(0 < p.width_min && p.width_min <= p.width && p.width <= p.width_max)) throw new Error(`peak ${p.name}: width ${p.width} outside [${p.width_min}, ${p.width_max}]`);
   }
   for (const r of [cfg.ratio_num, cfg.ratio_den]) if (!names.includes(r)) throw new Error(`ratio peak '${r}' is not in the peak table`);
+  const w = cfg.smooth_window || 0, o = cfg.smooth_order ?? 2;
+  if (w && (w < 3 || w % 2 === 0 || !(o >= 0 && o < w))) throw new Error("smoothing window must be odd, at least 3, and larger than the order");
+  if (![0, 3, 5, 7].includes(cfg.spatial_kernel || 0)) throw new Error("spatial averaging must be off, 3, 5 or 7 pixels");
   return cfg;
 }
 

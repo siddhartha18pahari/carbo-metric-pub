@@ -91,6 +91,14 @@
             </select></div>
           <div class="frow"><label></label><label class="chk"><input type="checkbox" id="cfg-separate"> Fit separately</label></div>
           <div class="frow"><label></label><label class="chk" title="Fit the mean spectrum of the carbon pixels first and start every pixel from its band shapes. A band whose position or width one pixel cannot determine (at this map's noise) keeps the mean shape; only its intensity is fitted per pixel."><input type="checkbox" id="cfg-auto"> Shapes from mean spectrum</label></div>
+          <div class="frow"><label>Smoothing (spectra)</label>
+            <div class="row2"><select id="cfg-sgw" title="Savitzky–Golay smoothing along the Raman shift, before the fit. Off fits the raw spectra, as Q-Carbon does. A wide window broadens narrow bands such as G.">
+              <option value="0">Off</option><option value="5">SG 5 points</option><option value="7">SG 7 points</option><option value="9">SG 9 points</option><option value="11">SG 11 points</option><option value="15">SG 15 points</option><option value="21">SG 21 points</option>
+            </select><select id="cfg-sgo" title="Polynomial order of the Savitzky–Golay filter"><option value="2">order 2</option><option value="3">order 3</option><option value="4">order 4</option></select></div></div>
+          <div class="frow"><label>Spatial averaging</label>
+            <select id="cfg-spatial" title="Average each spectrum with its neighbours (Gaussian weights) before the fit. Less noise and cleaner weak-band maps, at the cost of resolution; neighbouring points then share data, so per-point statistics overstate the number of independent points.">
+              <option value="0">Off</option><option value="3">3 × 3 neighbours</option><option value="5">5 × 5 neighbours</option><option value="7">7 × 7 neighbours</option>
+            </select></div>
           <div class="frow"><label>Spectral range (cm⁻¹)</label>
             <div class="row2"><input type="number" id="cfg-lo" step="any"><input type="number" id="cfg-hi" step="any"></div></div>
         </div>

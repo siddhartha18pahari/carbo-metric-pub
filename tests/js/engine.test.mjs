@@ -116,3 +116,18 @@ test("spectra are not mistaken for result tables", () => {
   assert.ok(!isResultsTable("\t\t1000\t1004\t1008\n0\t0\t1\t2\t3"));
   assert.ok(!isResultsTable("Raman shift (cm-1),Intensity\n1000,5"));
 });
+
+// ---------------------------------------------------------------- smoothing
+import { smoothSpectra } from "../../web/js/engine/core.js";
+
+test("Savitzky-Golay keeps polynomials up to its order, edges included", () => {
+  const K = 60, cube = Float64Array.from({ length: K }, (_, k) => 3 + 0.5 * k - 0.02 * k * k + 1e-4 * k ** 3);
+  const out = smoothSpectra(cube, 1, 1, K, { smooth_window: 9, smooth_order: 3, spatial_kernel: 0 });
+  for (let k = 0; k < K; k++) close(out[k], cube[k], 1e-8);
+});
+
+test("spatial averaging keeps a flat map flat at the edges", () => {
+  const ny = 5, nx = 7, K = 3, cube = new Float32Array(ny * nx * K).fill(4.5);
+  const out = smoothSpectra(cube, ny, nx, K, { smooth_window: 0, spatial_kernel: 5 });
+  for (const v of out) close(v, 4.5, 1e-12);
+});

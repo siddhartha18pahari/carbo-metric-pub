@@ -248,6 +248,57 @@ class FitResult:
 
 
 # --------------------------------------------------------------------------
+# optional smoothing before the fit
+# --------------------------------------------------------------------------
+def _sg_hat(window: int, order: int) -> np.ndarray:
+    """(window, window) projection onto polynomials of ``order``: row h is the
+    Savitzky-Golay smoothing filter, the rows either side evaluate the
+    polynomial fitted to an end window (scipy's mode='interp')."""
+    h = window // 2
+    A = np.vander(np.arange(-h, h + 1, dtype=float), order + 1, increasing=True)
+    return A @ np.linalg.pinv(A)
+
+
+def smooth_spectra(cube: np.ndarray, cfg: Config) -> np.ndarray:
+    """The spectra the fit sees, as float64 (ny, nx, K).
+
+    ``cfg.smooth_window`` > 0: Savitzky-Golay along Raman shift (window and
+    ``smooth_order``). ``cfg.spatial_kernel`` 3/5/7: each spectrum averaged with
+    its neighbours, Gaussian weights with sigma = kernel / 4, renormalised at the
+    map edges. Both are off by default (Q-Carbon fits the raw spectra). Spatial
+    averaging trades resolution for noise, and neighbouring pixels then share
+    data, so per-pixel statistics overstate the number of independent points.
+    """
+    Y = np.asarray(cube, float)
+    w, K = cfg.smooth_window, Y.shape[-1]
+    if w and K >= w:
+        H, h = _sg_hat(w, cfg.smooth_order), w // 2
+        out = np.empty_like(Y)
+        out[..., h:K - h] = np.lib.stride_tricks.sliding_window_view(Y, w, axis=-1) @ H[h]
+        out[..., :h] = Y[..., :w] @ H[:h].T
+        out[..., K - h:] = Y[..., K - w:] @ H[h + 1:].T
+        Y = out
+    k = cfg.spatial_kernel
+    if k:
+        r = k // 2
+        g = np.exp(-0.5 * (np.arange(-r, r + 1) / (k / 4.0)) ** 2)
+        for axis in (0, 1):
+            n = Y.shape[axis]
+            num, den = np.zeros_like(Y), np.zeros(n)
+            for d, wgt in zip(range(-r, r + 1), g):
+                t0, t1 = max(0, -d), min(n, n - d)
+                if t1 <= t0:
+                    continue
+                tgt = [slice(None)] * Y.ndim; src = [slice(None)] * Y.ndim
+                tgt[axis], src[axis] = slice(t0, t1), slice(t0 + d, t1 + d)
+                num[tuple(tgt)] += wgt * Y[tuple(src)]
+                den[t0:t1] += wgt
+            shape = [1] * Y.ndim; shape[axis] = n
+            Y = num / den.reshape(shape)
+    return Y
+
+
+# --------------------------------------------------------------------------
 # shapes from the mean spectrum
 # --------------------------------------------------------------------------
 def _otsu(v, n_bins=128):

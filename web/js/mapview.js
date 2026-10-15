@@ -1,5 +1,5 @@
 // A Raman map panel: isotropic um axes, colour bar, scale bar, hover read-out,
-// linked crosshair, optional smoothing (display only) and overlays.
+// linked crosshair, optional map filter and interpolation (display only) and overlays.
 // Stage convention as on the instrument: X to the right, Y increasing DOWN.
 
 import { cssGradient, lut, COLORMAPS } from "./colormaps.js";
@@ -23,6 +23,8 @@ export class MapView {
     this.vmin = 0; this.vmax = 1;
     this.manual = [null, null];
     this.smooth = false;
+    this.filter = "none";            // display filter: none, gauss3, gauss5, median3, median5
+    this._shownCache = null;
     this.cursor = null; this.pinned = null;
     this.values = null; this.valid = null;
     this.overlays = [];
@@ -65,13 +67,39 @@ export class MapView {
   setData(values, { valid = null, label = "", unit = "", fixedRange = null } = {}) {
     this.values = values; this.valid = valid; this.label = label; this.unit = unit;
     this.fixedRange = fixedRange;
+    this._shownCache = null;
     this._range();
     this._dirty = true;
     this.render();
   }
 
+  // the values drawn: the map itself, or filtered over valid neighbours
+  shown() {
+    const v = this.values;
+    if (!v || this.filter === "none") return v;
+    if (this._shownCache && this._shownCache.f === this.filter) return this._shownCache.v;
+    const { nx, ny, valid } = this, k = +this.filter.slice(-1), r = (k - 1) / 2, med = this.filter.startsWith("median");
+    const g = Array.from({ length: k }, (_, i) => Math.exp(-0.5 * ((i - r) / (k / 4)) ** 2));
+    const ok = p => (!valid || valid[p]) && Number.isFinite(v[p]);
+    const out = new Float32Array(v.length).fill(NaN), buf = [];
+    for (let i = 0; i < ny; i++) for (let j = 0; j < nx; j++) {
+      const p = i * nx + j;
+      if (!ok(p)) continue;
+      let s = 0, w = 0; buf.length = 0;
+      for (let di = -r; di <= r; di++) for (let dj = -r; dj <= r; dj++) {
+        const a = i + di, b = j + dj, q = a * nx + b;
+        if (a < 0 || a >= ny || b < 0 || b >= nx || !ok(q)) continue;
+        if (med) buf.push(v[q]); else { const wt = g[di + r] * g[dj + r]; s += wt * v[q]; w += wt; }
+      }
+      if (med) { buf.sort((x, y) => x - y); const m = buf.length; out[p] = m % 2 ? buf[(m - 1) / 2] : 0.5 * (buf[m / 2 - 1] + buf[m / 2]); }
+      else out[p] = s / w;
+    }
+    this._shownCache = { f: this.filter, v: out };
+    return out;
+  }
+
   _range() {
-    const v = this.values; if (!v) return;
+    const v = this.shown(); if (!v) return;
     if (this.scale === "manual" && this.manual[0] != null) { [this.vmin, this.vmax] = this.manual; return; }
     if (this.fixedRange && this.scale !== "full") { [this.vmin, this.vmax] = this.fixedRange; return; }
     const a = [];
@@ -84,7 +112,7 @@ export class MapView {
   }
 
   _paintImage() {
-    const { nx, ny, values: v, valid } = this;
+    const { nx, ny, valid } = this, v = this.shown();
     const g = this.off.getContext("2d");
     const img = g.createImageData(nx, ny);
     const L = lut(this.cmap), span = this.vmax - this.vmin;
@@ -218,7 +246,8 @@ export class MapView {
     const [xu, yu] = this.idxXY(p);
     const v = this.values ? this.values[p] : NaN;
     const bad = this.valid && !this.valid[p];
-    this.readout.textContent = `${fmt(xu, 3)}, ${fmt(yu, 3)} µm  →  ${bad ? "invalid" : fmt(v)}`;
+    const filt = this.filter !== "none" && this.values ? ` (filtered ${fmt(this.shown()[p])})` : "";
+    this.readout.textContent = `${fmt(xu, 3)}, ${fmt(yu, 3)} µm  →  ${bad ? "invalid" : fmt(v) + filt}`;
     this.opts.onHover && this.opts.onHover(p);
   }
 
@@ -242,10 +271,15 @@ export class MapView {
     };
     mode.onchange = apply; lo.onchange = () => { mode.value = "manual"; apply(); }; hi.onchange = lo.onchange;
     const smooth = el("input", { type: "checkbox", checked: this.smooth, onchange: () => { this.smooth = smooth.checked; this.render(); } });
+    const filter = el("select", { title: "Filter the map over its valid neighbours. Display and PNG only: statistics, histograms and exports use the raw pixels." },
+      ...[["none", "None"], ["gauss3", "Gaussian 3 × 3"], ["gauss5", "Gaussian 5 × 5"], ["median3", "Median 3 × 3"], ["median5", "Median 5 × 5"]]
+        .map(([v, t]) => el("option", { value: v, selected: v === this.filter }, t)));
+    filter.onchange = () => { this.filter = filter.value; this._range(); this._dirty = true; this.render(); this.opts.onChange && this.opts.onChange(this); };
     const pop = el("div", { class: "popover", onclick: ev => ev.stopPropagation() },
       el("div", { class: "pop-h" }, "Colour map"), sel,
       el("div", { class: "pop-h" }, "Scale"), mode, el("div", { class: "row2" }, lo, hi),
-      el("label", { class: "chk" }, smooth, " Smooth display ", el("span", { class: "muted" }, "(display only, stats use raw pixels)")));
+      el("div", { class: "pop-h" }, "Filter ", el("span", { class: "muted" }, "(display only, stats use raw pixels)")), filter,
+      el("label", { class: "chk" }, smooth, " Interpolate pixels ", el("span", { class: "muted" }, "(display only)")));
     document.body.append(pop);
     const r = e.currentTarget.getBoundingClientRect();
     pop.style.left = Math.min(window.innerWidth - 250, r.left - 200) + "px";
