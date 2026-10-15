@@ -257,6 +257,102 @@ export function readText(text, name) {
   throw new Error(`${name}: not a layout this reader knows. Expected ${TEXT_LAYOUTS}.`);
 }
 
+// --------------------------------------------------------------------------
+// fitted-result tables: Q-Carbon's "Export data" (.txt, one row per point,
+// "<band> Intensity / Width / Area" columns, no coordinates) and this app's own
+// full CSV export (with X, Y and every band)
+// --------------------------------------------------------------------------
+const QCOL = /^(.*?)\s+(intensity|width|area|position)$/i;
+
+function headerTokens(text) {
+  const first = text.replace(/^﻿/, "").split(/\r?\n/).find(l => l.trim()) || "";
+  const sep = first.includes("\t") ? "\t" : first.includes(";") ? ";" : ",";
+  return { sep, toks: first.split(sep).map(t => t.trim()) };
+}
+
+export function isResultsTable(text) {
+  const { toks } = headerTokens(text);
+  return toks.some(t => { const m = t.match(QCOL); return m && m[2].toLowerCase() === "intensity" && !/^ratio\b/i.test(m[1]); })
+    && toks.every(t => t === "" || Number.isNaN(Number(t)));
+}
+
+export function readResultsTable(text, name) {
+  const { sep, toks } = headerTokens(text);
+  const bands = [], cols = {}, idx = {};
+  let xi = -1, yi = -1, ratio = null;
+  toks.forEach((t, i) => {
+    const m = t.match(QCOL);
+    if (m && !/^ratio\b/i.test(m[1])) {
+      const b = m[1].trim(), q = m[2].toLowerCase();
+      if (!idx[b]) { idx[b] = {}; bands.push(b); }
+      idx[b][q] = i;
+    } else if (/^x\b/i.test(t)) xi = i;
+    else if (/^y\b/i.test(t)) yi = i;
+    const r = t.match(/^ratio\s+\w+\s+(.+)\/(.+)$/i);
+    if (r) ratio = [r[1].trim(), r[2].trim()];
+  });
+  const usable = bands.filter(b => idx[b].intensity !== undefined);
+  if (!usable.length) throw new Error(`${name}: no "<band> Intensity" columns`);
+  const rows = text.replace(/^﻿/, "").split(/\r?\n/).filter(l => l.trim()).slice(1)
+    .map(l => l.split(sep).map(t => (t.trim() === "" ? NaN : Number(sep === ";" ? t.replace(",", ".") : t))));
+  const n = rows.length;
+  if (!n) throw new Error(`${name}: no data rows`);
+  const col = i => Float64Array.from(rows, r => (i >= 0 && i < r.length ? r[i] : NaN));
+  for (const b of usable) cols[b] = Object.fromEntries(["intensity", "width", "area", "position"].map(q => [q, col(idx[b][q] ?? -1)]));
+  if (!ratio || !usable.includes(ratio[0]) || !usable.includes(ratio[1])) ratio = usable.length > 1 ? [usable[0], usable[1]] : [usable[0], usable[0]];
+  return { name: stem(name), n, bands: usable, cols, ratio,
+           x: xi >= 0 && yi >= 0 ? col(xi) : null, y: xi >= 0 && yi >= 0 ? col(yi) : null };
+}
+
+// The vendor export has no coordinates: candidate (rows, columns) with
+// rows x columns = n, best first. A map read at its true row length is an
+// isotropic field; at the wrong one, vertical neighbours are unrelated. Small
+// noisy maps make that test weak, so long thin shapes are mildly penalised
+// (weight 0.3 on |log aspect|): on 34 exports with a same-size .l6m on disk the
+// first choice was right 33 times and the true grid always in the top 3.
+export function inferGrid(n, v) {
+  const out = [];
+  for (let nx = 2; nx <= n / 2; nx++) {
+    if (n % nx) continue;
+    const ny = n / nx;
+    let dv = 0, dh = 0;
+    for (let i = 0; i < ny - 1; i++) for (let j = 0; j < nx; j++) dv += Math.abs(v[(i + 1) * nx + j] - v[i * nx + j]);
+    for (let i = 0; i < ny; i++) for (let j = 0; j < nx - 1; j++) dh += Math.abs(v[i * nx + j + 1] - v[i * nx + j]);
+    dv /= (ny - 1) * nx; dh /= ny * (nx - 1);
+    const iso = dh > 0 && dv > 0 ? Math.abs(Math.log(dv / dh)) : Infinity;
+    out.push({ ny, nx, score: iso + 0.3 * Math.abs(Math.log(ny / nx)) });
+  }
+  const wide = out.filter(g => Math.min(g.nx, g.ny) >= 3);
+  const ranked = (wide.length ? wide : out).sort((a, b) => a.score - b.score);
+  return ranked.length ? ranked : [{ ny: 1, nx: n, score: 0 }];
+}
+
+// lay a table out on its grid: from its own X / Y columns when it has them
+export function placeResults(t, grid) {
+  let order = null, x, y, nx, ny;
+  if (t.x) {
+    const r4 = v => Math.round(v * 1e4) / 1e4;
+    const ux = [...new Set(Array.from(t.x, r4))].sort((a, b) => a - b), uy = [...new Set(Array.from(t.y, r4))].sort((a, b) => a - b);
+    if (ux.length * uy.length !== t.n) throw new Error(`${t.name}: the ${t.n} points do not form a full grid`);
+    const ix = new Map(ux.map((v, i) => [v, i])), iy = new Map(uy.map((v, i) => [v, i]));
+    order = Int32Array.from({ length: t.n }, (_, p) => iy.get(r4(t.y[p])) * ux.length + ix.get(r4(t.x[p])));
+    x = Float64Array.from(ux); y = Float64Array.from(uy); nx = ux.length; ny = uy.length;
+  } else {
+    ({ nx, ny } = grid);
+    x = grid.x || Float64Array.from({ length: nx }, (_, i) => i);
+    y = grid.y || Float64Array.from({ length: ny }, (_, i) => i);
+  }
+  const m = t.bands.length, P = t.n;
+  const fit = { intensity: new Float64Array(P * m), width: new Float64Array(P * m), area: new Float64Array(P * m), position: new Float64Array(P * m) };
+  t.bands.forEach((b, j) => {
+    for (const q of Object.keys(fit)) {
+      const src = t.cols[b][q];
+      for (let p = 0; p < P; p++) fit[q][(order ? order[p] : p) * m + j] = src[p];
+    }
+  });
+  return { nx, ny, x, y, fit };
+}
+
 export function readMap(buf, name) {
   const ext = (name.match(/\.[^.]+$/) || [""])[0].toLowerCase();
   if (ext === ".l6m") return readL6m(buf, name);

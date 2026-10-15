@@ -68,7 +68,7 @@ function counts(cube) {
   return [min, s[Math.min(s.length - 1, Math.floor(0.999 * (s.length - 1)))]];
 }
 
-async function videoUrl(v) {
+export async function videoUrl(v) {
   const c = document.createElement("canvas");
   c.width = v.w; c.height = v.h;
   const img = c.getContext("2d").createImageData(v.w, v.h);
@@ -171,7 +171,7 @@ export function g6(v) {
   return strip(v.toFixed(5 - e));
 }
 
-function exportText(ds, body) {
+export function exportText(ds, body) {
   const cfg = { ...ds.fitCfg };
   for (const k of ["ratio_num", "ratio_den", "intensity", "ratio_i", "ratio_a"]) if (k in body) cfg[k] = body[k];
   const fit = ds.fit, m = ds.map, { n, d, r, valid } = derived(fit, cfg), P = valid.length;

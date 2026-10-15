@@ -61,7 +61,7 @@
       <div class="welcome" id="welcome">
         <div class="hero">
           <h1>Carbon Raman maps, fitted pixel by pixel.</h1>
-          <p>Open a LabSpec&nbsp;6 map (<code>.l6m</code>) or a text export from any instrument (<code>.txt</code>, <code>.csv</code>: a LabSpec matrix, an x&nbsp;/&nbsp;y&nbsp;/&nbsp;shift&nbsp;/&nbsp;intensity table, or a single spectrum). Carbo Metrics fits every spectrum with an editable five-band carbon model, maps D, G and their ratio, shows the white-light image underneath when there is one, and can turn the whole hyperspectral cube into a 3-D Gaussian splat field.</p>
+          <p>Open a LabSpec&nbsp;6 map (<code>.l6m</code>) or a text export from any instrument (<code>.txt</code>, <code>.csv</code>: a LabSpec matrix, an x&nbsp;/&nbsp;y&nbsp;/&nbsp;shift&nbsp;/&nbsp;intensity table, or a single spectrum). Q-Carbon's own result exports open too, as maps and statistics of their fitted values. Carbo Metrics fits every spectrum with an editable five-band carbon model, maps D, G and their ratio, shows the white-light image underneath when there is one, and can turn the whole hyperspectral cube into a 3-D Gaussian splat field.</p>
           <div class="hero-actions">
             <button class="primary" id="hero-file">Open file…</button>
             <button id="hero-open">Open from library</button>
@@ -77,6 +77,8 @@
       <div class="sec">
         <div class="sec-h">Spectral data <span class="muted small" id="spec-name"></span></div>
         <div class="plot density" id="plot-density"></div>
+        <div class="frow hidden" id="grid-row"><label>Grid (columns × rows)</label><select id="grid-select"></select></div>
+        <div class="muted small" id="results-note"></div>
       </div>
 
       <div class="sec" data-sec="processing">
@@ -240,7 +242,7 @@
     <div class="lib-foot muted small">Folders come from <code>data_roots.txt</code>; text files you open are kept under <code>uploads</code> and listed here. Files are only read, never changed. You can also drop a <code>.l6m</code> (plus its <code>.l6v</code> white-light image) or a text export onto the window.</div>
   </div>
 </div>
-<div id="drop" class="drop hidden"><div>Drop a map or spectrum<br><span>.l6m (+ .l6v white-light image) · .txt · .csv</span></div></div>
+<div id="drop" class="drop hidden"><div>Drop a map, spectrum or result table<br><span>.l6m (+ .l6v white-light image) · .txt · .csv</span></div></div>
 <input type="file" id="file-input" multiple accept=".l6m,.l6v,.txt,.csv,.tsv,.dat" hidden>
 <div id="toasts"></div>
 <script type="module" src="/static/js/app.js"></script>

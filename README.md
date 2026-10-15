@@ -11,6 +11,7 @@ Per-pixel D and G band fitting of Raman maps of carbons, with maps of every band
   - a LabSpec matrix export (first row = Raman shift, then one row per point);
   - an x / y / shift / intensity table (e.g. Renishaw WiRE);
   - a two-column spectrum (shift, intensity), shown as a single point.
+- Fitted-result tables: Q-Carbon's own *Export data* `.txt` (per point: D/G intensity, width, area and ratios) and this app's *Export all (CSV)*. They hold fitted values and no spectra, so they open as maps, histograms, statistics, particles and a report, with nothing to refit. Q-Carbon's export has no coordinates: open it together with its `.l6m` (and `.l6v`) to use the real grid and white-light image. Opened alone, its grid is inferred from the point count, choosing the most isotropic map with a mild preference for square shapes. On 34 exports with a same-size `.l6m` on disk the first choice was right 33 times. The Spectral data panel lets you pick another grid.
 
 Point lists that do not form a full grid (e.g. ParticleFinder) and older 32-bit LabSpec files are refused with a message rather than guessed at.
 
@@ -108,7 +109,8 @@ qcarbon/splat.py        spectral Gaussian splatting (wraps ramansp)
 qcarbon/library.py      folder scan with cache (.cache/)
 qcarbon/server.py       FastAPI app
 web/                    the interface (plain JS modules, canvas + WebGL2, no build step)
-web/js/engine/          the same readers and fitter in JavaScript, for the browser-only build
+web/js/engine/          the same readers and fitter in JavaScript, for the browser-only build;
+                        results-file.js opens fitted-result tables (both builds)
 tools/serve_web.py      serve web/ as Vercel does, to test the browser build locally
 tests/                  pytest suite; tests/js: Node tests of the browser engine
 vercel.json             static deployment of web/

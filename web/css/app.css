@@ -428,3 +428,8 @@ table.stats .sub { color: var(--dim); }
 .browser-note { display: none; margin-top: 10px; }
 .browser-only .browser-note { display: block; }
 .browser-only #hero-open, .browser-only #recent { display: none; }
+
+/* a fitted-result table: nothing to refit */
+.results-only [data-sec="processing"], .results-only [data-sec="peaks"] { opacity: .45; pointer-events: none; }
+#results-note { margin-top: 6px; line-height: 1.4; }
+#results-note:empty { display: none; }

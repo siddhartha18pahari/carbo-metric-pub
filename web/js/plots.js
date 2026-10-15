@@ -66,7 +66,7 @@ export class SpectrumPlot extends Base {
     const F = this.frame({ l: 50, r: 12, t: 12, b: 34 }); if (!F) return;
     this.F = F;
     const d = this.d, { ctx } = F;
-    if (!d) { ctx.fillStyle = "#6f8ab3"; ctx.font = "12px var(--sans)"; ctx.textAlign = "center"; ctx.fillText("Hover or click a map to see its spectrum", F.x + F.w / 2, F.y + F.h / 2); return; }
+    if (!d) { ctx.fillStyle = "#6f8ab3"; ctx.font = "12px var(--sans)"; ctx.textAlign = "center"; ctx.fillText(this.emptyText || "Hover or click a map to see its spectrum", F.x + F.w / 2, F.y + F.h / 2); return; }
     const wn = d.wn, full = [wn[0], wn[wn.length - 1]];
     const xr = this.view || full; this.xr = xr;
     const inX = i => wn[i] >= xr[0] && wn[i] <= xr[1];

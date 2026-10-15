@@ -55,13 +55,14 @@ function recomputeDerived() {
   const v = new Uint8Array(P());
   for (let p = 0; p < v.length; p++) {
     v[p] = admits(c.intensity, Math.max(In[p], Id[p])) && admits(c.ratio_i, S.ratio.intensity[p])
-      && admits(c.ratio_a, S.ratio.area[p]) && Number.isFinite(f.std_error[p]) ? 1 : 0;
+      && admits(c.ratio_a, S.ratio.area[p]) && (f.resultsOnly || Number.isFinite(f.std_error[p])) ? 1 : 0;
   }
   S.valid = v;
   return true;
 }
 
 function meanCounts() {
+  if (!S.cube) return null;
   if (S.counts) return S.counts;
   const [lo, hi] = S.fit ? S.fit.range : [S.cfg.range_lo, S.cfg.range_hi];
   const ks = []; for (let c = 0; c < S.k; c++) if (S.wn[c] >= lo && S.wn[c] <= hi) ks.push(c);
@@ -174,6 +175,17 @@ function evalFit(p) {
 
 function renderCursor() {
   const p = S.hover ?? S.pinned;
+  cursorPlot.emptyText = S.fit && S.fit.resultsOnly ? "This file holds fitted values only: no spectra to show" : null;
+  if (p != null && !S.cube && S.fit && S.fit.resultsOnly) {
+    cursorPlot.setData(null);
+    const i = Math.floor(p / S.nx), j = p % S.nx;
+    $("#cursor-info").textContent = `· point ${p + 1} · column ${j + 1}, row ${i + 1}${S.hover != null && S.hover !== S.pinned ? "" : " · pinned"}${S.valid && !S.valid[p] ? " · not valid" : ""}`;
+    const tb = $("#cursor-table"); tb.textContent = "";
+    S.fit.names.forEach((name, j2) => tb.append(el("span", {}, el("b", { style: `color:${PEAK_COLOURS[j2 % PEAK_COLOURS.length]}` }, name),
+      ` I ${fmt(S.fit.intensity[p * S.fit.m + j2], 3)} · w ${fmt(S.fit.width[p * S.fit.m + j2], 3)} · A ${fmt(S.fit.area[p * S.fit.m + j2], 3)}`)));
+    if (S.ratio) tb.append(el("span", {}, el("b", { style: "color:#fff" }, `${S.cfg.ratio_num}/${S.cfg.ratio_den}`), ` I ${fmt(S.ratio.intensity[p], 3)} · A ${fmt(S.ratio.area[p], 3)}`));
+    return;
+  }
   if (p == null || !S.cube) { cursorPlot.setData(null); $("#cursor-table").textContent = ""; $("#cursor-info").textContent = ""; return; }
   const raw = S.cube.subarray(p * S.k, (p + 1) * S.k);
   const d = { wn: S.wn, raw, range: S.fit ? S.fit.range : [S.cfg.range_lo, S.cfg.range_hi] };
@@ -412,7 +424,8 @@ function buildRatio() {
   for (const id of ["#ratio-num", "#ratio-den"]) {
     const s = $(id), cur = id === "#ratio-num" ? S.cfg.ratio_num : S.cfg.ratio_den;
     s.textContent = "";
-    S.cfg.peaks.forEach(p => s.append(el("option", { value: p.name, selected: p.name === cur }, p.name)));
+    const names = S.fit && S.fit.resultsOnly ? S.fit.names : S.cfg.peaks.map(p => p.name);
+    names.forEach(n => s.append(el("option", { value: n, selected: n === cur }, n)));
   }
 }
 
@@ -514,6 +527,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 async function startFit() {
   if (!S.ds) return;
+  if (S.ds.resultsOnly) { setStatus("Fitted values from a file: no spectra to refit. Open the map itself to fit it.", "err"); return; }
   if (S.fitRunning) { S.pendingFit = true; return; }
   if (validate().length) return;
   S.fitRunning = true; S.pendingFit = false;
@@ -547,7 +561,7 @@ function decodeFit(r) {
     names: r.names, shapes: r.shapes, m: r.m, nb: r.nb, range: r.range, seconds: r.seconds, config: r.config,
     intensity: f32(r.intensity), position: f32(r.position), width: f32(r.width), area: f32(r.area),
     baseline: f32(r.baseline), std_error: f32(r.std_error), red_chi2: f32(r.red_chi2), n_iter: f32(r.n_iter), cols: {},
-    held: r.held || [],
+    held: r.held || [], resultsOnly: !!r.results_only,
   };
   $("#held-note").textContent = S.fit.held.length
     ? `Shape held at the mean-spectrum value (one pixel cannot determine it at this noise level): ${S.fit.held.join(", ")}. Only the intensity is fitted per pixel.`
@@ -576,6 +590,9 @@ function refreshAll() {
 // opening maps
 // =========================================================================
 async function loadDataset(info) {
+  S.results = null;
+  document.body.classList.remove("results-only");
+  $("#grid-row").classList.add("hidden"); $("#results-note").textContent = "";
   S.ds = info; S.nx = info.nx; S.ny = info.ny; S.k = info.k;
   S.wn = f32(info.wn); S.x = f32(info.x); S.y = f32(info.y);
   S.fit = null; $("#held-note").textContent = ""; S.ratio = null; S.valid = null; S.counts = null; S.seg = null; S.pinned = null; S.hover = null;
@@ -668,10 +685,58 @@ async function renderRecent() {
   } catch { /* library optional */ }
 }
 
+// fitted-result tables (Q-Carbon export, or our full CSV): no spectra, no server
+async function openResultsTable(R, r) {
+  S.results = { R, r };
+  const row = $("#grid-row"), sel = $("#grid-select");
+  sel.textContent = "";
+  if (r.choices) {
+    r.choices.slice(0, 12).forEach((g, i) => sel.append(el("option", { value: i }, `${g.nx} × ${g.ny}${i === 0 ? "  (most likely)" : ""}`)));
+    row.classList.remove("hidden");
+  } else row.classList.add("hidden");
+  await loadResults(r.grid);
+}
+async function loadResults(grid) {
+  const { R, r } = S.results;
+  const { info, fit } = R.resultsDataset(r, grid, S.cfg);
+  S.ds = info; S.nx = info.nx; S.ny = info.ny; S.k = 0;
+  S.wn = new Float32Array(0); S.x = f32(info.x); S.y = f32(info.y);
+  S.cube = null; S.fit = null; S.ratio = null; S.valid = null; S.counts = null; S.seg = null; S.pinned = null; S.hover = null;
+  S.cfg.ratio_num = fit.config.ratio_num; S.cfg.ratio_den = fit.config.ratio_den;
+  document.body.classList.add("results-only");
+  $("#held-note").textContent = "";
+  $("#results-note").textContent = r.note;
+  $("#file-name").textContent = info.name;
+  $("#spec-name").textContent = `${info.nx} × ${info.ny} · fitted values, no spectra`;
+  document.title = `${info.name} · Carbo Metrics`;
+  $("#welcome").classList.add("hidden");
+  S.video = null;
+  if (r.video) {
+    const img = new Image();
+    if (await new Promise(res => { img.onload = () => res(true); img.onerror = () => res(false); img.src = r.video.url; })) S.video = img;
+  }
+  for (const m of [...maps, pmap]) { m.setGeometry({ nx: S.nx, ny: S.ny, x: S.x, y: S.y }); m.values = null; }
+  density.setData(null);
+  setActive(S.active);
+  splatReset();
+  decodeFit(fit);
+  buildRatio();
+  setStatus(`Opened ${fmt(P())} fitted points (${S.fit.names.join(", ")})`);
+}
+$("#grid-select").onchange = e => { if (S.results) loadResults(S.results.r.choices[+e.target.value]); };
+
 // open files: drag & drop or the file picker
 async function uploadFiles(files) {
   if (!files.length) return;
   try {
+    const R = await import("./engine/results-file.js");
+    const table = await R.findResultsFile(files);
+    if (table) {
+      setStatus("Reading…", "busy");
+      await openResultsTable(R, await R.openResults(table, files));
+      $("#library").classList.add("hidden");
+      return;
+    }
     setStatus(isBrowserOnly() ? "Reading…" : "Uploading…", "busy");
     await loadDataset(await apiUpload(files));
     $("#library").classList.add("hidden");
@@ -695,7 +760,9 @@ async function exportData(format) {
   if (!S.fit) return toast("Fit a map first", "error");
   try {
     const body = { format, ratio_num: S.cfg.ratio_num, ratio_den: S.cfg.ratio_den, intensity: S.cfg.intensity, ratio_i: S.cfg.ratio_i, ratio_a: S.cfg.ratio_a };
-    const text = await api(`/api/ds/${S.ds.id}/export`, body);
+    const text = S.ds.resultsOnly
+      ? (await import("./engine/local-api.js")).exportText({ fit: S.fit, fitCfg: S.cfg, map: { x: S.x, y: S.y, nx: S.nx } }, body)
+      : await api(`/api/ds/${S.ds.id}/export`, body);
     download(`${S.ds.name} CarboMetrics ${S.cfg.ratio_num}-${S.cfg.ratio_den}.${format === "full" ? "csv" : "txt"}`, text);
   } catch (e) { toast(e.message, "error"); }
 }
@@ -830,6 +897,7 @@ function renderSlices() {
 
 async function runSplat() {
   if (!S.fit) return toast("Open and fit a map first", "error");
+  if (S.ds.resultsOnly) return toast("Splat 3D needs spectra: open the map itself, not its fitted values", "error");
   const st = splatState();
   try {
     await api(`/api/ds/${S.ds.id}/splat`, { n_gaussians: +$("#sp-n").value, iters: +$("#sp-iters").value, g_name: S.cfg.ratio_den });
@@ -1034,7 +1102,7 @@ function reportFigures() {
   });
   let host = offscreen(760, 360);
   const sp = new SpectrumPlot(host);
-  if (S.pinned != null) sp.setData({ wn: S.wn, raw: S.cube.subarray(S.pinned * S.k, (S.pinned + 1) * S.k), range: S.fit.range, fit: evalFit(S.pinned) });
+  if (S.pinned != null && S.cube) sp.setData({ wn: S.wn, raw: S.cube.subarray(S.pinned * S.k, (S.pinned + 1) * S.k), range: S.fit.range, fit: evalFit(S.pinned) });
   figs.cursor = onDark(sp.canvas); host.remove();
   host = offscreen(520, 360);
   const hp = new HistogramPlot(host); hp.setData(hist.d); figs.hist = onDark(hp.canvas); host.remove();

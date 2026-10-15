@@ -72,3 +72,47 @@ test("point lists are refused, not guessed", () => {
   const lines = ["\t\t" + wn.join("\t"), ...[[0, 0], [0, 1], [1, 0]].map(([y, x]) => [y, x, ...wn.map(() => 1)].join("\t"))];
   assert.throws(() => readText(lines.join("\n"), "p.txt"), /full/);
 });
+
+// ---------------------------------------------------------------- fitted-result tables
+import { isResultsTable, readResultsTable, inferGrid, placeResults } from "../../web/js/engine/readers.js";
+
+function smoothField(ny, nx) {
+  // a blob plus a gentle slope: isotropic, like a particle on a substrate
+  return Float64Array.from({ length: ny * nx }, (_, p) => {
+    const i = Math.floor(p / nx), j = p % nx;
+    return 100 * Math.exp(-((i - ny / 2) ** 2 + (j - nx / 3) ** 2) / 60) + 0.2 * i;
+  });
+}
+
+test("Q-Carbon export: recognised, bands and ratio read, grid inferred", () => {
+  const ny = 23, nx = 31, g = smoothField(ny, nx);
+  const lines = ["\tD1 Intensity\tD1 Width\tD1 Area\tG Intensity\tG Width\tG Area\tRatio Intensity\tRatio Width\tRatio Area\t"];
+  g.forEach((v, p) => lines.push([p + 1, v / 3, 90, v * 50, v, 20, v * 30, 1 / 3, 4.5, 1.6].join("\t")));
+  const text = lines.join("\n");
+  assert.ok(isResultsTable(text));
+  const t = readResultsTable(text, "export.txt");
+  assert.deepEqual(t.bands, ["D1", "G"]);
+  assert.deepEqual(t.ratio, ["D1", "G"]);
+  assert.equal(t.n, ny * nx);
+  const best = inferGrid(t.n, t.cols.G.intensity)[0];
+  assert.deepEqual([best.ny, best.nx], [ny, nx]);
+  const placed = placeResults(t, best);
+  close(placed.fit.intensity[(5 * nx + 7) * 2 + 1], g[5 * nx + 7], 1e-9);   // row-major, X fastest
+});
+
+test("this app's full CSV reopens on its own X / Y grid", () => {
+  const rows = ["X (um),Y (um),Valid,G Intensity,G Position,G Width,G Area,D3 Intensity,D3 Position,D3 Width,D3 Area,Ratio Intensity D3/G,Std error"];
+  for (const [x, y] of [[1, 0], [0, 0], [1, 1], [0, 1]]) rows.push([x, y, 1, 10 * y + x, 1580, 20, 300, 1, 1500, 120, 100, 0.1, 2].join(","));
+  const text = rows.join("\n");
+  assert.ok(isResultsTable(text));
+  const t = readResultsTable(text, "full.csv");
+  assert.deepEqual(t.ratio, ["D3", "G"]);
+  const placed = placeResults(t, null);
+  assert.equal(placed.nx, 2); assert.equal(placed.ny, 2);
+  assert.deepEqual(Array.from({ length: 4 }, (_, p) => placed.fit.intensity[p * 2]), [0, 1, 10, 11]);
+});
+
+test("spectra are not mistaken for result tables", () => {
+  assert.ok(!isResultsTable("\t\t1000\t1004\t1008\n0\t0\t1\t2\t3"));
+  assert.ok(!isResultsTable("Raman shift (cm-1),Intensity\n1000,5"));
+});
