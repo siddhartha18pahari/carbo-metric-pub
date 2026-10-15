@@ -1,0 +1,5 @@
+# the web app is static: only web/ and vercel.json are deployed
+/*
+!/web
+!/vercel.json
+/web/_tmp_test

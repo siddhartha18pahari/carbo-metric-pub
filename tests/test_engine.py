@@ -1,0 +1,322 @@
+"""Engine tests. The vendor-agreement tests compare against LabSpec Q-Carbon's
+own outputs; they need ``tests/vendor_data.json`` (paths to those files, kept
+out of the repository: see ``vendor_data.example.json``) and skip without it."""
+
+import json
+import os
+
+import numpy as np
+import pytest
+from scipy.integrate import quad
+
+from qcarbon.config import Config, Peak
+from qcarbon.fitter import fit_spectra, shape_eval, windowed_area, baseline_basis
+from qcarbon.labspec import read_l6_image, read_l6m, read_l6v, read_map, read_text, find_video
+from qcarbon.results import export_table, safe_ratio, statistics, valid_mask
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+VENDOR_FILE = os.path.join(HERE, "vendor_data.json")
+
+
+def need(*paths):
+    for p in paths:
+        if not os.path.exists(p):
+            pytest.skip(f"data not on this machine: {p}")
+
+
+def vendor(*keys):
+    """Paths of vendor-comparison files by role, from tests/vendor_data.json."""
+    try:
+        with open(VENDOR_FILE, encoding="utf-8") as fh:
+            paths = json.load(fh)
+    except FileNotFoundError:
+        pytest.skip("no tests/vendor_data.json (vendor comparison data)")
+    out = [paths.get(k, "") for k in keys]
+    need(*out)
+    return out[0] if len(out) == 1 else out
+
+
+# ---------------------------------------------------------------- line shapes
+@pytest.mark.parametrize("kind", ["Lorentz", "Gauss"])
+@pytest.mark.parametrize("c,w", [(1580, 20), (1350, 90), (1500, 200), (1010, 40)])
+def test_windowed_area_matches_numerical_integral(kind, c, w):
+    num, _ = quad(lambda x: float(shape_eval(x, c, w, kind)), 1000, 1800, points=[c], limit=400)
+    assert windowed_area(1.0, c, w, kind, 1000, 1800) == pytest.approx(num, rel=1e-7)
+
+
+def test_area_factors_match_vendor_exports():
+    # vendor area / (height * FWHM): Gaussian 1.0645 (any window), and a 19 cm-1
+    # Lorentzian at 1580 windowed to 1000-1800 gives 1.541 (a vendor export: 1.5409)
+    assert windowed_area(1, 1500, 100, "Gauss", 1000, 1800) / 100 == pytest.approx(1.0645, abs=1e-4)
+    assert windowed_area(1, 1580, 19, "Lorentz", 1000, 1800) / 19 == pytest.approx(1.541, abs=2e-3)
+
+
+# ---------------------------------------------------------------- the fit
+def synthetic(n=300, seed=1):
+    rng = np.random.default_rng(seed)
+    wn = np.linspace(1000, 1800, 294)
+    cfg = Config()
+    truth = []
+    Y = np.empty((n, wn.size))
+    for i in range(n):
+        A = {"G": rng.uniform(30, 120), "D1": rng.uniform(10, 60), "D2": rng.uniform(0, 15),
+             "D3": rng.uniform(0, 10), "D4": rng.uniform(0, 8)}
+        C = {p.name: rng.uniform(p.pos_min + 2, p.pos_max - 2) for p in cfg.peaks}
+        W = {p.name: rng.uniform(p.width_min * 1.3, p.width_max * 0.8) for p in cfg.peaks}
+        y = 25 + 4 * baseline_basis(wn, 1000, 1800, 2) @ np.array([1.0, 0.6, -0.4])
+        for p in cfg.peaks:
+            y = y + A[p.name] * shape_eval(wn, C[p.name], W[p.name], p.shape)
+        Y[i] = rng.poisson(y)
+        truth.append((A, C, W))
+    return wn, Y, truth, cfg
+
+
+def test_recovers_the_well_determined_bands():
+    wn, Y, truth, cfg = synthetic()
+    r = fit_spectra(Y, wn, cfg)
+    g = r.peak("G"); d1 = r.peak("D1")
+    gA = np.array([t[0]["G"] for t in truth]); gC = np.array([t[1]["G"] for t in truth])
+    d1A = np.array([t[0]["D1"] for t in truth])
+    assert np.median(np.abs(g["intensity"] - gA) / gA) < 0.06
+    assert np.median(np.abs(g["position"] - gC)) < 1.0
+    assert np.median(np.abs(d1["intensity"] - d1A) / d1A) < 0.12
+    # residual at the Poisson noise level
+    assert 0.8 < np.median(r.red_chi2) < 1.3
+
+
+def test_bounds_are_respected():
+    wn, Y, _, cfg = synthetic(n=120, seed=2)
+    r = fit_spectra(Y, wn, cfg)
+    assert (r.intensity >= 0).all()
+    for j, p in enumerate(cfg.peaks):
+        assert (r.position[:, j] >= p.pos_min - 1e-9).all() and (r.position[:, j] <= p.pos_max + 1e-9).all()
+        assert (r.width[:, j] >= p.width_min - 1e-9).all() and (r.width[:, j] <= p.width_max + 1e-9).all()
+
+
+def test_flat_spectrum_gives_zero_bands_not_negative_ones():
+    wn = np.linspace(1000, 1800, 294)
+    Y = np.random.default_rng(3).poisson(np.full((50, wn.size), 30.0)).astype(float)
+    r = fit_spectra(Y, wn, Config())
+    assert (r.intensity >= 0).all()
+    assert np.median(r.intensity[:, 0]) < 1.5
+
+
+def test_fixed_shapes_are_held():
+    wn, Y, _, cfg = synthetic(n=40, seed=4)
+    cfg.peaks[0].fit = False
+    r = fit_spectra(Y, wn, cfg)
+    assert np.all(r.position[:, 0] == cfg.peaks[0].pos) and np.all(r.width[:, 0] == cfg.peaks[0].width)
+
+
+def test_mean_shapes_make_the_weak_broad_band_map_follow_the_truth():
+    """A particle whose D3 rises left to right, on a substrate whose
+    fluorescence a quadratic cannot follow exactly. Fitted freely per pixel,
+    D3 wanders and soaks up background; with shapes from the mean spectrum the
+    undetermined bands are held and D3 tracks the truth better, while the
+    well-determined G and D1 stay free."""
+    rng = np.random.default_rng(4)
+    wn = np.linspace(1000, 1800, 294)
+    yy, xx = np.mgrid[0:24, 0:24]
+    part = (((yy - 12) ** 2 + (xx - 12) ** 2) < 81).ravel()
+    d3 = np.where(part, 10.0 * xx.ravel() / 23, 0.0)
+    Y = np.empty((part.size, wn.size))
+    for p in range(part.size):
+        y = 30 + 25 * np.exp(-(wn - 1000) / 500.0)
+        if part[p]:
+            y = y + 60 * shape_eval(wn, 1580, 20, "Lorentz") + 25 * shape_eval(wn, 1350, 50, "Lorentz") \
+                  + 8 * shape_eval(wn, 1615, 25, "Lorentz") + d3[p] * shape_eval(wn, 1500, 120, "Gauss")
+        Y[p] = rng.poisson(y)
+    off = Config(); off.auto_shapes = False
+    r0, r1 = fit_spectra(Y, wn, off), fit_spectra(Y, wn, Config())
+    assert r0.held == [] and "D3" in r1.held and not {"G", "D1"} & set(r1.held)
+    j = r1.names.index("D3")
+    assert np.all(r1.width[:, j] == r1.width[0, j])               # one shape for the map
+    r_off = np.corrcoef(r0.intensity[:, j], d3)[0, 1]
+    r_on = np.corrcoef(r1.intensity[:, j], d3)[0, 1]
+    assert r_on > r_off + 0.03                                   # measured 0.856 vs 0.782
+    assert np.std(r1.width[part, 0]) > 0.5                       # G width still per pixel
+
+
+def test_fit_separately_runs_and_reports_the_baseline():
+    wn, Y, _, cfg = synthetic(n=40, seed=5)
+    cfg.fit_separately = True
+    r = fit_spectra(Y, wn, cfg)
+    assert r.baseline.shape == (40, 3)
+    assert np.median(r.std_error) < 2 * np.sqrt(30)
+
+
+# ---------------------------------------------------------------- results
+def test_zero_denominator_ratio_is_zero_like_the_vendor():
+    assert safe_ratio([1.0, 2.0, 0.0], [0.0, 4.0, 0.0]).tolist() == [0.0, 0.5, 0.0]
+
+
+def test_export_column_order_follows_the_ratio_type():
+    wn, Y, _, cfg = synthetic(n=5)
+    r = fit_spectra(Y, wn, cfg)
+    head = export_table(r, cfg).splitlines()[0].split("\t")
+    assert head[1:10] == ["D3 Intensity", "D3 Width", "D3 Area", "G Intensity", "G Width", "G Area",
+                          "Ratio Intensity", "Ratio Width", "Ratio Area"]
+    cfg.ratio_num, cfg.ratio_den = "G", "D3"
+    assert export_table(r, cfg).splitlines()[0].split("\t")[1] == "G Intensity"
+
+
+def test_constraints_filter_valid_points():
+    wn, Y, _, cfg = synthetic(n=60)
+    r = fit_spectra(Y, wn, cfg)
+    assert valid_mask(r, cfg).all()
+    cfg.intensity.lo, cfg.intensity.use_lo = 1e9, True
+    assert not valid_mask(r, cfg).any()
+    rows = statistics(r, cfg)
+    assert rows[0]["n"] == 0
+
+
+def test_ini_round_trip():
+    cfg = Config()
+    cfg.peaks[3] = Peak("D3", 1505, 1490, 1520, 110, 40, 220, "Gauss", False)
+    cfg.ratio_num, cfg.intensity.use_lo, cfg.intensity.lo = "D1", True, 12.5
+    back = Config.from_ini(cfg.to_ini())
+    assert back.to_dict() == cfg.to_dict()
+
+
+# ---------------------------------------------------------------- vendor data
+def test_matches_vendor_g_band_export():
+    m_path, t_path = vendor("g_band_map", "g_band_export")
+    m = read_l6m(m_path)
+    vt = np.loadtxt(t_path, delimiter="\t", skiprows=1)[:, 1:]
+    assert vt.shape[0] == m.n_points == 12382
+    r = fit_spectra(m.cube.reshape(-1, m.wn.size), m.wn, Config())
+    g = r.peak("G")
+    assert np.corrcoef(g["intensity"], vt[:, 0])[0, 1] > 0.999
+    assert np.corrcoef(g["area"], vt[:, 2])[0, 1] > 0.999
+    strong = vt[:, 0] > 20
+    assert np.median(np.abs(g["area"][strong] - vt[strong, 2]) / vt[strong, 2]) < 0.03
+
+
+def test_std_error_convention_matches_vendor_error_map():
+    mp, err, g_ar, d3_ar = vendor("error_pair_map", "error_pair_error", "error_pair_g_area", "error_pair_d3_area")
+    m = read_l6m(mp)
+    r = fit_spectra(m.cube.reshape(-1, m.wn.size), m.wn, Config())
+    vendor_err = read_l6_image(err, m.cube.shape[:2]).ravel()
+    gv = read_l6_image(g_ar, m.cube.shape[:2]).ravel()
+    assert np.corrcoef(r.peak("G")["area"], gv)[0, 1] > 0.999      # also pins the X-fast layout
+    same = np.abs(r.peak("D3")["area"] - read_l6_image(d3_ar, m.cube.shape[:2]).ravel()) < 20
+    assert np.median(vendor_err[same] / r.std_error[same]) == pytest.approx(1.0, abs=0.01)
+
+
+def test_map_orientation_matches_labspec_display():
+    """LabSpec's own screenshot of this map ("Cursor image: Red map", the mean
+    counts over 1545-1625 cm-1 in a black-to-red scale) is the ground truth.
+    Axis calibration read off its tick labels: X = 0 at 361 px, 11.7 px/um,
+    map top edge at 469 px, Y drawn downwards."""
+    mp, png = vendor("screenshot_map", "screenshot_png")
+    from PIL import Image
+    m = read_l6m(mp)
+    assert m.cube.shape[:2] == (97, 92)
+    assert m.x[0] == pytest.approx(-17.59, abs=0.02) and m.x[-1] == pytest.approx(9.57, abs=0.02)
+    shot = np.asarray(Image.open(png).convert("RGB")).astype(float)
+    k = (m.wn > 1545) & (m.wn < 1625)
+    g = m.cube[:, :, k].mean(axis=2)
+    X, Y = np.meshgrid(m.x, m.y)
+    red = shot[np.round(469 + (Y - (m.y[0] - 0.15)) * 11.7).astype(int), np.round(361 + X * 11.7).astype(int), 0]
+    ok = red > 3   # skip the crosshair and scale bar
+    r = {name: np.corrcoef(gg[ok], red[ok])[0, 1] for name, gg in
+         [("right", g), ("rot180", g[::-1, ::-1]), ("flip_x", g[:, ::-1]), ("flip_y", g[::-1])]}
+    # measured 2026-10-15: right 0.949, rot180 0.479, flips ~0
+    assert r["right"] > 0.9
+    assert max(v for k2, v in r.items() if k2 != "right") < 0.6
+
+    # and the white-light image decodes with its axes (camera frame ~108 x 71 um)
+    v = read_l6v(find_video(mp))
+    assert v.rgb.shape == (664, 1056, 3)
+    assert v.x[0] == pytest.approx(-54.26, abs=0.01) and v.y[0] == pytest.approx(35.63, abs=0.01)
+
+
+def test_d3_map_follows_vendor_d3_map():
+    """Fitted freely per pixel, D3 correlated with Q-Carbon's own D3 area map
+    at only r = 0.38 and did not show the particle; with shapes from the mean
+    spectrum it is 0.72."""
+    mp, d3_ar = vendor("error_pair_map", "error_pair_d3_area")
+    m = read_l6m(mp)
+    r = fit_spectra(m.cube.reshape(-1, m.wn.size), m.wn, Config())
+    vendor_d3 = read_l6_image(d3_ar, m.cube.shape[:2]).ravel()
+    assert "D3" in r.held and "G" not in r.held
+    assert np.corrcoef(r.peak("D3")["area"], vendor_d3)[0, 1] > 0.65
+
+
+# ---------------------------------------------------------------- text files
+def _labspec_matrix(path, ny=3, nx=4, K=40):
+    """LabSpec's matrix export: Raman-shift row, then Y, X, intensities with X
+    changing fastest. Each spectrum encodes its own (row, column)."""
+    wn = np.linspace(1000, 1800, K)
+    lines = ["\t\t" + "\t".join(f"{v:.3f}" for v in wn)]
+    for iy in range(ny):
+        for ix in range(nx):
+            lines.append("\t".join([f"{-5 + 2 * iy:.4f}", f"{10 + 1.5 * ix:.4f}",
+                                    *[f"{100 * iy + ix + 0.001 * k:.4f}" for k in range(K)]]))
+    path.write_text("\n".join(lines) + "\n")
+    return wn
+
+
+def test_labspec_matrix_text_puts_x_on_columns(tmp_path):
+    p = tmp_path / "map.txt"
+    _labspec_matrix(p)
+    m = read_map(str(p))
+    assert m.cube.shape == (3, 4, 40)
+    assert np.allclose(m.x, 10 + 1.5 * np.arange(4)) and np.allclose(m.y, -5 + 2 * np.arange(3))
+    assert m.cube[2, 1, 0] == pytest.approx(201)          # row = Y index, column = X index
+
+
+def test_labspec_text_export_matches_the_binary():
+    """A map exported to text by LabSpec: the text and the binary must give
+    the same map, the same way round (the export lists Y first)."""
+    txt, binary = vendor("text_export", "text_export_binary")
+    t = read_text(txt)
+    b = read_l6m(binary)
+    assert t.cube.shape == b.cube.shape == (30, 32, 798)
+    assert np.array_equal(t.cube, b.cube)
+    assert np.allclose(t.x, b.x, atol=1e-3) and np.allclose(t.y, b.y, atol=1e-3)
+
+
+@pytest.mark.parametrize("sep,header", [("\t", "#X\t#Y\t#Wave\t#Intensity"), (",", "")])
+def test_long_xy_table(tmp_path, sep, header):
+    """One row per (x, y, shift, intensity), shift descending as WiRE writes it."""
+    wn = np.linspace(1800, 1000, 30)
+    rows = [header] if header else []
+    for iy in range(2):
+        for ix in range(3):
+            rows += [sep.join(f"{v:g}" for v in (ix * 0.5, iy * 0.5, w, 10 * iy + ix)) for w in wn]
+    p = tmp_path / ("map.txt" if sep == "\t" else "map.csv")
+    p.write_text("\n".join(rows) + "\n")
+    m = read_map(str(p))
+    assert m.cube.shape == (2, 3, 30) and m.wn[0] < m.wn[-1]
+    assert m.cube[1, 2, 0] == 12 and np.allclose(m.x, [0, 0.5, 1.0])
+
+
+def test_two_column_spectrum_with_labels(tmp_path):
+    wn = np.linspace(1000, 1800, 200)
+    y = 20 + 80 * shape_eval(wn, 1580, 20, "Lorentz") + 30 * shape_eval(wn, 1350, 60, "Lorentz")
+    p = tmp_path / "spectrum.csv"
+    p.write_text("Raman shift (cm-1),Intensity\n" + "\n".join(f"{a},{b}" for a, b in zip(wn, y)))
+    m = read_map(str(p))
+    assert m.cube.shape == (1, 1, 200)
+    r = fit_spectra(m.cube.reshape(1, -1), m.wn, Config())
+    assert r.peak("G")["position"][0] == pytest.approx(1580, abs=1)
+
+
+def test_decimal_commas_with_semicolons(tmp_path):
+    wn = np.linspace(1000, 1800, 50)
+    p = tmp_path / "spectrum.csv"
+    p.write_text("\n".join(f"{a:.2f};{b:.3f}".replace(".", ",") for a, b in zip(wn, 1 + wn / 1e3)))
+    m = read_map(str(p))
+    assert m.wn[0] == pytest.approx(1000) and m.cube[0, 0, -1] == pytest.approx(2.8)
+
+
+def test_point_lists_are_refused_not_guessed(tmp_path):
+    wn = np.linspace(1000, 1800, 20)
+    rows = ["\t\t" + "\t".join(f"{v:g}" for v in wn)]
+    for x, y in [(0, 0), (1, 0), (0, 1)]:                  # 3 points: not a full grid
+        rows.append("\t".join([str(y), str(x), *["1"] * wn.size]))
+    p = tmp_path / "points.txt"
+    p.write_text("\n".join(rows))
+    with pytest.raises(ValueError, match="full"):
+        read_map(str(p))

@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Carbo Metrics</title>
+<meta name="description" content="Per-pixel D and G band fitting of Raman maps of carbons, in your browser. Reads LabSpec 6 maps and text exports; files never leave your computer.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%233fe0ff'/%3E%3Cstop offset='1' stop-color='%232b6cff'/%3E%3C/linearGradient%3E%3C/defs%3E%3Cpath d='M16 2l12 7v14l-12 7-12-7V9z' fill='url(%23g)'/%3E%3Cpath d='M16 9l6 3.5v7L16 23l-6-3.5v-7z' fill='%23061229'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/static/css/app.css">
+</head>
+<body>
+<div id="fitbar"><div></div></div>
+<header class="topbar">
+  <div class="brand">
+    <svg viewBox="0 0 32 32" width="26" height="26" aria-hidden="true"><defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#3fe0ff"/><stop offset="1" stop-color="#2b6cff"/></linearGradient></defs><path d="M16 2l12 7v14l-12 7-12-7V9z" fill="url(#bg)"/><path d="M16 9l6 3.5v7L16 23l-6-3.5v-7z" fill="#061229"/></svg>
+    <span>Carbo <b>Metrics</b></span>
+  </div>
+  <button id="btn-library" class="file-pill" title="Open a map from the library (or drop a .l6m or text file anywhere)">
+    <span class="ico">▤</span><span id="file-name">Open a map…</span>
+  </button>
+  <nav class="tabs" id="tabs">
+    <span class="tab-ink"></span>
+    <button data-tab="qc" class="on">Carbon fit</button>
+    <button data-tab="splat">Splat&nbsp;3D</button>
+    <button data-tab="particles">Particles</button>
+    <button data-tab="report">Report</button>
+  </nav>
+  <div class="status" id="status"><span class="dot"></span><span id="status-text">Ready</span></div>
+</header>
+
+<main>
+  <!-- ======================= Carbon fit ======================= -->
+  <section id="tab-qc" class="tab on">
+    <div class="chart">
+      <div class="maps">
+        <div class="panel map" id="map-0"></div>
+        <div class="panel map" id="map-1"></div>
+        <div class="panel map" id="map-2"></div>
+        <div class="panel map" id="map-3"></div>
+      </div>
+      <div class="lower">
+        <div class="panel col">
+          <div class="panel-h">Cursor spectrum <span class="muted" id="cursor-info"></span>
+            <span class="grow"></span><span class="muted small">drag to zoom · ←↑→↓ move · click a map to pin</span></div>
+          <div class="plot" id="plot-cursor"></div>
+          <div class="cursor-table" id="cursor-table"></div>
+        </div>
+        <div class="panel col">
+          <div class="panel-h"><button class="link" id="hist-title">Histogram</button><span class="grow"></span>
+            <label class="chk small"><input type="checkbox" id="hist-full"> full range</label></div>
+          <div class="plot" id="plot-hist"></div>
+        </div>
+        <div class="panel col">
+          <div class="panel-h">Optical image <span class="grow"></span>
+            <label class="chk small"><input type="checkbox" id="vid-overlay" checked> map overlay</label>
+            <input type="range" id="vid-alpha" min="0" max="1" step="0.05" value="0.65" title="Overlay opacity">
+            <button class="icon" id="vid-zoom" title="Whole camera frame / around the map">⤢</button></div>
+          <div class="plot" id="video"><canvas></canvas></div>
+        </div>
+      </div>
+      <div class="welcome" id="welcome">
+        <div class="hero">
+          <h1>Carbon Raman maps, fitted pixel by pixel.</h1>
+          <p>Open a LabSpec&nbsp;6 map (<code>.l6m</code>) or a text export from any instrument (<code>.txt</code>, <code>.csv</code>: a LabSpec matrix, an x&nbsp;/&nbsp;y&nbsp;/&nbsp;shift&nbsp;/&nbsp;intensity table, or a single spectrum). Carbo Metrics fits every spectrum with an editable five-band carbon model, maps D, G and their ratio, shows the white-light image underneath when there is one, and can turn the whole hyperspectral cube into a 3-D Gaussian splat field.</p>
+          <div class="hero-actions">
+            <button class="primary" id="hero-file">Open file…</button>
+            <button id="hero-open">Open from library</button>
+            <span class="muted">or drop a file anywhere</span>
+          </div>
+          <p class="muted small browser-note">Runs entirely in your browser: files are read on your computer and never uploaded. Splat&nbsp;3D needs the desktop version.</p>
+          <div class="recent" id="recent"></div>
+        </div>
+      </div>
+    </div>
+
+    <aside class="side" id="side">
+      <div class="sec">
+        <div class="sec-h">Spectral data <span class="muted small" id="spec-name"></span></div>
+        <div class="plot density" id="plot-density"></div>
+      </div>
+
+      <div class="sec" data-sec="processing">
+        <div class="sec-h toggle">Processing</div>
+        <div class="sec-b">
+          <div class="frow"><label>Baseline</label>
+            <select id="cfg-baseline">
+              <option value="-1">None</option><option value="0">Constant</option><option value="1">Linear</option>
+              <option value="2">Poly order 2</option><option value="3">Poly order 3</option><option value="4">Poly order 4</option><option value="5">Poly order 5</option>
+            </select></div>
+          <div class="frow"><label></label><label class="chk"><input type="checkbox" id="cfg-separate"> Fit separately</label></div>
+          <div class="frow"><label></label><label class="chk" title="Fit the mean spectrum of the carbon pixels first and start every pixel from its band shapes. A band whose position or width one pixel cannot determine (at this map's noise) keeps the mean shape; only its intensity is fitted per pixel."><input type="checkbox" id="cfg-auto"> Shapes from mean spectrum</label></div>
+          <div class="frow"><label>Spectral range (cm⁻¹)</label>
+            <div class="row2"><input type="number" id="cfg-lo" step="any"><input type="number" id="cfg-hi" step="any"></div></div>
+        </div>
+      </div>
+
+      <div class="sec" data-sec="constraints">
+        <div class="sec-h toggle">Constraints <span class="muted small">which points count as valid</span></div>
+        <div class="sec-b" id="constraints"></div>
+      </div>
+
+      <div class="sec" data-sec="peaks">
+        <div class="sec-h toggle">Peaks</div>
+        <div class="sec-b">
+          <div class="frow"><label>Peaks number</label>
+            <div class="row2"><select id="cfg-npeaks"></select>
+              <label class="chk"><input type="checkbox" id="cfg-skip"> Skip fitting step</label></div></div>
+          <table class="peaks" id="peaks"></table>
+          <div class="muted small" id="held-note"></div>
+          <label class="chk small"><input type="checkbox" id="cfg-names"> Edit peak names</label>
+        </div>
+      </div>
+
+      <div class="sec">
+        <div class="frow"><label>Configuration</label>
+          <div class="row2"><input id="cfg-file" readonly placeholder="default">
+            <span class="btns"><button class="icon" id="cfg-open" title="Open .ini">⇪</button><button class="icon" id="cfg-save" title="Save .ini">⤓</button><button class="icon" id="cfg-reset" title="Back to the default">↺</button></span></div></div>
+        <div class="frow"><label>Ratio type</label>
+          <div class="ratio"><select id="ratio-num"></select><span>/</span><select id="ratio-den"></select><button class="icon" id="ratio-swap" title="Swap">⇄</button></div></div>
+        <input type="file" id="cfg-input" accept=".ini,.txt" hidden>
+      </div>
+
+      <div class="sec" data-sec="quality">
+        <div class="sec-h toggle">Quality</div>
+        <div class="sec-b quality" id="quality"></div>
+      </div>
+
+      <div class="sec" data-sec="stats">
+        <div class="sec-h toggle">Statistics <span class="muted small">valid points · click a row</span></div>
+        <div class="sec-b"><table class="stats" id="stats"></table></div>
+      </div>
+
+      <div class="sec" data-sec="export">
+        <div class="sec-h toggle">Export and report</div>
+        <div class="sec-b btnrow">
+          <button id="exp-txt">Export data</button>
+          <button id="exp-csv">Export all (CSV)</button>
+          <button id="exp-png">Save maps</button>
+          <button id="exp-report" class="primary">Open report</button>
+        </div>
+      </div>
+    </aside>
+  </section>
+
+  <!-- ======================= Splat 3D ======================= -->
+  <section id="tab-splat" class="tab">
+    <div class="panel splat-stage">
+      <div id="gl"></div>
+      <div class="gl-hud">
+        <div class="hud-row"><span>Exposure</span><input type="range" id="sp-exposure" min="-3" max="3" step="0.05" value="0"></div>
+        <div class="hud-row"><span>Spectral depth</span><input type="range" id="sp-depth" min="0.2" max="2.5" step="0.05" value="1"></div>
+        <div class="hud-row"><span>Colour</span><select id="sp-colour"><option value="band">by band</option><option value="nu">by Raman shift</option></select></div>
+        <div class="hud-row"><label class="chk" title="Scale each band to its own brightest primitive, so weak D bands are not hidden by G"><input type="checkbox" id="sp-eq" checked> equalise bands</label><label class="chk"><input type="checkbox" id="sp-rotate"> spin</label></div>
+        <div class="hud-row"><label class="chk"><input type="checkbox" id="sp-floor" checked> white-light floor</label></div>
+        <button class="icon wide" id="sp-reset">Reset view</button>
+      </div>
+      <div class="gl-hint">drag to orbit · right-drag to pan · scroll to zoom · double-click to reset</div>
+      <div class="gl-empty" id="gl-empty">
+        <h2>Spectral Gaussian splatting</h2>
+        <p>The fitted map becomes a field of 3-D Gaussians in (x, y, Raman shift). Each ellipsoid sits over the part of a particle it describes, at the height of the band it carries. Fitted on the baseline-corrected cube, on the particles only, with every 5th channel held out to measure how well it generalises.</p>
+        <button class="primary" id="sp-run2">Fit the splat field</button>
+      </div>
+    </div>
+    <aside class="side splat-side">
+      <div class="sec">
+        <div class="sec-h">Splat field</div>
+        <div class="frow"><label>Gaussians</label><input type="number" id="sp-n" value="1400" min="100" max="1900" step="100"></div>
+        <div class="frow"><label>Iterations</label><input type="number" id="sp-iters" value="150" min="10" max="600" step="10"></div>
+        <button class="primary wide" id="sp-run">Fit the splat field</button>
+        <div class="progress" id="sp-prog"><div></div></div>
+        <div class="muted small" id="sp-status">Needs a fitted map. About 3 minutes for a 9 000-point map.</div>
+        <canvas id="sp-loss" class="spark"></canvas>
+      </div>
+      <div class="sec">
+        <div class="sec-h">How good is the field?</div>
+        <div class="metrics" id="sp-metrics"><div class="muted small">Appears when the fit finishes.</div></div>
+      </div>
+      <div class="sec">
+        <div class="sec-h">Slice at <span id="sp-nu-label">1580</span> cm⁻¹</div>
+        <input type="range" id="sp-nu" min="1000" max="1800" step="1" value="1580" class="wide">
+        <div class="chips" id="sp-chips"></div>
+        <div class="slices">
+          <div class="panel map" id="slice-data"></div>
+          <div class="panel map" id="slice-field"></div>
+        </div>
+        <div class="muted small">Left: measured, baseline-corrected, ±4 cm⁻¹. Right: the splat field sliced at the same shift, rendered at 3× the pixel grid. The field is continuous, so the right image is an interpolation of a fitted model, not new data.</div>
+      </div>
+    </aside>
+  </section>
+
+  <!-- ======================= Particles ======================= -->
+  <section id="tab-particles" class="tab">
+    <div class="panel map big" id="map-p"></div>
+    <aside class="side">
+      <div class="sec">
+        <div class="sec-h">Find particles</div>
+        <div class="frow"><label>Segment on</label><select id="pt-src"></select></div>
+        <div class="frow"><label>Threshold</label><div class="row2"><input type="range" id="pt-thr" min="0" max="1" step="0.001"><input type="number" id="pt-thr-n" step="any"></div></div>
+        <div class="frow"><label>Min. size (px)</label><div class="row2"><input type="number" id="pt-min" value="8" min="1"><button id="pt-otsu">Otsu</button></div></div>
+        <div class="frow"><label></label><label class="chk" title="Distance-transform watershed: particles that touch are cut at their neck"><input type="checkbox" id="pt-split" checked> Split touching particles</label></div>
+      </div>
+      <div class="sec">
+        <div class="sec-h">Pixels vs particles</div>
+        <div class="cards" id="pt-cards"></div>
+        <div class="muted small">Neighbouring pixels of one particle are not independent samples. Compare samples on particle means (n = particles); the pixel SD describes heterogeneity within the map, not measurement precision.</div>
+      </div>
+      <div class="sec">
+        <div class="sec-h">Ratio by particle</div>
+        <div class="plot strip" id="pt-strip"></div>
+      </div>
+      <div class="sec">
+        <table class="stats" id="pt-table"></table>
+      </div>
+    </aside>
+  </section>
+
+  <!-- ======================= Report ======================= -->
+  <section id="tab-report" class="tab">
+    <div class="report-bar">
+      <input id="rp-title" value="Raman carbon analysis">
+      <button id="rp-refresh">Refresh</button>
+      <button class="primary" id="rp-print">Print / Save as PDF</button>
+    </div>
+    <div class="report-scroll"><article id="report-paper" class="paper"></article></div>
+  </section>
+</main>
+
+<div id="library" class="modal hidden">
+  <div class="modal-card">
+    <div class="modal-h">
+      <h2>Map library</h2>
+      <input id="lib-search" placeholder="Search sample, folder…" autocomplete="off">
+      <label class="chk small"><input type="checkbox" id="lib-ok" checked> readable only</label>
+      <button id="lib-scan" title="Read every file once to show its grid and range (cached)">Scan details</button>
+      <button id="lib-file" title="Open a .l6m or a text export from anywhere on this computer">Open file…</button>
+      <button class="icon" id="lib-close">✕</button>
+    </div>
+    <div class="lib-meta muted small" id="lib-meta"></div>
+    <div class="lib-list"><table id="lib-table"></table></div>
+    <div class="lib-foot muted small">Folders come from <code>data_roots.txt</code>; text files you open are kept under <code>uploads</code> and listed here. Files are only read, never changed. You can also drop a <code>.l6m</code> (plus its <code>.l6v</code> white-light image) or a text export onto the window.</div>
+  </div>
+</div>
+<div id="drop" class="drop hidden"><div>Drop a map or spectrum<br><span>.l6m (+ .l6v white-light image) · .txt · .csv</span></div></div>
+<input type="file" id="file-input" multiple accept=".l6m,.l6v,.txt,.csv,.tsv,.dat" hidden>
+<div id="toasts"></div>
+<script type="module" src="/static/js/app.js"></script>
+</body>
+</html>

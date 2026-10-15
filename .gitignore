@@ -1,0 +1,11 @@
+__pycache__/
+.cache/
+uploads/
+.pytest_cache/
+.vercel/
+node_modules/
+
+# local paths to your own data: never published
+data_roots.txt
+tests/vendor_data.json
+web/_tmp_test/

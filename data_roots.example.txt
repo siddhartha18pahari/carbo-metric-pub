@@ -1,0 +1,4 @@
+# Folders the desktop library scans for LabSpec 6 maps (.l6m), one per line.
+# Copy this file to data_roots.txt (kept out of the repository) and edit it.
+# Relative paths are relative to this file. Files are only ever read.
+# C:\Users\me\Raman\maps

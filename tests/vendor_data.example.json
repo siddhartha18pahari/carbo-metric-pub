@@ -1,0 +1,13 @@
+{
+  "_about": "Copy to vendor_data.json (git-ignored) and point each entry at your own files to run the vendor-agreement tests. Missing entries skip their test.",
+  "g_band_map": "a LabSpec .l6m map fitted in Q-Carbon",
+  "g_band_export": "Q-Carbon's exported result table for that map (G columns 1-3)",
+  "error_pair_map": "another .l6m map fitted in Q-Carbon",
+  "error_pair_error": "Q-Carbon's ERROR.l6i result image for it",
+  "error_pair_g_area": "Q-Carbon's G area result image (.l6i) for it",
+  "error_pair_d3_area": "Q-Carbon's D3 area result image (.l6i) for it",
+  "screenshot_map": "a 97 x 92 .l6m map (with its .l6v next to it)",
+  "screenshot_png": "LabSpec's own screenshot of that map (red map panel)",
+  "text_export": "a map exported by LabSpec as a text matrix",
+  "text_export_binary": "the same map's .l6m"
+}
