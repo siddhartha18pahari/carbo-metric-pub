@@ -3,8 +3,9 @@
 
 import { lut } from "./colormaps.js";
 import { el, fmt, hidpi, niceTicks } from "./util.js";
+import { T, font, PEAK_COLOURS } from "./theme.js";
 
-export const PEAK_COLOURS = ["#38d6ff", "#ff9f40", "#b18cff", "#ffd84d", "#ff6b9a", "#6be3a4", "#f4f4f4", "#8fb4ff"];
+export { PEAK_COLOURS };
 
 class Base {
   constructor(host) {
@@ -23,19 +24,19 @@ class Base {
     const { ctx } = F;
     const X = v => F.x + (v - xr[0]) / (xr[1] - xr[0]) * F.w;
     const Y = v => F.y + F.h - (v - yr[0]) / (yr[1] - yr[0]) * F.h;
-    ctx.font = "10px var(--mono, monospace)"; ctx.fillStyle = "#9db6db";
+    ctx.font = font(11); ctx.fillStyle = T.ink;
     ctx.textAlign = "center"; ctx.textBaseline = "top";
     for (const t of niceTicks(xr[0], xr[1], Math.max(2, Math.floor(F.w / 70)))) {
-      if (grid) { ctx.fillStyle = "rgba(150,190,255,.07)"; ctx.fillRect(X(t), F.y, 1, F.h); ctx.fillStyle = "#9db6db"; }
+      if (grid) { ctx.fillStyle = T.grid; ctx.fillRect(X(t), F.y, 1, F.h); ctx.fillStyle = T.ink; }
       ctx.fillText(fmt(t, 4), X(t), F.y + F.h + 4);
     }
     ctx.textAlign = "right"; ctx.textBaseline = "middle";
     for (const t of niceTicks(yr[0], yr[1], Math.max(2, Math.floor(F.h / 34)))) {
-      if (grid) { ctx.fillStyle = "rgba(150,190,255,.07)"; ctx.fillRect(F.x, Y(t), F.w, 1); ctx.fillStyle = "#9db6db"; }
+      if (grid) { ctx.fillStyle = T.grid; ctx.fillRect(F.x, Y(t), F.w, 1); ctx.fillStyle = T.ink; }
       ctx.fillText(fmt(t, 3), F.x - 5, Y(t));
     }
-    ctx.strokeStyle = "rgba(160,200,255,.3)"; ctx.strokeRect(F.x - .5, F.y - .5, F.w + 1, F.h + 1);
-    ctx.fillStyle = "#6f8ab3"; ctx.font = "10px var(--sans, sans-serif)"; ctx.textAlign = "center";
+    ctx.strokeStyle = T.frame; ctx.strokeRect(F.x - .5, F.y - .5, F.w + 1, F.h + 1);
+    ctx.fillStyle = T.label; ctx.font = font(11); ctx.textAlign = "center";
     if (xl) { ctx.textBaseline = "bottom"; ctx.fillText(xl, F.x + F.w / 2, F.y + F.h + 30); }
     if (yl) { ctx.save(); ctx.translate(10, F.y + F.h / 2); ctx.rotate(-Math.PI / 2); ctx.textBaseline = "middle"; ctx.fillText(yl, 0, 0); ctx.restore(); }
     return { X, Y };
@@ -66,7 +67,7 @@ export class SpectrumPlot extends Base {
     const F = this.frame({ l: 50, r: 12, t: 12, b: 34 }); if (!F) return;
     this.F = F;
     const d = this.d, { ctx } = F;
-    if (!d) { ctx.fillStyle = "#6f8ab3"; ctx.font = "12px var(--sans)"; ctx.textAlign = "center"; ctx.fillText(this.emptyText || "Hover or click a map to see its spectrum", F.x + F.w / 2, F.y + F.h / 2); return; }
+    if (!d) { ctx.fillStyle = T.label; ctx.font = font(13); ctx.textAlign = "center"; ctx.fillText(this.emptyText || "Hover or click a map to see its spectrum", F.x + F.w / 2, F.y + F.h / 2); return; }
     const wn = d.wn, full = [wn[0], wn[wn.length - 1]];
     const xr = this.view || full; this.xr = xr;
     const inX = i => wn[i] >= xr[0] && wn[i] <= xr[1];
@@ -81,10 +82,10 @@ export class SpectrumPlot extends Base {
     ctx.save(); ctx.beginPath(); ctx.rect(main.x, main.y, main.w, main.h); ctx.clip();
     // spectral range: dim outside, green band on top like the instrument
     if (d.range) {
-      ctx.fillStyle = "rgba(0,0,0,.25)";
+      ctx.fillStyle = T.shade;
       ctx.fillRect(main.x, main.y, X(d.range[0]) - main.x, main.h);
       ctx.fillRect(X(d.range[1]), main.y, main.x + main.w - X(d.range[1]), main.h);
-      ctx.fillStyle = "rgba(90,255,140,.35)"; ctx.fillRect(X(d.range[0]), main.y, X(d.range[1]) - X(d.range[0]), 4);
+      ctx.fillStyle = T.range; ctx.fillRect(X(d.range[0]), main.y, X(d.range[1]) - X(d.range[0]), 4);
     }
     const line = (ys, col, w = 1, dash = []) => {
       ctx.strokeStyle = col; ctx.lineWidth = w; ctx.setLineDash(dash); ctx.beginPath();
@@ -101,14 +102,14 @@ export class SpectrumPlot extends Base {
         ctx.fillStyle = col + "33"; ctx.fill();
         const top = d.fit.baseline.map((b, i) => b + c.y[i]); line(top, col, 1.2);
       });
-      line(d.fit.baseline, "#8fa8cc", 1, [4, 3]);
+      line(d.fit.baseline, T.baseline, 1, [4, 3]);
     }
-    if (d.raw0) line(d.raw0, "rgba(150,170,205,.35)", 1);   // the raw spectrum behind its smoothed version
-    line(d.raw, "rgba(230,236,255,.85)", 1);
-    if (d.fit) line(d.fit.total, "#ff3b4e", 1.8);
+    if (d.raw0) line(d.raw0, T.raw0, 1);   // the raw spectrum behind its smoothed version
+    line(d.raw, T.raw, 1);
+    if (d.fit) line(d.fit.total, T.fit, 1.8);
     // peak labels at fitted centres, rotated like LabSpec
     if (d.fit) {
-      ctx.font = "10px var(--mono)";
+      ctx.font = font(11);
       d.fit.comps.forEach((c, j) => {
         if (!(c.A > 0) || c.pos < xr[0] || c.pos > xr[1]) return;
         let k = 0; while (k < wn.length - 1 && wn[k] < c.pos) k++;
@@ -126,26 +127,26 @@ export class SpectrumPlot extends Base {
       let m = 1e-9; const res = d.raw.map((v, i) => v - d.fit.total[i]);
       for (let i = 0; i < wn.length; i++) if (inX(i) && wn[i] >= d.range[0] && wn[i] <= d.range[1]) m = Math.max(m, Math.abs(res[i]));
       const RY = v => R.y + R.h / 2 - v / m * R.h / 2;
-      ctx.fillStyle = "rgba(10,25,55,.6)"; ctx.fillRect(R.x, R.y, R.w, R.h);
-      ctx.fillStyle = "rgba(150,190,255,.2)"; ctx.fillRect(R.x, R.y + R.h / 2, R.w, 1);
-      ctx.strokeStyle = "#ffb84d"; ctx.lineWidth = 1; ctx.beginPath();
+      ctx.fillStyle = T.residBg; ctx.fillRect(R.x, R.y, R.w, R.h);
+      ctx.fillStyle = T.frame; ctx.fillRect(R.x, R.y + R.h / 2, R.w, 1);
+      ctx.strokeStyle = T.resid; ctx.lineWidth = 1; ctx.beginPath();
       let s = false;
       for (let i = 0; i < wn.length; i++) { if (!inX(i) || wn[i] < d.range[0] || wn[i] > d.range[1]) continue; const px = X(wn[i]); s ? ctx.lineTo(px, RY(res[i])) : ctx.moveTo(px, RY(res[i])); s = true; }
       ctx.stroke();
-      ctx.fillStyle = "#6f8ab3"; ctx.font = "9px var(--sans)"; ctx.textAlign = "left"; ctx.textBaseline = "top";
+      ctx.fillStyle = T.label; ctx.font = font(10); ctx.textAlign = "left"; ctx.textBaseline = "top";
       ctx.fillText(`residual ±${fmt(m, 2)}`, R.x + 4, R.y + 2);
     }
-    ctx.fillStyle = "#6f8ab3"; ctx.font = "10px var(--sans)"; ctx.textAlign = "center"; ctx.textBaseline = "bottom";
+    ctx.fillStyle = T.label; ctx.font = font(11); ctx.textAlign = "center"; ctx.textBaseline = "bottom";
     ctx.fillText("Raman shift (cm⁻¹)", F.x + F.w / 2, F.H ?? F.y + F.h + 33);
     if (this.mouse != null && this.mouse > F.x && this.mouse < F.x + F.w) {
       const v = xr[0] + (this.mouse - F.x) / F.w * (xr[1] - xr[0]);
       let k = 0; while (k < wn.length - 1 && wn[k] < v) k++;
-      ctx.fillStyle = "rgba(255,255,255,.35)"; ctx.fillRect(this.mouse, F.y, 1, F.h);
+      ctx.fillStyle = T.hair; ctx.fillRect(this.mouse, F.y, 1, F.h);
       const txt = `${wn[k].toFixed(1)} cm⁻¹   data ${fmt(d.raw[k])}` + (d.fit ? `   fit ${fmt(d.fit.total[k])}` : "");
-      ctx.font = "10px var(--mono)"; const tw = ctx.measureText(txt).width + 10;
+      ctx.font = font(11); const tw = ctx.measureText(txt).width + 10;
       const tx = Math.min(this.mouse + 8, F.x + F.w - tw);
-      ctx.fillStyle = "rgba(4,12,30,.85)"; ctx.fillRect(tx, F.y + 8, tw, 18);
-      ctx.fillStyle = "#e6f0ff"; ctx.textAlign = "left"; ctx.textBaseline = "middle"; ctx.fillText(txt, tx + 5, F.y + 17);
+      ctx.fillStyle = T.tipBg; ctx.fillRect(tx, F.y + 8, tw, 18);
+      ctx.fillStyle = T.tipInk; ctx.textAlign = "left"; ctx.textBaseline = "middle"; ctx.fillText(txt, tx + 5, F.y + 17);
     }
   }
 }
@@ -177,11 +178,11 @@ export class HistogramPlot extends Base {
     const vline = (v, col, label, dash) => {
       if (!(v >= lo && v <= hi)) return;
       ctx.strokeStyle = col; ctx.setLineDash(dash); ctx.beginPath(); ctx.moveTo(X(v), F.y); ctx.lineTo(X(v), F.y + F.h); ctx.stroke(); ctx.setLineDash([]);
-      ctx.fillStyle = col; ctx.font = "10px var(--mono)"; ctx.textAlign = "left"; ctx.textBaseline = "top"; ctx.fillText(label, X(v) + 3, F.y + (dash.length ? 14 : 2));
+      ctx.fillStyle = col; ctx.font = font(11); ctx.textAlign = "left"; ctx.textBaseline = "top"; ctx.fillText(label, X(v) + 3, F.y + (dash.length ? 14 : 2));
     };
-    vline(d.median, "#ffffff", `median ${fmt(d.median)}`, []);
-    vline(d.mean, "#ffb84d", `mean ${fmt(d.mean)}`, [4, 3]);
-    ctx.fillStyle = "#6f8ab3"; ctx.font = "10px var(--sans)"; ctx.textAlign = "center"; ctx.textBaseline = "bottom";
+    vline(d.median, T.strong, `median ${fmt(d.median)}`, []);
+    vline(d.mean, T.mean, `mean ${fmt(d.mean)}`, [4, 3]);
+    ctx.fillStyle = T.label; ctx.font = font(11); ctx.textAlign = "center"; ctx.textBaseline = "bottom";
     ctx.fillText(d.label + (out ? `   (${out} outside the axis)` : ""), F.x + F.w / 2, F.y + F.h + 33);
   }
 }
@@ -222,18 +223,18 @@ export class DensityPlot extends Base {
     if (!this._img) this._build();
     const { ctx } = F, I = this._img;
     const xr = [I.wn[0], I.wn[I.wn.length - 1]];
-    ctx.fillStyle = "#030a1a"; ctx.fillRect(F.x, F.y, F.w, F.h);
+    ctx.fillStyle = T.bg; ctx.fillRect(F.x, F.y, F.w, F.h);
     ctx.imageSmoothingEnabled = true; ctx.drawImage(I.off, F.x, F.y, F.w, F.h);
     const { X, Y } = this.axes(F, xr, [I.lo, I.hi], { grid: false });
     const r = this.d.range;
     if (r) {
-      ctx.fillStyle = "rgba(0,0,0,.35)"; ctx.fillRect(F.x, F.y, X(r[0]) - F.x, F.h); ctx.fillRect(X(r[1]), F.y, F.x + F.w - X(r[1]), F.h);
-      ctx.fillStyle = "rgba(90,255,140,.45)"; ctx.fillRect(X(r[0]), F.y, X(r[1]) - X(r[0]), 3);
+      ctx.fillStyle = T.shade; ctx.fillRect(F.x, F.y, X(r[0]) - F.x, F.h); ctx.fillRect(X(r[1]), F.y, F.x + F.w - X(r[1]), F.h);
+      ctx.fillStyle = T.range; ctx.fillRect(X(r[0]), F.y, X(r[1]) - X(r[0]), 3);
     }
     (this.d.peaks || []).forEach((p, j) => {
       ctx.fillStyle = PEAK_COLOURS[j % PEAK_COLOURS.length]; ctx.fillRect(X(p.pos), F.y + F.h - 8, 1.5, 8);
     });
-    ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 1.2; ctx.beginPath();
+    ctx.strokeStyle = T.strong; ctx.lineWidth = 1.2; ctx.beginPath();
     I.mean.forEach((v, i) => { const px = X(I.wn[i]), py = Y(v); i ? ctx.lineTo(px, py) : ctx.moveTo(px, py); });
     ctx.stroke();
   }

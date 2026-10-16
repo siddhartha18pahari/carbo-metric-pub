@@ -10,6 +10,7 @@ import { SpectrumPlot, HistogramPlot, DensityPlot, PEAK_COLOURS } from "./plots.
 import { SplatView, sliceField } from "./splat3d.js";
 import { segment, outlineOverlay, PARTICLE_COLOURS } from "./particles.js";
 import { buildReport } from "./report.js";
+import { T, font, setTheme, currentTheme } from "./theme.js";
 
 const QUANT = { intensity: "Intensity", width: "Width", area: "Area", position: "Position" };
 const UNIT = { intensity: "counts", width: "cm⁻¹", area: "cm⁻¹ × counts", position: "cm⁻¹" };
@@ -309,11 +310,11 @@ function renderVideo() {
 function drawVideo(canvas, W, H, mv) {
   if (W < 20 || H < 20) return;
   const ctx = hidpi(canvas, W, H);
-  ctx.fillStyle = "#030a1a"; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = T.bg; ctx.fillRect(0, 0, W, H);
   if (!S.ds) return;
   const V = S.ds.video;
   if (!V || !S.video) {
-    ctx.fillStyle = "#6f8ab3"; ctx.font = "12px var(--sans)"; ctx.textAlign = "center";
+    ctx.fillStyle = T.label; ctx.font = font(14); ctx.textAlign = "center";
     ctx.fillText("No white-light image (.l6v) saved with this map", W / 2, H / 2); return;
   }
   const vx0 = Math.min(...V.x), vx1 = Math.max(...V.x), vy0 = Math.min(...V.y), vy1 = Math.max(...V.y);
@@ -346,8 +347,8 @@ function drawVideo(canvas, W, H, mv) {
     ctx.moveTo(0, sy(yu) + .5); ctx.lineTo(W, sy(yu) + .5); ctx.moveTo(sx(xu) + .5, 0); ctx.lineTo(sx(xu) + .5, H); ctx.stroke();
   }
   ctx.restore();
-  ctx.fillStyle = "rgba(0,0,0,.5)"; ctx.fillRect(6, H - 22, 160, 16);
-  ctx.fillStyle = "#cfe0ff"; ctx.font = "10px var(--mono)"; ctx.textAlign = "left"; ctx.textBaseline = "middle";
+  ctx.fillStyle = T.tagBg; ctx.fillRect(6, H - 22, 160, 16);
+  ctx.fillStyle = T.tagInk; ctx.font = font(11); ctx.textAlign = "left"; ctx.textBaseline = "middle";
   ctx.fillText(`${fmt(rx1 - rx0, 3)} × ${fmt(ry1 - ry0, 3)} µm field`, 10, H - 14);
 }
 
@@ -958,11 +959,11 @@ function drawLoss(h) {
   if (!h.length) return;
   const ls = h.map(p => Math.log10(p.loss)), lo = Math.min(...ls), hi = Math.max(...ls);
   const n = h[h.length - 1].iter, X = i => 4 + (i - 1) / Math.max(1, n - 1) * (W - 8), Y = v => H - 14 - (v - lo) / ((hi - lo) || 1) * (H - 22);
-  const g = ctx.createLinearGradient(0, 0, W, 0); g.addColorStop(0, "#2b6cff"); g.addColorStop(1, "#3fe0ff");
+  const g = ctx.createLinearGradient(0, 0, W, 0); g.addColorStop(0, T.accent2); g.addColorStop(1, T.accent);
   ctx.strokeStyle = g; ctx.lineWidth = 1.6; ctx.beginPath();
   h.forEach((p, k) => { const x = X(p.iter), y = Y(Math.log10(p.loss)); k ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
   ctx.stroke();
-  ctx.fillStyle = "#6f8ab3"; ctx.font = "10px var(--sans)"; ctx.fillText("loss (log) vs iteration", 6, H - 2);
+  ctx.fillStyle = T.label; ctx.font = font(11); ctx.fillText("loss (log) vs iteration", 6, H - 2);
 }
 
 function showMetrics(r) {
@@ -1069,8 +1070,8 @@ function drawStrip() {
   const all = parts.flatMap(p => p.vals).sort((a, b) => a - b); if (!all.length) return;
   const lo = quantile(all, 0.02), hi = quantile(all, 0.98) || lo + 1;
   const L = 44, B = 18, Y = v => 8 + (1 - (v - lo) / (hi - lo)) * (H - 8 - B);
-  ctx.font = "10px var(--mono)"; ctx.fillStyle = "#9db6db"; ctx.textAlign = "right"; ctx.textBaseline = "middle";
-  for (const t of niceTicks(lo, hi, 4)) { ctx.fillStyle = "rgba(150,190,255,.08)"; ctx.fillRect(L, Y(t), W - L, 1); ctx.fillStyle = "#9db6db"; ctx.fillText(fmt(t, 3), L - 4, Y(t)); }
+  ctx.font = font(11); ctx.fillStyle = T.ink; ctx.textAlign = "right"; ctx.textBaseline = "middle";
+  for (const t of niceTicks(lo, hi, 4)) { ctx.fillStyle = T.grid; ctx.fillRect(L, Y(t), W - L, 1); ctx.fillStyle = T.ink; ctx.fillText(fmt(t, 3), L - 4, Y(t)); }
   const bw = (W - L - 6) / Math.max(1, parts.length);
   parts.forEach((p, k) => {
     const cx = L + bw * (k + 0.5), col = PARTICLE_COLOURS[(p.id - 1) % PARTICLE_COLOURS.length];
@@ -1082,7 +1083,7 @@ function drawStrip() {
     const q1 = quantile(s, 0.25), q3 = quantile(s, 0.75), md = quantile(s, 0.5);
     ctx.strokeStyle = col; ctx.lineWidth = 1.4;
     ctx.strokeRect(cx - bw * 0.18, Y(Math.min(hi, q3)), bw * 0.36, Y(Math.max(lo, q1)) - Y(Math.min(hi, q3)));
-    ctx.fillStyle = "#fff"; ctx.fillRect(cx - bw * 0.2, Y(md), bw * 0.4, 2);
+    ctx.fillStyle = T.strong; ctx.fillRect(cx - bw * 0.2, Y(md), bw * 0.4, 2);
     ctx.fillStyle = col; ctx.textAlign = "center"; ctx.fillText(p.id, cx, H - 8);
   });
 }
@@ -1091,8 +1092,7 @@ function drawStrip() {
 // report
 // =========================================================================
 // Report figures are drawn off-screen at a fixed size, so they are current
-// whichever tab is open, and sit on a dark tile so the instrument look survives
-// the white page.
+// whichever tab is open, on a tile in the current theme's plot colour.
 function offscreen(w, h) {
   const host = el("div", { style: `position:fixed;left:-10000px;top:0;width:${w}px;height:${h}px;display:flex;flex-direction:column` });
   document.body.append(host);
@@ -1100,7 +1100,7 @@ function offscreen(w, h) {
 }
 function onDark(canvas) {
   const c = document.createElement("canvas"); c.width = canvas.width; c.height = canvas.height;
-  const g = c.getContext("2d"); g.fillStyle = "#0b1d40"; g.fillRect(0, 0, c.width, c.height); g.drawImage(canvas, 0, 0);
+  const g = c.getContext("2d"); g.fillStyle = T.paper; g.fillRect(0, 0, c.width, c.height); g.drawImage(canvas, 0, 0);
   return c.toDataURL("image/png");
 }
 function reportFigures() {
@@ -1142,6 +1142,25 @@ function makeReport() {
 $("#rp-refresh").onclick = makeReport;
 $("#rp-title").onchange = makeReport;
 $("#rp-print").onclick = () => { makeReport(); setTimeout(() => window.print(), 150); };
+
+// =========================================================================
+// light / dark theme
+// =========================================================================
+function themeButton() {
+  const next = currentTheme() === "light" ? "dark" : "light";
+  $("#theme-toggle").title = `Switch to ${next} mode`;
+}
+$("#theme-toggle").onclick = () => setTheme(currentTheme() === "light" ? "dark" : "light");
+window.addEventListener("themechange", () => {
+  themeButton();
+  buildPeaks();                                   // band swatches
+  for (const m of [...maps, pmap, sliceData, sliceFieldView]) { m._dirty = true; m.render(); }
+  if (S.fit) refreshAll(); else { renderCursor(); renderVideo(); }
+  if (S.cube) renderDensity();
+  if (S.seg) { drawStrip(); renderParticles(); }
+  const st = splatState(); if (st.history) drawLoss(st.history);
+});
+themeButton();
 
 // =========================================================================
 // boot

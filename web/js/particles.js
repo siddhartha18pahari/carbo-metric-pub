@@ -3,6 +3,8 @@
 // (an earlier map had ~30 effective samples among 379 pixels), so the
 // particle, not the pixel, is the unit to compare between samples.
 
+import { PARTICLE_COLOURS, font } from "./theme.js";
+
 function components(inside, nx, ny) {
   const N = nx * ny, labels = new Int32Array(N), stack = new Int32Array(N), groups = [];
   let next = 1;
@@ -108,7 +110,7 @@ export function segment(values, nx, ny, thr, minPx = 6, split = true) {
   return { labels, parts };
 }
 
-export const PARTICLE_COLOURS = ["#3fe0ff", "#ff9f40", "#b18cff", "#7dff6a", "#ff6b9a", "#ffd84d", "#6bb8ff", "#ff7b54"];
+export { PARTICLE_COLOURS };
 
 // MapView overlay: particle outlines plus their numbers
 export function outlineOverlay(seg) {
@@ -132,7 +134,7 @@ export function outlineOverlay(seg) {
       for (let k = 0; k < s.length; k += 4) { ctx.moveTo(mv.sx(s[k]), mv.sy(s[k + 1])); ctx.lineTo(mv.sx(s[k + 2]), mv.sy(s[k + 3])); }
       ctx.stroke();
     }
-    ctx.font = "bold 11px var(--sans, sans-serif)"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.font = font(12, "bold"); ctx.textAlign = "center"; ctx.textBaseline = "middle";
     for (const pt of seg.parts) {
       let sx = 0, sy = 0;
       for (const p of pt.pixels) { const [xu, yu] = mv.idxXY(p); sx += xu; sy += yu; }

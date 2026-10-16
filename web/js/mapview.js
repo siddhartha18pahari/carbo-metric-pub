@@ -4,15 +4,20 @@
 
 import { cssGradient, lut, COLORMAPS } from "./colormaps.js";
 import { el, fmt, hidpi, niceTicks, quantile } from "./util.js";
+import { T, font } from "./theme.js";
 
-const HATCH = (() => {
+// diagonal hatch behind invalid points, in the current theme's colours
+let hatch = null;
+function HATCH() {
+  if (hatch && hatch.key === T.hatchBg + T.hatchLine) return hatch.c;
   const c = document.createElement("canvas"); c.width = c.height = 8;
   const g = c.getContext("2d");
-  g.fillStyle = "#0a1630"; g.fillRect(0, 0, 8, 8);
-  g.strokeStyle = "rgba(140,170,220,.22)"; g.lineWidth = 1;
+  g.fillStyle = T.hatchBg; g.fillRect(0, 0, 8, 8);
+  g.strokeStyle = T.hatchLine; g.lineWidth = 1;
   g.beginPath(); g.moveTo(0, 8); g.lineTo(8, 0); g.stroke();
+  hatch = { key: T.hatchBg + T.hatchLine, c };
   return c;
-})();
+}
 
 export class MapView {
   constructor(host, opts = {}) {
@@ -146,7 +151,7 @@ export class MapView {
     this.plot = { x: padL + (aw - pw) / 2, y: padT + (ah - ph) / 2, w: pw, h: ph };
     const P = this.plot;
 
-    ctx.fillStyle = ctx.createPattern(HATCH, "repeat");
+    ctx.fillStyle = ctx.createPattern(HATCH(), "repeat");
     ctx.fillRect(P.x, P.y, P.w, P.h);
     if (this.values) {
       if (this._dirty) { this._paintImage(); this._dirty = false; }
@@ -157,9 +162,9 @@ export class MapView {
     for (const o of this.overlays) o(ctx, this);
 
     // axes
-    ctx.strokeStyle = "rgba(160,200,255,.35)"; ctx.lineWidth = 1;
+    ctx.strokeStyle = T.frame; ctx.lineWidth = 1;
     ctx.strokeRect(P.x - .5, P.y - .5, P.w + 1, P.h + 1);
-    ctx.fillStyle = "#9db6db"; ctx.font = "10px var(--mono, monospace)";
+    ctx.fillStyle = T.ink; ctx.font = font(11);
     ctx.textAlign = "center"; ctx.textBaseline = "top";
     for (const t of niceTicks(this.x0, this.x1, Math.max(2, Math.floor(P.w / 60)))) {
       const X = this.sx(t); ctx.fillRect(X, P.y + P.h, 1, 3); ctx.fillText(fmt(t, 3), X, P.y + P.h + 5);
@@ -168,7 +173,7 @@ export class MapView {
     for (const t of niceTicks(this.y0, this.y1, Math.max(2, Math.floor(P.h / 45)))) {
       const Y = this.sy(t); ctx.fillRect(P.x - 3, Y, 3, 1); ctx.fillText(fmt(t, 3), P.x - 5, Y);
     }
-    ctx.save(); ctx.fillStyle = "#6f8ab3"; ctx.font = "10px var(--sans, sans-serif)";
+    ctx.save(); ctx.fillStyle = T.label; ctx.font = font(12);
     ctx.textAlign = "center"; ctx.fillText("X (µm)", P.x + P.w / 2, H - 6);
     ctx.translate(9, P.y + P.h / 2); ctx.rotate(-Math.PI / 2); ctx.fillText("Y (µm)", 0, 0); ctx.restore();
 
@@ -179,7 +184,7 @@ export class MapView {
     if (P.w > 120) {
       ctx.fillStyle = "rgba(0,0,0,.35)"; ctx.fillRect(bx - 5, by - 15, len * this.k + 10, 22);
       ctx.fillStyle = "#3fe0ff"; ctx.fillRect(bx, by, len * this.k, 4);
-      ctx.font = "10px var(--sans, sans-serif)"; ctx.textAlign = "center"; ctx.textBaseline = "bottom";
+      ctx.font = font(12, "bold"); ctx.textAlign = "center"; ctx.textBaseline = "bottom";
       ctx.fillText(`${len} µm`, bx + len * this.k / 2, by - 2);
     }
 
@@ -189,15 +194,15 @@ export class MapView {
     const L = lut(this.cmap);
     for (let s = 0; s <= 16; s++) { const q = Math.round(s / 16 * 255) * 3; grad.addColorStop(s / 16, `rgb(${L[q]},${L[q + 1]},${L[q + 2]})`); }
     ctx.fillStyle = grad; ctx.fillRect(cx, cy, cbW, ch);
-    ctx.strokeStyle = "rgba(160,200,255,.35)"; ctx.strokeRect(cx - .5, cy - .5, cbW + 1, ch + 1);
-    ctx.fillStyle = "#9db6db"; ctx.font = "10px var(--mono, monospace)"; ctx.textAlign = "left"; ctx.textBaseline = "middle";
+    ctx.strokeStyle = T.frame; ctx.strokeRect(cx - .5, cy - .5, cbW + 1, ch + 1);
+    ctx.fillStyle = T.ink; ctx.font = font(11); ctx.textAlign = "left"; ctx.textBaseline = "middle";
     for (const t of niceTicks(this.vmin, this.vmax, Math.max(2, Math.floor(ch / 40)))) {
       const Y = cy + ch - (t - this.vmin) / (this.vmax - this.vmin) * ch;
       ctx.fillRect(cx + cbW, Y, 3, 1); ctx.fillText(fmt(t, 3), cx + cbW + 5, Y);
     }
     if (this.label) {
       ctx.save(); ctx.translate(W - 6, cy + ch / 2); ctx.rotate(-Math.PI / 2);
-      ctx.fillStyle = "#6f8ab3"; ctx.font = "10px var(--sans, sans-serif)"; ctx.textAlign = "center";
+      ctx.fillStyle = T.label; ctx.font = font(12); ctx.textAlign = "center";
       ctx.fillText(this.label + (this.unit ? ` (${this.unit})` : ""), 0, 0); ctx.restore();
     }
     this._drawCursor();

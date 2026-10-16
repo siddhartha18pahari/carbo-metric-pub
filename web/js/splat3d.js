@@ -13,7 +13,7 @@
 // the instrument reads correctly from the default view), height = Raman shift.
 
 import { rgbAt } from "./colormaps.js";
-import { PEAK_COLOURS } from "./plots.js";
+import { DARK_PEAK_COLOURS as PEAK_COLOURS, font } from "./theme.js";
 
 const VS_SPLAT = `#version 300 es
 precision highp float;
@@ -391,7 +391,7 @@ export class SplatView {
     const g = this.labels.getContext("2d");
     g.setTransform(1, 0, 0, 1, 0, 0); g.clearRect(0, 0, W, H); g.scale(dpr, dpr);
     const S = this.scene, [x0, x1, y0, y1] = S.mapRect;
-    g.font = "11px Consolas, monospace"; g.fillStyle = "rgba(170,205,255,.85)"; g.textAlign = "right"; g.textBaseline = "middle";
+    g.font = font(12); g.fillStyle = "rgba(170,205,255,.85)"; g.textAlign = "right"; g.textBaseline = "middle";
     for (const nu of this.ticks || []) {
       const p = this._project(this.toDisp(x0 - (x1 - x0) * 0.05, y1, nu)); if (!p) continue;
       g.fillText(String(nu), p[0] / dpr, p[1] / dpr);
