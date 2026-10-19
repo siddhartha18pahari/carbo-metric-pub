@@ -195,9 +195,9 @@ function fitCube() {
 
 function renderCursor() {
   const p = S.hover ?? S.pinned;
-  cursorPlot.emptyText = S.fit && S.fit.resultsOnly ? "This file holds fitted values only: no spectra to show" : null;
+  cursorPlot.emptyText = S.fit && S.fit.resultsOnly ? "Hover or click a map to see the bands its fitted values describe" : null;
   if (p != null && !S.cube && S.fit && S.fit.resultsOnly) {
-    cursorPlot.setData(null);
+    cursorPlot.setData(modelSpectrum(p));
     const i = Math.floor(p / S.nx), j = p % S.nx;
     $("#cursor-info").textContent = `· point ${p + 1} · column ${j + 1}, row ${i + 1}${S.hover != null && S.hover !== S.pinned ? "" : " · pinned"}${S.valid && !S.valid[p] ? " · not valid" : ""}`;
     const tb = $("#cursor-table"); tb.textContent = "";
@@ -577,7 +577,7 @@ async function startFit() {
     // no spectra to refit: spatial smoothing acts on the fitted maps; the
     // spectral settings cannot apply
     if (!S.results || !S.results.raw) return;
-    decodeFit(smoothFitted(S.results.raw)); buildRatio();
+    decodeFit(smoothFitted(S.results.raw)); buildRatio(); modelDensity();
     const k = S.cfg.spatial_kernel;
     setStatus(k ? `Fitted maps smoothed over ${k} × ${k} neighbours (this file has no spectra)`
                 : "Fitted values from the file (no spectra: spectral settings do not apply)");
@@ -784,14 +784,44 @@ async function loadResults(grid) {
     if (await new Promise(res => { img.onload = () => res(true); img.onerror = () => res(false); img.src = r.video.url; })) S.video = img;
   }
   for (const m of [...maps, pmap]) { m.setGeometry({ nx: S.nx, ny: S.ny, x: S.x, y: S.y }); m.values = null; }
-  density.setData(null);
+  // no spectra in the file: the graphs show the bands its fitted values describe
+  S.wn = Float32Array.from({ length: 321 }, (_, c) => S.cfg.range_lo + (S.cfg.range_hi - S.cfg.range_lo) * c / 320);
   setActive(S.active);
   splatReset();
   S.results.raw = fit;
   decodeFit(smoothFitted(fit));
   buildRatio();
+  modelDensity();
+  $("#spec-name").textContent = `${info.nx} × ${info.ny} · bands rebuilt from fitted values`;
   setStatus(`Opened ${fmt(P())} fitted points (${S.fit.names.join(", ")})` +
     (S.cfg.spatial_kernel ? `, smoothed over ${S.cfg.spatial_kernel} × ${S.cfg.spatial_kernel} neighbours` : ""));
+}
+
+// A file of fitted values has no spectra. Its graphs draw what the values
+// describe: each band at its exported height and width (line shape read off
+// the file's areas, position nominal where the file has none), no baseline.
+function modelCaption() {
+  const nom = (S.ds && S.ds.nominal) || [];
+  return "Rebuilt from the fitted values: this file holds no spectra" +
+    (nom.length ? ` (${nom.join(", ")} at the configured position: the file has none)` : "");
+}
+function modelSpectrum(p) {
+  const fit = evalFit(p);
+  if (!fit.total.every(Number.isFinite)) return null;          // no fitted values at this point
+  return { wn: S.wn, raw: fit.total, range: S.fit.range, fit, modelOnly: true, caption: modelCaption() };
+}
+function modelDensity() {
+  const K = S.wn.length, n = P(), cube = new Float32Array(n * K), top = [];
+  for (let p = 0; p < n; p++) {
+    const t = evalFit(p).total; cube.set(t, p * K);
+    let m = -Infinity; for (const v of t) if (v > m) m = v;
+    if (Number.isFinite(m)) top.push(m);
+  }
+  // no baseline under rebuilt bands, so scale to the peak heights rather
+  // than to all channels (which would clip the tallest bands)
+  top.sort((a, b) => a - b);
+  const hi = top.length ? top[Math.floor((top.length - 1) * 0.995)] * 1.1 : undefined;
+  density.setData({ cube, k: K, wn: S.wn, range: S.fit.range, peaks: S.cfg.peaks, hi: hi > 0 ? hi : undefined });
 }
 
 // A file of fitted values has no spectra, so spatial smoothing is applied to
@@ -1321,7 +1351,7 @@ function reportFigures() {
   if (S.pinned != null && S.cube) {
     const sm = fitCube(), raw = S.cube.subarray(S.pinned * S.k, (S.pinned + 1) * S.k);
     sp.setData({ wn: S.wn, raw: sm ? sm.subarray(S.pinned * S.k, (S.pinned + 1) * S.k) : raw, raw0: sm ? raw : null, range: S.fit.range, fit: evalFit(S.pinned) });
-  }
+  } else if (S.pinned != null && S.fit && S.fit.resultsOnly) sp.setData(modelSpectrum(S.pinned));
   figs.cursor = onDark(sp.canvas); host.remove();
   host = offscreen(520, 360);
   const hp = new HistogramPlot(host); hp.setData(hist.d); figs.hist = onDark(hp.canvas); host.remove();

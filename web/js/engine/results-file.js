@@ -44,14 +44,40 @@ export async function openResults(file, files) {
   return { id: `results-${++seq}`, table: t, grid, choices, video, note };
 }
 
+// Line shape of each band, read off the file itself: area / (height x FWHM)
+// is 1.0645 for a Gaussian and 1.3-1.57 for a Lorentzian windowed to the fit
+// range (both measured on Q-Carbon's own exports). Falls back to the
+// configured shape when the file has no areas.
+const NOMINAL = { G: 1580, D1: 1350, D2: 1620, D3: 1500, D4: 1200 };
+function bandShapes(t, cfg) {
+  return t.bands.map(b => {
+    const { intensity: I, width: W, area: A } = t.cols[b], r = [];
+    for (let p = 0; p < t.n; p++) if (I[p] > 0 && W[p] > 0 && A[p] > 0) r.push(A[p] / (I[p] * W[p]));
+    if (r.length >= 5) { r.sort((u, v) => u - v); return r[Math.floor(r.length / 2)] < 1.25 ? "Gauss" : "Lorentz"; }
+    const pk = cfg.peaks.find(q => q.name === b);
+    return pk ? pk.shape : "Lorentz";
+  });
+}
+
 // the dataset and fit payload the interface expects, for one grid
 export function resultsDataset(r, grid, cfg) {
   const t = r.table, { nx, ny, x, y, fit } = placeResults(t, grid), P = nx * ny;
   const nan = () => new Float64Array(P).fill(NaN);
+  // Q-Carbon exports no band positions: draw those bands at their configured
+  // (or standard) positions, and say so
+  const nominal = [];
+  t.bands.forEach((b, j) => {
+    let any = false;
+    for (let p = 0; p < P && !any; p++) if (Number.isFinite(fit.position[p * t.bands.length + j])) any = true;
+    if (any) return;
+    const pk = cfg.peaks.find(q => q.name === b), pos = pk ? pk.pos : NOMINAL[b.toUpperCase()] ?? 1500;
+    for (let p = 0; p < P; p++) fit.position[p * t.bands.length + j] = pos;
+    nominal.push(b);
+  });
   return {
     info: { id: r.id, name: t.name, path: t.name, nx, ny, k: 0, wn: new Float64Array(0), x, y,
-            format: "results", resultsOnly: true, video: r.video ? r.video.meta : undefined },
-    fit: { names: t.bands, shapes: t.bands.map(() => "Lorentz"), m: t.bands.length, nb: 0,
+            format: "results", resultsOnly: true, video: r.video ? r.video.meta : undefined, nominal },
+    fit: { names: t.bands, shapes: bandShapes(t, cfg), m: t.bands.length, nb: 0,
            range: [cfg.range_lo, cfg.range_hi], seconds: 0, n_channels: 0, held: [], results_only: true,
            config: { ...structuredClone(cfg), ratio_num: t.ratio[0], ratio_den: t.ratio[1] },
            ...fit, baseline: new Float64Array(0), std_error: nan(), red_chi2: nan(), n_iter: nan() },

@@ -71,7 +71,7 @@ export class SpectrumPlot extends Base {
     const wn = d.wn, full = [wn[0], wn[wn.length - 1]];
     const xr = this.view || full; this.xr = xr;
     const inX = i => wn[i] >= xr[0] && wn[i] <= xr[1];
-    const resH = d.fit ? Math.min(46, F.h * 0.2) : 0;
+    const resH = d.fit && !d.modelOnly ? Math.min(46, F.h * 0.2) : 0;
     const main = { ...F, h: F.h - resH - (resH ? 6 : 0) };
     let lo = Infinity, hi = -Infinity;
     for (let i = 0; i < wn.length; i++) if (inX(i)) { lo = Math.min(lo, d.raw[i]); hi = Math.max(hi, d.raw[i]); }
@@ -105,7 +105,7 @@ export class SpectrumPlot extends Base {
       line(d.fit.baseline, T.baseline, 1, [4, 3]);
     }
     if (d.raw0) line(d.raw0, T.raw0, 1);   // the raw spectrum behind its smoothed version
-    line(d.raw, T.raw, 1);
+    if (!d.modelOnly) line(d.raw, T.raw, 1);
     if (d.fit) line(d.fit.total, T.fit, 1.8);
     // peak labels at fitted centres, rotated like LabSpec
     if (d.fit) {
@@ -120,9 +120,13 @@ export class SpectrumPlot extends Base {
       });
     }
     if (this.drag) { ctx.fillStyle = "rgba(63,224,255,.12)"; ctx.fillRect(Math.min(...this.drag), main.y, Math.abs(this.drag[1] - this.drag[0]), main.h); }
+    if (d.modelOnly) {
+      ctx.fillStyle = T.label; ctx.font = font(11); ctx.textAlign = "left"; ctx.textBaseline = "top";
+      ctx.fillText(d.caption || "Rebuilt from the fitted values: this file holds no spectra", main.x + 8, main.y + 8);
+    }
     ctx.restore();
     // residual strip
-    if (d.fit) {
+    if (d.fit && !d.modelOnly) {
       const R = { x: F.x, y: main.y + main.h + 6, w: F.w, h: resH };
       let m = 1e-9; const res = d.raw.map((v, i) => v - d.fit.total[i]);
       for (let i = 0; i < wn.length; i++) if (inX(i) && wn[i] >= d.range[0] && wn[i] <= d.range[1]) m = Math.max(m, Math.abs(res[i]));
@@ -142,7 +146,8 @@ export class SpectrumPlot extends Base {
       const v = xr[0] + (this.mouse - F.x) / F.w * (xr[1] - xr[0]);
       let k = 0; while (k < wn.length - 1 && wn[k] < v) k++;
       ctx.fillStyle = T.hair; ctx.fillRect(this.mouse, F.y, 1, F.h);
-      const txt = `${wn[k].toFixed(1)} cm⁻¹   data ${fmt(d.raw[k])}` + (d.fit ? `   fit ${fmt(d.fit.total[k])}` : "");
+      const txt = d.modelOnly ? `${wn[k].toFixed(1)} cm⁻¹   bands ${fmt(d.fit.total[k])}`
+        : `${wn[k].toFixed(1)} cm⁻¹   data ${fmt(d.raw[k])}` + (d.fit ? `   fit ${fmt(d.fit.total[k])}` : "");
       ctx.font = font(11); const tw = ctx.measureText(txt).width + 10;
       const tx = Math.min(this.mouse + 8, F.x + F.w - tw);
       ctx.fillStyle = T.tipBg; ctx.fillRect(tx, F.y + 8, tw, 18);
@@ -196,7 +201,7 @@ export class DensityPlot extends Base {
     const sample = [];
     for (let i = 0; i < cube.length; i += 97) if (Number.isFinite(cube[i])) sample.push(cube[i]);
     sample.sort((a, b) => a - b);
-    hi = sample[Math.floor(sample.length * 0.999)] * 1.1;
+    hi = this.d.hi ?? sample[Math.floor(sample.length * 0.999)] * 1.1;
     let lo = Math.min(0, sample[0]);
     const B = 120, H = new Float32Array(B * k), mean = new Float64Array(k);
     let measured = 0;
