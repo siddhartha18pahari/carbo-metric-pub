@@ -48,7 +48,8 @@ def valid_mask(res: FitResult, cfg: Config) -> np.ndarray:
 def quality(res: FitResult, cfg: Config, valid=None) -> dict:
     v = valid_mask(res, cfg) if valid is None else valid
     return {
-        "total_points": int(v.size),
+        # points measured: a map stopped early has cells that were never acquired
+        "total_points": int(np.isfinite(res.std_error).sum()),
         "valid_points": int(v.sum()),
         "std_error": float(res.std_error[v].mean()) if v.any() else float("nan"),
         "red_chi2": float(res.red_chi2[v].mean()) if v.any() else float("nan"),

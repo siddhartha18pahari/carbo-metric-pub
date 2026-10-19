@@ -67,10 +67,15 @@ test("two-column spectrum with labels, and decimal commas", () => {
   close(s.wn[0], 1000, 1e-9);
 });
 
-test("point lists are refused, not guessed", () => {
+test("a map stopped early keeps its grid; scattered points are refused", () => {
   const wn = Array.from({ length: 20 }, (_, k) => 1000 + 40 * k);
-  const lines = ["\t\t" + wn.join("\t"), ...[[0, 0], [0, 1], [1, 0]].map(([y, x]) => [y, x, ...wn.map(() => 1)].join("\t"))];
-  assert.throws(() => readText(lines.join("\n"), "p.txt"), /full/);
+  const row = (y, x) => [y, x, ...wn.map(() => 1)].join("\t");
+  // 3 of a 2 x 2 grid: the last point was never measured
+  const m = readText(["\t\t" + wn.join("\t"), row(0, 0), row(0, 1), row(1, 0)].join("\n"), "p.txt");
+  assert.equal(m.nx * m.ny, 4); assert.equal(m.missing, 1); assert.ok(Number.isNaN(m.cube[3 * 20]));
+  // points that share no grid
+  const scattered = [[0.1, 0.7], [3.3, 1.9], [2.2, 4.4], [5.1, 0.2]].map(([y, x]) => row(y, x));
+  assert.throws(() => readText(["\t\t" + wn.join("\t"), ...scattered].join("\n"), "s.txt"), /point lists cannot be mapped/);
 });
 
 // ---------------------------------------------------------------- fitted-result tables

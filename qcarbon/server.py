@@ -72,7 +72,8 @@ class Dataset:
             "id": self.id, "name": m.name, "path": self.path, "nx": int(m.cube.shape[1]),
             "ny": int(m.cube.shape[0]), "k": int(m.wn.size), "wn": b64(m.wn),
             "x": b64(m.x), "y": b64(m.y), "format": m.meta.get("format"),
-            "counts": [float(m.cube.min()), float(np.percentile(m.cube, 99.9))],
+            "counts": [float(np.nanmin(m.cube)), float(np.nanpercentile(m.cube, 99.9))],
+            "missing": int(m.meta.get("missing", 0)),
         }
         if self.video is not None:
             v = self.video
@@ -215,6 +216,9 @@ def _fit_payload(ds: Dataset) -> dict:
 def _fit_worker(ds: Dataset, cfg: Config):
     job = ds.fit_job
     try:
+        if ds.map.meta.get("kind") == "particles" and cfg.spatial_kernel:
+            # neighbouring particle numbers are not neighbouring places
+            cfg = Config.from_dict({**cfg.to_dict(), "spatial_kernel": 0})
         Y = smooth_spectra(ds.map.cube, cfg).reshape(-1, ds.map.wn.size)
         res = fit_spectra(Y, ds.map.wn, cfg, progress=lambda f: job.__setitem__("progress", f))
         with ds.lock:

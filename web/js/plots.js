@@ -194,20 +194,23 @@ export class DensityPlot extends Base {
     const { cube, k, wn } = this.d, P = cube.length / k;
     let hi = 0;
     const sample = [];
-    for (let i = 0; i < cube.length; i += 97) sample.push(cube[i]);
+    for (let i = 0; i < cube.length; i += 97) if (Number.isFinite(cube[i])) sample.push(cube[i]);
     sample.sort((a, b) => a - b);
     hi = sample[Math.floor(sample.length * 0.999)] * 1.1;
     let lo = Math.min(0, sample[0]);
     const B = 120, H = new Float32Array(B * k), mean = new Float64Array(k);
+    let measured = 0;
     for (let p = 0; p < P; p++) {
       const o = p * k;
+      if (!Number.isFinite(cube[o])) continue;          // a point never measured
+      measured++;
       for (let c = 0; c < k; c++) {
         const v = cube[o + c]; mean[c] += v;
         const b = Math.floor((v - lo) / (hi - lo) * B);
         if (b >= 0 && b < B) H[b * k + c]++;
       }
     }
-    for (let c = 0; c < k; c++) mean[c] /= P;
+    for (let c = 0; c < k; c++) mean[c] /= Math.max(1, measured);
     let m = 0; for (const v of H) m = Math.max(m, v);
     const off = document.createElement("canvas"); off.width = k; off.height = B;
     const g = off.getContext("2d"), img = g.createImageData(k, B), L = lut("Ice");

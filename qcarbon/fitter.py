@@ -280,21 +280,26 @@ def smooth_spectra(cube: np.ndarray, cfg: Config) -> np.ndarray:
         Y = out
     k = cfg.spatial_kernel
     if k:
+        # Gaussian weights over the measured neighbours only: weights and
+        # weighted sums are convolved separately and divided at the end, so a
+        # missing point or the map edge simply drops out of the average
         r = k // 2
         g = np.exp(-0.5 * (np.arange(-r, r + 1) / (k / 4.0)) ** 2)
+        ok = np.isfinite(Y).all(axis=-1)
+        num, den = np.where(ok[..., None], Y, 0.0), ok.astype(float)
         for axis in (0, 1):
-            n = Y.shape[axis]
-            num, den = np.zeros_like(Y), np.zeros(n)
+            n = num.shape[axis]
+            nn, dd = np.zeros_like(num), np.zeros_like(den)
             for d, wgt in zip(range(-r, r + 1), g):
                 t0, t1 = max(0, -d), min(n, n - d)
                 if t1 <= t0:
                     continue
-                tgt = [slice(None)] * Y.ndim; src = [slice(None)] * Y.ndim
+                tgt = [slice(None)] * 2; src = [slice(None)] * 2
                 tgt[axis], src[axis] = slice(t0, t1), slice(t0 + d, t1 + d)
-                num[tuple(tgt)] += wgt * Y[tuple(src)]
-                den[t0:t1] += wgt
-            shape = [1] * Y.ndim; shape[axis] = n
-            Y = num / den.reshape(shape)
+                nn[tuple(tgt)] += wgt * num[tuple(src)]
+                dd[tuple(tgt)] += wgt * den[tuple(src)]
+            num, den = nn, dd
+        Y = np.where(ok[..., None], num / np.maximum(den, 1e-300)[..., None], np.nan)
     return Y
 
 
@@ -356,6 +361,13 @@ def fit_spectra(Y: np.ndarray, wn: np.ndarray, cfg: Config, progress=None,
     k = (wn >= cfg.range_lo) & (wn <= cfg.range_hi)
     if k.sum() < 10:
         raise ValueError("fewer than 10 channels inside the spectral range")
+    # points never measured (a map stopped early) are NaN: fit the rest and
+    # report NaN for them, so no average inside the fit ever sees a gap
+    measured = np.isfinite(np.asarray(Y)[:, k]).all(axis=1)
+    if not measured.all():
+        if not measured.any():
+            raise ValueError("no measured spectra in this map")
+        return _expand(fit_spectra(np.asarray(Y)[measured], wn, cfg, progress, chunk), measured)
     nu = np.ascontiguousarray(wn[k], np.float64)
     Yr = np.ascontiguousarray(np.asarray(Y, np.float64)[:, k])
     P, N = Yr.shape
@@ -440,6 +452,18 @@ def fit_spectra(Y: np.ndarray, wn: np.ndarray, cfg: Config, progress=None,
         n_channels=N, n_free=n_free, range_lo=cfg.range_lo, range_hi=cfg.range_hi,
         seconds=time.time() - t0, held=held,
     )
+
+
+def _expand(r: FitResult, measured: np.ndarray) -> FitResult:
+    """Results for the measured points, placed back among NaN rows."""
+    def full(a):
+        out = np.full((measured.size,) + a.shape[1:], np.nan)
+        out[measured] = a
+        return out
+    for f in ("intensity", "position", "width", "area", "baseline", "std_error", "red_chi2"):
+        setattr(r, f, full(getattr(r, f)))
+    it = np.zeros(measured.size, np.int64); it[measured] = r.n_iter; r.n_iter = it
+    return r
 
 
 def evaluate(wn, result: FitResult, idx: int) -> dict:

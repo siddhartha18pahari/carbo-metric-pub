@@ -311,15 +311,15 @@ def test_decimal_commas_with_semicolons(tmp_path):
     assert m.wn[0] == pytest.approx(1000) and m.cube[0, 0, -1] == pytest.approx(2.8)
 
 
-def test_point_lists_are_refused_not_guessed(tmp_path):
+def test_three_points_of_a_2x2_grid_are_a_map_stopped_early(tmp_path):
     wn = np.linspace(1000, 1800, 20)
     rows = ["\t\t" + "\t".join(f"{v:g}" for v in wn)]
-    for x, y in [(0, 0), (1, 0), (0, 1)]:                  # 3 points: not a full grid
+    for x, y in [(0, 0), (1, 0), (0, 1)]:                  # the last point was never measured
         rows.append("\t".join([str(y), str(x), *["1"] * wn.size]))
     p = tmp_path / "points.txt"
     p.write_text("\n".join(rows))
-    with pytest.raises(ValueError, match="full"):
-        read_map(str(p))
+    m = read_map(str(p))
+    assert m.cube.shape[:2] == (2, 2) and m.meta["missing"] == 1 and np.isnan(m.cube[1, 1]).all()
 
 
 # ---------------------------------------------------------------- smoothing
@@ -424,3 +424,74 @@ def test_maps_recorded_through_the_laser_line_read_as_grids(map_key, red_key, sh
     best = max(np.corrcoef(m.cube[:, :, max(0, c - 9):c + 10].max(axis=2).ravel(), red.ravel())[0, 1]
                for c in range(0, m.wn.size, 4))
     assert best > 0.98
+
+
+
+# ---------------------------------------------------------------- maps stopped early
+def _map_text(tmp_path, drop=0, seed=11):
+    rng = np.random.default_rng(seed)
+    wn = np.linspace(1000, 1800, 200)
+    lines = ["\t\t" + "\t".join(f"{v:.3f}" for v in wn)]
+    for i in range(9):
+        for j in range(10):
+            y = 30 + 40 * shape_eval(wn, 1580, 20, "Lorentz") * (1 + 0.1 * j) + 15 * shape_eval(wn, 1350, 50, "Lorentz")
+            lines.append("\t".join([f"{i * 0.5:.3f}", f"{j * 0.5:.3f}", *map(str, rng.poisson(y))]))
+    path = tmp_path / f"map{drop}.txt"
+    path.write_text("\n".join(lines[:len(lines) - drop]) + "\n")
+    return path
+
+
+def test_map_stopped_early_keeps_its_grid(tmp_path):
+    full, short = read_text(str(_map_text(tmp_path))), read_text(str(_map_text(tmp_path, drop=3)))
+    assert short.cube.shape == full.cube.shape == (9, 10, 200)
+    assert short.meta["missing"] == 3
+    gone = ~np.isfinite(short.cube).all(axis=-1)
+    assert gone.sum() == 3 and gone[-1, -3:].all()            # the last three of the last row
+    np.testing.assert_array_equal(short.cube[~gone], full.cube[~gone])
+    from qcarbon.fitter import smooth_spectra
+    from qcarbon.results import quality
+    cfg = Config()
+    r = fit_spectra(short.cube.reshape(-1, 200), short.wn, cfg)
+    assert np.isnan(r.std_error[gone.ravel()]).all() and np.isfinite(r.std_error[~gone.ravel()]).all()
+    q = quality(r, cfg)
+    assert q["total_points"] == 87 and q["valid_points"] == 87
+    # spatial smoothing averages over measured neighbours only: no NaN leaks in
+    sm = smooth_spectra(short.cube, Config(spatial_kernel=5))
+    assert np.isfinite(sm[~gone]).all() and np.isnan(sm[gone]).all()
+
+
+def test_scattered_points_are_still_refused(tmp_path):
+    rng = np.random.default_rng(3)
+    wn = np.linspace(1000, 1800, 50)
+    lines = ["\t\t" + "\t".join(f"{v:.3f}" for v in wn)]
+    for _ in range(30):
+        lines.append("\t".join([f"{rng.uniform(0, 50):.3f}", f"{rng.uniform(0, 50):.3f}", *["10"] * 50]))
+    path = tmp_path / "scatter.txt"
+    path.write_text("\n".join(lines) + "\n")
+    with pytest.raises(ValueError, match="point lists cannot be mapped"):
+        read_text(str(path))
+
+
+def test_spatial_smoothing_unchanged_on_complete_maps():
+    """Over measured neighbours only, but on a complete map it is the same
+    normalised Gaussian as before: compare with a direct 2-D sum."""
+    from qcarbon.fitter import smooth_spectra
+    Y = np.random.default_rng(5).normal(size=(7, 9, 4))
+    k, r = 5, 2
+    g = np.exp(-0.5 * (np.arange(-r, r + 1) / (k / 4.0)) ** 2)
+    ref = np.zeros_like(Y)
+    for i in range(7):
+        for j in range(9):
+            s = w = 0.0
+            for di in range(-r, r + 1):
+                for dj in range(-r, r + 1):
+                    if 0 <= i + di < 7 and 0 <= j + dj < 9:
+                        s = s + g[di + r] * g[dj + r] * Y[i + di, j + dj]
+                        w += g[di + r] * g[dj + r]
+            ref[i, j] = s / w
+    np.testing.assert_allclose(smooth_spectra(Y, Config(spatial_kernel=k)), ref, rtol=1e-12, atol=1e-12)
+
+
+def test_lab_map_stopped_early_opens():
+    m = read_text(vendor("incomplete_map"))
+    assert m.meta["missing"] == 3 and np.isfinite(m.cube).all(axis=-1).sum() == 118

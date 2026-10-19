@@ -80,7 +80,7 @@
             <button id="hero-open">Open from library</button>
             <span class="muted">or drop a file anywhere</span>
           </div>
-          <p class="muted small browser-note">Runs entirely in your browser: files are read on your computer and never uploaded. Splat&nbsp;3D needs the desktop version.</p>
+          <p class="muted small browser-note">Runs entirely in your browser: files are read on your computer and never uploaded. Splat&nbsp;3D is a work in progress.</p>
           <div class="recent" id="recent"></div>
         </div>
       </div>
@@ -104,12 +104,12 @@
             </select></div>
           <div class="frow"><label></label><label class="chk"><input type="checkbox" id="cfg-separate"> Fit separately</label></div>
           <div class="frow"><label></label><label class="chk" title="Fit the mean spectrum of the carbon pixels first and start every pixel from its band shapes. A band whose position or width one pixel cannot determine (at this map's noise) keeps the mean shape; only its intensity is fitted per pixel."><input type="checkbox" id="cfg-auto"> Shapes from mean spectrum</label></div>
-          <div class="frow"><label>Smoothing (spectra)</label>
+          <div class="frow"><label>Smoothing (spectral)</label>
             <div class="row2"><select id="cfg-sgw" title="Savitzky–Golay smoothing along the Raman shift, before the fit. Off fits the raw spectra, as Q-Carbon does. A wide window broadens narrow bands such as G.">
               <option value="0">Off</option><option value="5">SG 5 points</option><option value="7">SG 7 points</option><option value="9">SG 9 points</option><option value="11">SG 11 points</option><option value="15">SG 15 points</option><option value="21">SG 21 points</option>
             </select><select id="cfg-sgo" title="Polynomial order of the Savitzky–Golay filter"><option value="2">order 2</option><option value="3">order 3</option><option value="4">order 4</option></select></div></div>
-          <div class="frow"><label>Spatial averaging</label>
-            <select id="cfg-spatial" title="Average each spectrum with its neighbours (Gaussian weights) before the fit. Less noise and cleaner weak-band maps, at the cost of resolution; neighbouring points then share data, so per-point statistics overstate the number of independent points.">
+          <div class="frow"><label>Smoothing (spatial)</label>
+            <select id="cfg-spatial" title="Smooth each spectrum with its neighbours on the map (Gaussian weights) before the fit, so every map (D, G, Ratio, Error) follows. Less noise, cleaner weak-band maps, at the cost of resolution; neighbouring points then share data, so per-point statistics overstate the number of independent points. On a file of fitted values (no spectra) the fitted maps themselves are smoothed and the ratios recomputed.">
               <option value="0">Off</option><option value="3">3 × 3 neighbours</option><option value="5">5 × 5 neighbours</option><option value="7">7 × 7 neighbours</option>
             </select></div>
           <div class="frow"><label>Spectral range (cm⁻¹)</label>
@@ -179,8 +179,8 @@
       </div>
       <div class="gl-hint">drag to orbit · right-drag to pan · scroll to zoom · double-click to reset</div>
       <div class="gl-empty" id="gl-empty">
-        <h2>Spectral Gaussian splatting</h2>
-        <p>The fitted map becomes a field of 3-D Gaussians in (x, y, Raman shift). Each ellipsoid sits over the part of a particle it describes, at the height of the band it carries. Fitted on the baseline-corrected cube, on the particles only, with every 5th channel held out to measure how well it generalises.</p>
+        <h2 id="gl-empty-h">Spectral Gaussian splatting</h2>
+        <p id="gl-empty-p">The fitted map becomes a field of 3-D Gaussians in (x, y, Raman shift). Each ellipsoid sits over the part of a particle it describes, at the height of the band it carries. Fitted on the baseline-corrected cube, on the particles only, with every 5th channel held out to measure how well it generalises.</p>
         <button class="primary" id="sp-run2">Fit the splat field</button>
       </div>
     </div>
@@ -252,6 +252,7 @@
     <div class="report-scroll"><article id="report-paper" class="paper"></article></div>
   </section>
 </main>
+<footer class="credit">Made by Siddhartha Pahari. All rights reserved.</footer>
 
 <div id="library" class="modal hidden">
   <div class="modal-card">

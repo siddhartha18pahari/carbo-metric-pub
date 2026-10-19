@@ -1,7 +1,7 @@
 // The server, in the browser. Answers the same /api calls as qcarbon/server.py
 // so the interface runs unchanged without Python: files are read from the
 // user's disk into the page, fits run in Web Workers, nothing is uploaded.
-// Splat 3D needs the Python engine and stays in the desktop version.
+// Splat 3D needs the Python engine: in the web version it is a work in progress.
 
 import { readMap, readL6v, readL6pf, placeSpectraList, PF_LABELS, TEXT_EXT } from "./readers.js";
 import { prepareFit, finishFit, lmBatch, smoothSpectra } from "./core.js";
@@ -63,7 +63,7 @@ function counts(cube) {
   const step = Math.max(1, Math.floor(cube.length / 400000)), s = [];
   let min = Infinity;
   for (let i = 0; i < cube.length; i++) if (cube[i] < min) min = cube[i];
-  for (let i = 0; i < cube.length; i += step) s.push(cube[i]);
+  for (let i = 0; i < cube.length; i += step) if (Number.isFinite(cube[i])) s.push(cube[i]);
   s.sort((a, b) => a - b);
   return [min, s[Math.min(s.length - 1, Math.floor(0.999 * (s.length - 1)))]];
 }
@@ -85,7 +85,7 @@ export async function videoUrl(v) {
 function info(ds) {
   const m = ds.map;
   const d = { id: ds.id, name: m.name, path: m.name, nx: m.nx, ny: m.ny, k: m.wn.length,
-              wn: m.wn, x: m.x, y: m.y, format: m.format, counts: counts(m.cube) };
+              wn: m.wn, x: m.x, y: m.y, format: m.format, counts: counts(m.cube), missing: m.missing || 0 };
   if (ds.video) {
     const v = ds.video;
     d.video = { w: v.w, h: v.h, x: [v.x[0], v.x[v.x.length - 1]], y: [v.y[0], v.y[v.y.length - 1]] };
@@ -138,6 +138,8 @@ async function runFit(ds, cfg) {
   try {
     await new Promise(r => setTimeout(r, 0));          // let the status paint
     const t0 = performance.now(), m = ds.map, P = m.nx * m.ny;
+    // neighbouring particle numbers are not neighbouring places
+    if (m.points && cfg.spatial_kernel) cfg = { ...cfg, spatial_kernel: 0 };
     const cube = cfg.smooth_window || cfg.spatial_kernel ? smoothSpectra(m.cube, m.ny, m.nx, m.wn.length, cfg) : m.cube;
     const st = prepareFit(cube, P, m.wn, cfg);
     job.progress = 0.05;
@@ -225,7 +227,7 @@ export function createLocalBackend() {
     const url = new URL(path, "http://local");
     const p = url.pathname, q = url.searchParams;
     if (p === "/api/health") return { ok: true, browser: true, splat: false,
-      splat_why: "Splat 3D runs in the desktop version (python run.py). This web version fits and maps entirely in your browser." };
+      splat_why: "Splat 3D is a work in progress in the web version." };
     if (p === "/api/config/default") return structuredClone(DEFAULT_CONFIG);
     if (p === "/api/config/ini") return toIni(body);
     if (p === "/api/config/parse") {
@@ -250,7 +252,7 @@ export function createLocalBackend() {
         return exportText(ds, body);
       case "splat":
         if (ds.map.points) throw new Error("Splat 3D needs a gridded map; ParticleFinder spectra are one point per particle");
-        throw new Error("Splat 3D runs in the desktop version (python run.py)");
+        throw new Error("Splat 3D is a work in progress in the web version");
       default: throw new Error(`unknown request ${p}`);
     }
   }

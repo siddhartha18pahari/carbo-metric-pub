@@ -89,7 +89,7 @@ class Config:
                                    or not 0 <= self.smooth_order < self.smooth_window):
             raise ValueError("smoothing window must be odd, at least 3, and larger than the order")
         if self.spatial_kernel not in (0, 3, 5, 7):
-            raise ValueError("spatial averaging must be off, 3, 5 or 7 pixels")
+            raise ValueError("spatial smoothing must be off, 3, 5 or 7 pixels")
         names = [p.name for p in self.peaks]
         if len(set(names)) != len(names):
             raise ValueError("peak names must be unique")

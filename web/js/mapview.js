@@ -42,6 +42,7 @@ export class MapView {
     this.titleEl.addEventListener("click", e => opts.onTitle && opts.onTitle(this, e));
     this.readout = el("span", { class: "map-readout" });
     const tools = el("div", { class: "map-tools" },
+      this.resetBtn = el("button", { class: "icon hidden", title: "Show the whole map (or double-click the map)", onclick: () => this.setView(null, true) }, "⟲"),
       el("button", { class: "icon", title: "Display options", onclick: e => this.menu(e) }, "⚙"),
       el("button", { class: "icon", title: "Save as PNG", onclick: () => this.save() }, "⤓"),
       el("button", { class: "icon", title: "Enlarge", onclick: () => this.toggleMax() }, "⤢"));
@@ -51,10 +52,65 @@ export class MapView {
     host.append(this.head, this.body);
     this.off = document.createElement("canvas");
 
-    this.canvas.addEventListener("mousemove", e => this._hover(e));
+    this.canvas.addEventListener("mousemove", e => { if (!this._pan(e)) this._hover(e); });
     this.canvas.addEventListener("mouseleave", () => { this.readout.textContent = ""; opts.onHover && opts.onHover(null); });
-    this.canvas.addEventListener("click", e => { const p = this._pick(e); if (p != null && opts.onPick) opts.onPick(p); });
+    this.canvas.addEventListener("click", e => {
+      if (this._dragged) { this._dragged = false; return; }
+      const p = this._pick(e); if (p != null && opts.onPick) opts.onPick(p);
+    });
+    // zoom at the pointer, drag to pan, double-click for the whole map
+    this.canvas.addEventListener("wheel", e => { e.preventDefault(); this._wheel(e); }, { passive: false });
+    this.canvas.addEventListener("mousedown", e => { if (e.button === 0) this._drag = { x: e.clientX, y: e.clientY, v: this.view() }; });
+    window.addEventListener("mouseup", () => { this._drag = null; });
+    this.canvas.addEventListener("dblclick", () => this.setView(null, true));
     new ResizeObserver(() => this.render()).observe(this.body);
+  }
+
+  // the region shown, in stage um; the full extent is this.ext
+  view() { return { x0: this.x0, x1: this.x1, y0: this.y0, y1: this.y1 }; }
+  zoomed() { return !!this.ext && (this.x1 - this.x0 < (this.ext.x1 - this.ext.x0) * 0.999 || this.y1 - this.y0 < (this.ext.y1 - this.ext.y0) * 0.999); }
+
+  setView(v, emit = false) {
+    if (!this.ext) return;
+    const E = this.ext;
+    if (!v) v = { ...E };
+    let w = v.x1 - v.x0, h = v.y1 - v.y0;
+    const minW = Math.max(3 * this.dx, 1e-6);
+    if (w < minW) { const c = (v.x0 + v.x1) / 2, f = minW / w; v = { x0: c - minW / 2, x1: c + minW / 2, y0: (v.y0 + v.y1) / 2 - h * f / 2, y1: (v.y0 + v.y1) / 2 + h * f / 2 }; w = minW; h *= f; }
+    if (w >= E.x1 - E.x0 && h >= E.y1 - E.y0) v = { ...E };
+    else {                                         // keep the window over the map
+      const sx = Math.min(0, E.x1 - v.x1) + Math.max(0, E.x0 - v.x0), sy = Math.min(0, E.y1 - v.y1) + Math.max(0, E.y0 - v.y0);
+      if (w < E.x1 - E.x0) { v.x0 += sx; v.x1 += sx; }
+      if (h < E.y1 - E.y0) { v.y0 += sy; v.y1 += sy; }
+    }
+    Object.assign(this, v);
+    this._ptsCache = null;
+    this.render();
+    if (emit && this.opts.onView) this.opts.onView(this.zoomed() ? this.view() : null, this);
+  }
+
+  // centre the view on a stage point, half-width hw um (keeps the panel's aspect)
+  zoomTo(xu, yu, hw) {
+    const W = this.body.clientWidth || 1, H = this.body.clientHeight || 1, a = H / W;
+    this.setView({ x0: xu - hw, x1: xu + hw, y0: yu - hw * a, y1: yu + hw * a }, true);
+  }
+
+  _wheel(e) {
+    if (!this.plot || !this.ext) return;
+    const r = this.canvas.getBoundingClientRect();
+    const xu = this.x0 + (e.clientX - r.left - this.plot.x) / this.k, yu = this.y0 + (e.clientY - r.top - this.plot.y) / this.k;
+    const f = Math.exp(Math.max(-1, Math.min(1, e.deltaY * 0.0015)));
+    this.setView({ x0: xu - (xu - this.x0) * f, x1: xu + (this.x1 - xu) * f, y0: yu - (yu - this.y0) * f, y1: yu + (this.y1 - yu) * f }, true);
+  }
+
+  _pan(e) {
+    const d = this._drag;
+    if (!d || !(e.buttons & 1) || !this.zoomed()) return false;
+    const dx = e.clientX - d.x, dy = e.clientY - d.y;
+    if (!this._dragged && Math.hypot(dx, dy) < 4) return false;
+    this._dragged = true;
+    this.setView({ x0: d.v.x0 - dx / this.k, x1: d.v.x1 - dx / this.k, y0: d.v.y0 - dy / this.k, y1: d.v.y1 - dy / this.k }, true);
+    return true;
   }
 
   setGeometry({ nx, ny, x, y, points = null }) {
@@ -71,6 +127,7 @@ export class MapView {
       }
       const m = 0.03 * Math.max(x1 - x0, y1 - y0, 1);
       Object.assign(this, { x0: x0 - m, x1: x1 + m, y0: y0 - m, y1: y1 + m, xAsc: true, yAsc: true });
+      this.ext = this.view();
       const d = Float64Array.from(points.ecd).sort();
       this.dx = this.dy = d[Math.floor(d.length / 2)] || 1;
       const k = 2048 / Math.max(this.x1 - this.x0, this.y1 - this.y0);   // overlay buffer, ~2k px across
@@ -85,6 +142,7 @@ export class MapView {
     this.yAsc = ny < 2 || y[ny - 1] > y[0];
     this.x0 = Math.min(x[0], x[nx - 1]) - this.dx / 2; this.x1 = Math.max(x[0], x[nx - 1]) + this.dx / 2;
     this.y0 = Math.min(y[0], y[ny - 1]) - this.dy / 2; this.y1 = Math.max(y[0], y[ny - 1]) + this.dy / 2;
+    this.ext = this.view();
   }
 
   setTitle(html) { this.titleEl.innerHTML = html + ' <span class="caret">▾</span>'; }
@@ -138,29 +196,41 @@ export class MapView {
 
   // particles as filled circles: invalid ones as faint rings underneath, valid
   // ones in increasing value so the high values sit on top
-  _paintPoints(g, k, ox, oy, minR) {
+  _paintPoints(g, k, ox, oy, minR, origin = this, labels = false) {
     const { points: pt, valid } = this, v = this.shown(), L = lut(this.cmap), span = this.vmax - this.vmin;
+    const X = p => ox + (pt.x[p] - origin.x0) * k, Y = p => oy + (pt.y[p] - origin.y0) * k;
     const order = [];
     for (let p = 0; p < pt.x.length; p++) if (!valid || valid[p]) order.push(p);
     order.sort((a, b) => v[a] - v[b]);
     g.lineWidth = 1; g.strokeStyle = T.hatchLine;
     if (valid) for (let p = 0; p < pt.x.length; p++) {
       if (valid[p]) continue;
-      g.beginPath(); g.arc(ox + (pt.x[p] - this.x0) * k, oy + (pt.y[p] - this.y0) * k, Math.max(minR, pt.ecd[p] / 2 * k), 0, 7); g.stroke();
+      g.beginPath(); g.arc(X(p), Y(p), Math.max(minR, pt.ecd[p] / 2 * k), 0, 7); g.stroke();
     }
     for (const p of order) {
       if (!Number.isFinite(v[p])) continue;
       const t = Math.max(0, Math.min(255, Math.round((v[p] - this.vmin) / span * 255))) * 3;
       g.fillStyle = `rgb(${L[t]},${L[t + 1]},${L[t + 2]})`;
-      g.beginPath(); g.arc(ox + (pt.x[p] - this.x0) * k, oy + (pt.y[p] - this.y0) * k, Math.max(minR, pt.ecd[p] / 2 * k), 0, 7); g.fill();
+      g.beginPath(); g.arc(X(p), Y(p), Math.max(minR, pt.ecd[p] / 2 * k), 0, 7); g.fill();
+    }
+    if (!labels) return;
+    // particle numbers once few enough are in view to read them
+    const P = this.plot, inView = [];
+    for (let p = 0; p < pt.x.length; p++) { const xx = X(p), yy = Y(p); if (xx >= P.x && xx <= P.x + P.w && yy >= P.y && yy <= P.y + P.h) inView.push(p); }
+    if (inView.length > 160) return;
+    g.font = font(11, "bold"); g.textAlign = "left"; g.textBaseline = "middle";
+    g.lineWidth = 3; g.strokeStyle = T.paper; g.fillStyle = T.strong;
+    for (const p of inView) {
+      const rr = Math.max(minR, pt.ecd[p] / 2 * k), tx = X(p) + rr + 2, ty = Y(p);
+      g.strokeText(String(p + 1), tx, ty); g.fillText(String(p + 1), tx, ty);
     }
   }
 
   _paintImage() {
     if (this.points) {
-      const g = this.off.getContext("2d"), k = this.off.width / (this.x1 - this.x0);
+      const g = this.off.getContext("2d"), k = this.off.width / (this.ext.x1 - this.ext.x0);
       g.clearRect(0, 0, this.off.width, this.off.height);
-      this._paintPoints(g, k, 0, 0, 2);
+      this._paintPoints(g, k, 0, 0, 2, this.ext);
       return;
     }
     const { nx, ny, valid } = this, v = this.shown();
@@ -197,16 +267,17 @@ export class MapView {
     this.plot = { x: padL + (aw - pw) / 2, y: padT + (ah - ph) / 2, w: pw, h: ph };
     const P = this.plot;
 
+    ctx.save(); ctx.beginPath(); ctx.rect(P.x, P.y, P.w, P.h); ctx.clip();
     if (this.points) {
-      // particles drawn at screen resolution, cached until the data or size changes
+      // particles drawn at screen resolution, cached until the data, size or view changes
       ctx.fillStyle = T.hatchBg; ctx.fillRect(P.x, P.y, P.w, P.h);
       if (this.values) {
         if (this._dirty) { this._paintImage(); this._dirty = false; this._ptsCache = null; }
-        const dpr = this.canvas.width / W, key = `${W}x${H}`;
+        const dpr = this.canvas.width / W, key = `${W}x${H}:${this.x0}:${this.x1}:${this.y0}:${this.y1}`;
         if (!this._ptsCache || this._ptsCache.key !== key) {
           const c = document.createElement("canvas"); c.width = this.canvas.width; c.height = this.canvas.height;
           const g = c.getContext("2d"); g.scale(dpr, dpr);
-          this._paintPoints(g, this.k, P.x, P.y, 2.2);
+          this._paintPoints(g, this.k, P.x, P.y, 2.2, this, true);
           this._ptsCache = { key, c };
         }
         ctx.drawImage(this._ptsCache.c, 0, 0, W, H);
@@ -218,10 +289,13 @@ export class MapView {
         if (this._dirty) { this._paintImage(); this._dirty = false; }
         ctx.imageSmoothingEnabled = this.smooth;
         ctx.imageSmoothingQuality = "high";
-        ctx.drawImage(this.off, P.x, P.y, P.w, P.h);
+        // the part of the map image inside the view (the image spans this.ext)
+        const E = this.ext, fx = this.off.width / (E.x1 - E.x0), fy = this.off.height / (E.y1 - E.y0);
+        ctx.drawImage(this.off, (this.x0 - E.x0) * fx, (this.y0 - E.y0) * fy, (this.x1 - this.x0) * fx, (this.y1 - this.y0) * fy, P.x, P.y, P.w, P.h);
       }
     }
     for (const o of this.overlays) o(ctx, this);
+    ctx.restore();
 
     // axes
     ctx.strokeStyle = T.frame; ctx.lineWidth = 1;
@@ -268,6 +342,7 @@ export class MapView {
       ctx.fillText(this.label + (this.unit ? ` (${this.unit})` : ""), 0, 0); ctx.restore();
     }
     this._drawCursor();
+    if (this.resetBtn) this.resetBtn.classList.toggle("hidden", !this.zoomed());
   }
 
   idxXY(p) {
@@ -281,6 +356,7 @@ export class MapView {
       if (p == null) return;
       const [xu, yu] = this.idxXY(p), X = this.sx(xu), Y = this.sy(yu);
       ctx.save();
+      ctx.beginPath(); ctx.rect(P.x, P.y, P.w, P.h); ctx.clip();
       ctx.strokeStyle = colour; ctx.lineWidth = 1;
       if (cross) {
         ctx.beginPath(); ctx.moveTo(P.x, Y + .5); ctx.lineTo(P.x + P.w, Y + .5);
@@ -316,7 +392,7 @@ export class MapView {
       const reach = Math.max(pt.ecd[best] / 2, 8 / this.k);
       return best >= 0 && Math.sqrt(bd) <= reach ? best : null;
     }
-    let j = Math.floor((xu - this.x0) / this.dx), i = Math.floor((yu - this.y0) / this.dy);
+    let j = Math.floor((xu - this.ext.x0) / this.dx), i = Math.floor((yu - this.ext.y0) / this.dy);
     j = Math.max(0, Math.min(this.nx - 1, this.xAsc ? j : this.nx - 1 - j));
     i = Math.max(0, Math.min(this.ny - 1, this.yAsc ? i : this.ny - 1 - i));
     return i * this.nx + j;

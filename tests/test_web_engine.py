@@ -18,9 +18,10 @@ NODE = shutil.which("node")
 
 
 @pytest.mark.skipif(NODE is None, reason="Node.js not installed")
-@pytest.mark.parametrize("overrides", [{}, {"smooth_window": 9, "smooth_order": 3, "spatial_kernel": 3}],
-                         ids=["raw", "smoothed"])
-def test_browser_engine_matches_python(tmp_path, overrides):
+@pytest.mark.parametrize("overrides,missing", [({}, 0), ({"smooth_window": 9, "smooth_order": 3, "spatial_kernel": 3}, 0),
+                                              ({"spatial_kernel": 3}, 3)],
+                         ids=["raw", "smoothed", "stopped-early"])
+def test_browser_engine_matches_python(tmp_path, overrides, missing):
     rng = np.random.default_rng(7)
     wn = np.linspace(1000, 1800, 240)
     ny, nx = 14, 16
@@ -34,6 +35,8 @@ def test_browser_engine_matches_python(tmp_path, overrides):
                 y = y + 60 * shape_eval(wn, 1580, 20, "Lorentz") + 25 * shape_eval(wn, 1350, 50, "Lorentz") \
                       + 8 * shape_eval(wn, 1615, 25, "Lorentz") + 4 * shape_eval(wn, 1500, 120, "Gauss")
             lines.append("\t".join([f"{-3 + i:.4f}", f"{5 + 0.5 * j:.4f}", *map(str, rng.poisson(y))]))
+    if missing:                       # the acquisition stopped before the last points
+        lines = lines[:-missing]
     p = tmp_path / "synthetic map.txt"
     p.write_text("\n".join(lines) + "\n")
 
@@ -48,8 +51,9 @@ def test_browser_engine_matches_python(tmp_path, overrides):
     assert js["held"] == r.held
     k = len(r.names)
     for q in ("intensity", "position", "width", "area"):
-        np.testing.assert_allclose(np.reshape(js[q], (-1, k)), getattr(r, q), rtol=1e-7, atol=1e-7)
-    np.testing.assert_allclose(js["std_error"], r.std_error, rtol=1e-9)
+        np.testing.assert_allclose(np.reshape(js[q], (-1, k)).astype(float), getattr(r, q), rtol=1e-7, atol=1e-7)
+    np.testing.assert_allclose(np.asarray(js["std_error"], float), r.std_error, rtol=1e-9)
+    assert int(np.isnan(r.std_error).sum()) == missing
 
 
 def _vendor_path(key):

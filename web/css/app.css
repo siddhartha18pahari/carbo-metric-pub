@@ -214,7 +214,12 @@ code { font-family: var(--font); font-size: 0.95em; color: var(--code); }
 }
 
 /* ---------------------------------------------------------------- layout */
-main { height: calc(100% - 56px); }
+main { height: calc(100% - 56px - 24px); }
+/* author credit, on every tab */
+footer.credit {
+  height: 24px; display: flex; align-items: center; justify-content: center;
+  font-size: 12px; color: var(--muted); border-top: 1px solid var(--line); background: var(--topbar);
+}
 .tab { display: none; height: 100%; }
 .tab.on { display: grid; }
 #tab-qc { grid-template-columns: minmax(0, 1fr) 420px; gap: 12px; padding: 12px; }
@@ -525,7 +530,7 @@ table.stats .sub { color: var(--dim); }
 @media (max-width: 1280px) {
   body { overflow: auto; }
   main { height: auto; }
-  .tab.on { min-height: calc(100vh - 56px); }
+  .tab.on { min-height: calc(100vh - 56px - 24px); }
   #tab-qc, #tab-splat, #tab-particles { grid-template-columns: minmax(0, 1fr); }
   .chart { grid-template-rows: auto auto; }
   .maps { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -553,7 +558,7 @@ table.stats .sub { color: var(--dim); }
   body * { visibility: hidden; }
   #report-paper, #report-paper * { visibility: visible; }
   #report-paper { position: absolute; left: 0; top: 0; width: 100%; box-shadow: none; margin: 0; padding: 0; }
-  .topbar, #fitbar, #toasts { display: none; }
+  .topbar, #fitbar, #toasts, footer.credit { display: none; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }

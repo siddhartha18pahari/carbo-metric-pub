@@ -337,29 +337,32 @@ export function smoothSpectra(cube, ny, nx, K, cfg) {
   }
   const k = cfg.spatial_kernel || 0;
   if (k) {
+    // Gaussian weights over the measured neighbours only (as fitter.py):
+    // weighted sums and weights are convolved along X, then along Y (the
+    // product kernel), and divided at the end, so a missing point or the map
+    // edge simply drops out of the average
     const r = (k - 1) / 2, g = Array.from({ length: k }, (_, i) => Math.exp(-0.5 * ((i - r) / (k / 4)) ** 2));
-    // normalised 1-D Gaussian along Y (down the rows), then along X: the
-    // product kernel, renormalised wherever it hangs over the map edge
-    let out = new Float64Array(Y.length);
-    for (let i = 0; i < ny; i++) {
-      let den = 0;
-      for (let d = -r; d <= r; d++) if (i + d >= 0 && i + d < ny) den += g[d + r];
-      for (let j = 0; j < nx; j++) for (let c = 0; c < K; c++) {
-        let s = 0;
-        for (let d = -r; d <= r; d++) if (i + d >= 0 && i + d < ny) s += g[d + r] * Y[((i + d) * nx + j) * K + c];
-        out[(i * nx + j) * K + c] = s / den;
+    const ok = new Uint8Array(P);
+    for (let p = 0; p < P; p++) { let f = 1; for (let c = 0; c < K; c++) if (!Number.isFinite(Y[p * K + c])) { f = 0; break; } ok[p] = f; }
+    let num = new Float64Array(Y.length), den = new Float64Array(P);
+    for (let p = 0; p < P; p++) if (ok[p]) { den[p] = 1; for (let c = 0; c < K; c++) num[p * K + c] = Y[p * K + c]; }
+    for (const axis of [0, 1]) {               // 0: down the rows (Y), 1: along a row (X)
+      const nn = new Float64Array(num.length), dd = new Float64Array(P);
+      for (let i = 0; i < ny; i++) for (let j = 0; j < nx; j++) {
+        const t = i * nx + j;
+        for (let d = -r; d <= r; d++) {
+          const ii = axis === 0 ? i + d : i, jj = axis === 1 ? j + d : j;
+          if (ii < 0 || ii >= ny || jj < 0 || jj >= nx) continue;
+          const s = ii * nx + jj, wgt = g[d + r];
+          if (!den[s]) continue;
+          dd[t] += wgt * den[s];
+          for (let c = 0; c < K; c++) nn[t * K + c] += wgt * num[s * K + c];
+        }
       }
+      num = nn; den = dd;
     }
-    Y = out; out = new Float64Array(Y.length);
-    for (let j = 0; j < nx; j++) {
-      let den = 0;
-      for (let d = -r; d <= r; d++) if (j + d >= 0 && j + d < nx) den += g[d + r];
-      for (let i = 0; i < ny; i++) for (let c = 0; c < K; c++) {
-        let s = 0;
-        for (let d = -r; d <= r; d++) if (j + d >= 0 && j + d < nx) s += g[d + r] * Y[(i * nx + j + d) * K + c];
-        out[(i * nx + j) * K + c] = s / den;
-      }
-    }
+    const out = new Float64Array(Y.length);
+    for (let p = 0; p < P; p++) for (let c = 0; c < K; c++) out[p * K + c] = ok[p] ? num[p * K + c] / Math.max(den[p], 1e-300) : NaN;
     Y = out;
   }
   return Y;
@@ -405,20 +408,26 @@ export function checkConfig(cfg) {
   for (const r of [cfg.ratio_num, cfg.ratio_den]) if (!names.includes(r)) throw new Error(`ratio peak '${r}' is not in the peak table`);
   const w = cfg.smooth_window || 0, o = cfg.smooth_order ?? 2;
   if (w && (w < 3 || w % 2 === 0 || !(o >= 0 && o < w))) throw new Error("smoothing window must be odd, at least 3, and larger than the order");
-  if (![0, 3, 5, 7].includes(cfg.spatial_kernel || 0)) throw new Error("spatial averaging must be off, 3, 5 or 7 pixels");
+  if (![0, 3, 5, 7].includes(cfg.spatial_kernel || 0)) throw new Error("spatial smoothing must be off, 3, 5 or 7 pixels");
   return cfg;
 }
 
 // Everything up to the per-pixel LM: returns the job for lmBatch plus the
 // state finishFit needs. cube: Float32Array (P * K), wn: (K,)
-export function prepareFit(cube, P, wn, cfg) {
+export function prepareFit(cube, Pfull, wn, cfg) {
   checkConfig(cfg);
   const K = wn.length, ks = [];
   for (let c = 0; c < K; c++) if (wn[c] >= cfg.range_lo && wn[c] <= cfg.range_hi) ks.push(c);
   if (ks.length < 10) throw new Error("fewer than 10 channels inside the spectral range");
   const N = ks.length, nu = Float64Array.from(ks, c => wn[c]);
+  // points never measured (a map stopped early) are NaN: fit the rest only,
+  // finishFit reports NaN for them (as fitter.py)
+  const keep = [];
+  for (let p = 0; p < Pfull; p++) if (ks.every(c => Number.isFinite(cube[p * K + c]))) keep.push(p);
+  if (!keep.length) throw new Error("no measured spectra in this map");
+  const P = keep.length;
   const Y = new Float64Array(P * N);
-  for (let p = 0; p < P; p++) for (let n = 0; n < N; n++) Y[p * N + n] = cube[p * K + ks[n]];
+  for (let q = 0; q < P; q++) for (let n = 0; n < N; n++) Y[q * N + n] = cube[keep[q] * K + ks[n]];
   const shapes = cfg.peaks.map(p => p.shape);
   const kinds = Int32Array.from(shapes, s => (s === "Lorentz" ? LORENTZ : GAUSS));
   const m = shapes.length, nbl = cfg.baseline_order + 1;
@@ -494,7 +503,7 @@ export function prepareFit(cube, P, wn, cfg) {
     TH = linearStart(theta0);
   }
   const job = { nu, B: Bj, lo, hi, free, nbase: jnb, kinds, maxIter, tol: 1e-7 };
-  return { job, Y, TH, P, N, M, m, nbl, jnb, B, baseFixed, shapes, held, cfg };
+  return { job, Y, TH, P, N, M, m, nbl, jnb, B, baseFixed, shapes, held, cfg, keep: P < Pfull ? keep : null, Pfull };
 }
 
 // shapes from the mean spectrum of the carbon pixels (as fitter._mean_shapes)
@@ -583,6 +592,17 @@ export function finishFit(st, iters, seconds) {
     const nbOut = out.nb;
     for (let k = 0; k < nbOut; k++) out.baseline[p * nbOut + k] = baseFixed ? baseFixed[p * nbl + k] : TH[p * M + k];
     out.std_error[p] = Math.sqrt(ssr[p] / dof); out.red_chi2[p] = chi[p] / dof; out.n_iter[p] = iters[p];
+  }
+  return st.keep ? expand(out, st.keep, st.Pfull) : out;
+}
+
+// results for the measured points, placed back among NaN rows
+function expand(out, keep, Pfull) {
+  const P = keep.length;
+  for (const q of ["intensity", "position", "width", "area", "baseline", "std_error", "red_chi2", "n_iter"]) {
+    const a = out[q], w = a.length / P, b = new Float64Array(Pfull * w).fill(q === "n_iter" ? 0 : NaN);
+    for (let i = 0; i < P; i++) for (let k = 0; k < w; k++) b[keep[i] * w + k] = a[i * w + k];
+    out[q] = b;
   }
   return out;
 }

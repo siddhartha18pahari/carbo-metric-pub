@@ -299,14 +299,19 @@ export function placeSpectraList(err, pf, name) {
 // --------------------------------------------------------------------------
 // text exports
 // --------------------------------------------------------------------------
+// A map stopped before its last points still sits on its grid: cells never
+// measured are NaN and stay out of the fit and the statistics. Points that do
+// not share a grid, or fill less than half of it, are refused.
 function grid(xs, ys, I, K, name) {
   const r4 = v => Math.round(v * 1e4) / 1e4;
   const ux = [...new Set(xs.map(r4))].sort((a, b) => a - b), uy = [...new Set(ys.map(r4))].sort((a, b) => a - b);
-  if (ux.length * uy.length !== xs.length)
-    throw new Error(`${name}: the ${xs.length} points do not form a full ${uy.length} x ${ux.length} grid (point lists cannot be mapped)`);
   const ix = new Map(ux.map((v, i) => [v, i])), iy = new Map(uy.map((v, i) => [v, i]));
-  const cube = new Float32Array(ux.length * uy.length * K);
-  for (let p = 0; p < xs.length; p++) cube.set(I.subarray(p * K, (p + 1) * K), (iy.get(r4(ys[p])) * ux.length + ix.get(r4(xs[p]))) * K);
+  const cellOf = p => iy.get(r4(ys[p])) * ux.length + ix.get(r4(xs[p]));
+  const cells = ux.length * uy.length;
+  if (cells !== xs.length && (new Set(xs.map((_, p) => cellOf(p))).size !== xs.length || xs.length < 0.5 * cells))
+    throw new Error(`${name}: the ${xs.length} points do not form a ${uy.length} x ${ux.length} grid (point lists cannot be mapped)`);
+  const cube = new Float32Array(cells * K).fill(NaN);
+  for (let p = 0; p < xs.length; p++) cube.set(I.subarray(p * K, (p + 1) * K), cellOf(p) * K);
   return { cube, x: Float64Array.from(ux), y: Float64Array.from(uy) };
 }
 
@@ -314,6 +319,12 @@ function monotonic(a) {
   let up = true, down = true;
   for (let i = 1; i < a.length; i++) { if (!(a[i] > a[i - 1])) up = false; if (!(a[i] < a[i - 1])) down = false; }
   return up || down;
+}
+
+function countMissing(cube, K) {
+  let n = 0;
+  for (let p = 0; p < cube.length / K; p++) if (!Number.isFinite(cube[p * K])) n++;
+  return n;
 }
 
 export function readText(text, name) {
@@ -352,7 +363,7 @@ export function readText(text, name) {
     }
     for (let k = 1; k < K; k++) if (!(wn[k] > wn[k - 1])) throw new Error(`${name}: the Raman-shift axis is not monotonic`);
     return { cube, wn: Float64Array.from(wn), x: Float64Array.from(x), y: Float64Array.from(y), nx, ny,
-             name: stem(name), format: "txt", layout };
+             name: stem(name), format: "txt", layout, missing: countMissing(cube, wn.length) };
   };
 
   const head = rows[0], widths = new Set(rows.slice(1).map(r => r.length));

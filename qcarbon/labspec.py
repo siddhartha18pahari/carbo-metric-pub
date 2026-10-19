@@ -374,13 +374,20 @@ TEXT_LAYOUTS = ("a LabSpec matrix export (first row = Raman shift, then one row 
 
 
 def _grid(xs, ys, I, name):
-    """Scatter per-point spectra ``I`` (n, K) onto the (y, x) grid they span."""
+    """Scatter per-point spectra ``I`` (n, K) onto the (y, x) grid they span.
+
+    A map stopped before its last points (LabSpec writes only what it
+    measured) still sits on its grid: the cells never measured are NaN and
+    stay out of the fit and the statistics. Points that do not share a grid,
+    or fill less than half of it, are refused."""
     ux, uy = np.unique(np.round(xs, 4)), np.unique(np.round(ys, 4))
-    if ux.size * uy.size != xs.size:
-        raise ValueError(f"{name}: the {xs.size} points do not form a full "
-                         f"{uy.size} x {ux.size} grid (point lists cannot be mapped)")
-    cube = np.zeros((uy.size, ux.size, I.shape[1]), np.float32)
-    cube[np.searchsorted(uy, np.round(ys, 4)), np.searchsorted(ux, np.round(xs, 4))] = I
+    ii, jj = np.searchsorted(uy, np.round(ys, 4)), np.searchsorted(ux, np.round(xs, 4))
+    cells = ux.size * uy.size
+    if cells != xs.size and (np.unique(ii * ux.size + jj).size != xs.size or xs.size < 0.5 * cells):
+        raise ValueError(f"{name}: the {xs.size} points do not form a {uy.size} x {ux.size} grid "
+                         f"(point lists cannot be mapped)")
+    cube = np.full((uy.size, ux.size, I.shape[1]), np.nan, np.float32)
+    cube[ii, jj] = I
     return cube, ux.astype(float), uy.astype(float)
 
 
@@ -424,10 +431,11 @@ def read_text(path: str) -> RamanMap:
             wn, cube = wn[::-1].copy(), cube[..., ::-1].copy()
         if not np.all(np.diff(wn) > 0):
             raise ValueError(f"{name}: the Raman-shift axis is not monotonic")
+        missing = int((~np.isfinite(cube).all(-1)).sum())
         return RamanMap(cube=np.ascontiguousarray(cube, np.float32), wn=np.asarray(wn, float),
                         x=np.asarray(x, float), y=np.asarray(y, float),
                         name=os.path.splitext(name)[0], source=path,
-                        meta={"format": "txt", "layout": layout})
+                        meta={"format": "txt", "layout": layout, "missing": missing})
 
     head, body_widths = rows[0], {r.size for r in rows[1:]}
     if (head.size >= 10 and len(body_widths) == 1 and min(body_widths) - head.size in (0, 1, 2)

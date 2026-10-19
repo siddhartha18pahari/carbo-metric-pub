@@ -104,8 +104,17 @@ const maps = [0, 1, 2, 3].map(i => new MapView($(`#map-${i}`), {
   onHover: p => setHover(p),
   onPick: p => { setPinned(p); setActive(i); },
   onChange: () => { if (S.active === i) { renderHist(); renderVideo(); } },
+  onView: (v, src) => { for (const m of maps) if (m !== src) m.setView(v ? { ...v } : null); renderVideo(); },
 }));
 maps.forEach((mv, i) => mv.host.addEventListener("mousedown", () => setActive(i)));
+
+// zoom every map onto one particle (or point) and pin its spectrum
+function zoomToPoint(p) {
+  const [xu, yu] = maps[0].idxXY(p);
+  const hw = S.points ? Math.max(8 * S.points.ecd[p], 15) : Math.max(6 * maps[0].dx, 3);
+  maps[0].zoomTo(xu, yu, hw);
+  setPinned(p);
+}
 maps[3].cmap = "Inferno";
 
 function renderMap(i) {
@@ -198,6 +207,13 @@ function renderCursor() {
     return;
   }
   if (p == null || !S.cube) { cursorPlot.setData(null); $("#cursor-table").textContent = ""; $("#cursor-info").textContent = ""; return; }
+  if (!Number.isFinite(S.cube[p * S.k])) {
+    cursorPlot.emptyText = "Not measured: the acquisition stopped before this point";
+    cursorPlot.setData(null); $("#cursor-table").textContent = "";
+    $("#cursor-info").textContent = `· point ${p + 1} · not measured`;
+    cursorPlot.emptyText = null;
+    return;
+  }
   const raw = S.cube.subarray(p * S.k, (p + 1) * S.k), sm = fitCube();
   const d = { wn: S.wn, raw: sm ? sm.subarray(p * S.k, (p + 1) * S.k) : raw, raw0: sm ? raw : null,
               range: S.fit ? S.fit.range : [S.cfg.range_lo, S.cfg.range_hi] };
@@ -270,8 +286,10 @@ function renderQuality() {
   if (!S.fit || !S.valid) return;
   let nv = 0, se = 0, chi = 0;
   for (let p = 0; p < P(); p++) if (S.valid[p]) { nv++; se += S.fit.std_error[p]; chi += S.fit.red_chi2[p]; }
+  // points measured: cells of a map stopped early were never acquired
+  const total = P() - (S.ds && S.ds.missing || 0);
   const cell = (k, v, cls = "") => el("div", { class: "qcell" }, el("div", { class: "k" }, k), el("div", { class: "v " + cls }, v));
-  q.append(cell("Total points", fmt(P())), cell("Valid points", fmt(nv), nv === P() ? "" : "warn"),
+  q.append(cell("Total points", fmt(total)), cell("Valid points", fmt(nv), nv === total ? "" : "warn"),
     cell("Std. error", fmt(nv ? se / nv : NaN, 4)), cell("Red. χ²", fmt(nv ? chi / nv : NaN, 4)));
 }
 
@@ -324,9 +342,13 @@ function drawVideo(canvas, W, H, mv) {
   const vx0 = Math.min(...V.x), vx1 = Math.max(...V.x), vy0 = Math.min(...V.y), vy1 = Math.max(...V.y);
   let rx0, rx1, ry0, ry1;
   if (S.vidFull) { [rx0, rx1, ry0, ry1] = [vx0, vx1, vy0, vy1]; }
-  else {
-    const mx = (mv.x1 - mv.x0) * 0.45, my = (mv.y1 - mv.y0) * 0.45;
+  else if (mv.zoomed()) {
+    // the region the maps are zoomed to, with a little context around it
+    const mx = (mv.x1 - mv.x0) * 0.15, my = (mv.y1 - mv.y0) * 0.15;
     rx0 = Math.max(vx0, mv.x0 - mx); rx1 = Math.min(vx1, mv.x1 + mx); ry0 = Math.max(vy0, mv.y0 - my); ry1 = Math.min(vy1, mv.y1 + my);
+  } else {
+    const E = mv.ext, mx = (E.x1 - E.x0) * 0.45, my = (E.y1 - E.y0) * 0.45;
+    rx0 = Math.max(vx0, E.x0 - mx); rx1 = Math.min(vx1, E.x1 + mx); ry0 = Math.max(vy0, E.y0 - my); ry1 = Math.min(vy1, E.y1 + my);
   }
   const k = Math.min((W - 8) / (rx1 - rx0), (H - 8) / (ry1 - ry0));
   const ox = (W - (rx1 - rx0) * k) / 2, oy = (H - (ry1 - ry0) * k) / 2;
@@ -339,11 +361,13 @@ function drawVideo(canvas, W, H, mv) {
   ctx.restore();
   if ($("#vid-overlay").checked && mv.values) {
     ctx.globalAlpha = +$("#vid-alpha").value; ctx.imageSmoothingEnabled = mv.smooth;
-    ctx.drawImage(mv.off, sx(mv.x0), sy(mv.y0), (mv.x1 - mv.x0) * k, (mv.y1 - mv.y0) * k);
+    const E = mv.ext;
+    ctx.drawImage(mv.off, sx(E.x0), sy(E.y0), (E.x1 - E.x0) * k, (E.y1 - E.y0) * k);
     ctx.globalAlpha = 1;
   }
   ctx.setLineDash([5, 4]); ctx.strokeStyle = "#3fe0ff"; ctx.lineWidth = 1.2;
-  ctx.strokeRect(sx(mv.x0), sy(mv.y0), (mv.x1 - mv.x0) * k, (mv.y1 - mv.y0) * k); ctx.setLineDash([]);
+  const F = mv.zoomed() ? mv.view() : mv.ext;           // the zoom window, or the map footprint
+  ctx.strokeRect(sx(F.x0), sy(F.y0), (F.x1 - F.x0) * k, (F.y1 - F.y0) * k); ctx.setLineDash([]);
   const p = S.hover ?? S.pinned;
   if (p != null) {
     const [xu, yu] = mv.idxXY(p);
@@ -549,7 +573,16 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 async function startFit() {
   if (!S.ds) return;
-  if (S.ds.resultsOnly) { setStatus("Fitted values from a file: no spectra to refit. Open the map itself to fit it.", "err"); return; }
+  if (S.ds.resultsOnly) {
+    // no spectra to refit: spatial smoothing acts on the fitted maps; the
+    // spectral settings cannot apply
+    if (!S.results || !S.results.raw) return;
+    decodeFit(smoothFitted(S.results.raw)); buildRatio();
+    const k = S.cfg.spatial_kernel;
+    setStatus(k ? `Fitted maps smoothed over ${k} × ${k} neighbours (this file has no spectra)`
+                : "Fitted values from the file (no spectra: spectral settings do not apply)");
+    return;
+  }
   if (S.fitRunning) { S.pendingFit = true; return; }
   if (validate().length) return;
   S.fitRunning = true; S.pendingFit = false;
@@ -569,7 +602,7 @@ async function startFit() {
     const r = await api(`/api/ds/${id}/fit?result=1`);
     if (!S.ds || S.ds.id !== id) return;
     decodeFit(r.result);
-    setStatus(`Fitted ${fmt(P())} spectra in ${r.result.seconds.toFixed(1)} s`);
+    setStatus(`Fitted ${fmt(P() - (S.ds.missing || 0))} spectra in ${r.result.seconds.toFixed(1)} s`);
   } catch (e) {
     setStatus("Fit failed", "err"); toast(e.message, "error", 8000);
   } finally {
@@ -620,9 +653,13 @@ async function loadDataset(info) {
   S.points = info.points ? Object.fromEntries(Object.entries(info.points).map(([k, v]) => [k, f32(v)])) : null;
   S.pointLabels = info.point_labels || null;
   document.body.classList.toggle("particles-mode", !!S.points);
+  // neighbouring particle numbers are not neighbouring places
+  $("#cfg-spatial").disabled = !!S.points;
+  $("#cfg-spatial").closest(".frow").title = S.points ? "Not for ParticleFinder data: each particle has one spectrum, and its neighbours in the list are not its neighbours on the sample" : "";
   S.fit = null; $("#held-note").textContent = ""; S.ratio = null; S.valid = null; S.counts = null; S.seg = null; S.pinned = null; S.hover = null;
   $("#file-name").textContent = info.name;
-  $("#spec-name").textContent = S.points ? `${fmt(info.nx)} particles · ${info.k} ch` : `${info.nx} × ${info.ny} · ${info.k} ch`;
+  $("#spec-name").textContent = S.points ? `${fmt(info.nx)} particles · ${info.k} ch`
+    : `${info.nx} × ${info.ny} · ${info.k} ch${info.missing ? ` · ${info.missing} not measured` : ""}`;
   document.title = `${info.name} · Carbo Metrics`;
   $("#welcome").classList.add("hidden");
   setStatus("Loading spectra…", "busy");
@@ -635,6 +672,7 @@ async function loadDataset(info) {
     if (ok) S.video = img;
   }
   for (const m of [...maps, pmap]) { m.setGeometry({ nx: S.nx, ny: S.ny, x: S.x, y: S.y, points: S.points }); m.values = null; }
+  S.vidFull = false;
   setActive(S.active);
   renderDensity(); renderVideo();
   splatReset();
@@ -642,7 +680,7 @@ async function loadDataset(info) {
   const prev = await api(`/api/ds/${info.id}/fit?result=1`).catch(() => null);
   if (prev && prev.state === "done" && prev.result && JSON.stringify(prev.result.config) === JSON.stringify(S.cfg)) {
     decodeFit(prev.result);
-    setStatus(`Fitted ${fmt(P())} spectra (kept from earlier)`);
+    setStatus(`Fitted ${fmt(P() - (S.ds.missing || 0))} spectra (kept from earlier)`);
   } else startFit();
 }
 
@@ -730,6 +768,7 @@ async function loadResults(grid) {
   S.ds = info; S.nx = info.nx; S.ny = info.ny; S.k = 0;
   S.wn = new Float32Array(0); S.x = f32(info.x); S.y = f32(info.y);
   S.points = null; S.pointLabels = null; document.body.classList.remove("particles-mode");
+  $("#cfg-spatial").disabled = false; $("#cfg-spatial").closest(".frow").title = "";
   S.cube = null; S.fit = null; S.ratio = null; S.valid = null; S.counts = null; S.seg = null; S.pinned = null; S.hover = null;
   S.cfg.ratio_num = fit.config.ratio_num; S.cfg.ratio_den = fit.config.ratio_den;
   document.body.classList.add("results-only");
@@ -748,9 +787,39 @@ async function loadResults(grid) {
   density.setData(null);
   setActive(S.active);
   splatReset();
-  decodeFit(fit);
+  S.results.raw = fit;
+  decodeFit(smoothFitted(fit));
   buildRatio();
-  setStatus(`Opened ${fmt(P())} fitted points (${S.fit.names.join(", ")})`);
+  setStatus(`Opened ${fmt(P())} fitted points (${S.fit.names.join(", ")})` +
+    (S.cfg.spatial_kernel ? `, smoothed over ${S.cfg.spatial_kernel} × ${S.cfg.spatial_kernel} neighbours` : ""));
+}
+
+// A file of fitted values has no spectra, so spatial smoothing is applied to
+// the fitted maps themselves (each band's intensity, position, width, area),
+// with the same Gaussian weights over measured neighbours as the pre-fit
+// smoothing; ratios are then recomputed from the smoothed bands.
+function smoothFitted(fit) {
+  const k = S.cfg.spatial_kernel || 0;
+  if (!k) return fit;
+  const r = (k - 1) / 2, g = Array.from({ length: k }, (_, i) => Math.exp(-0.5 * ((i - r) / (k / 4)) ** 2));
+  const { nx, ny } = S, m = fit.m, out = { ...fit };
+  for (const q of ["intensity", "position", "width", "area"]) {
+    const a = f32(fit[q]), b = new Float64Array(a.length);
+    for (let j = 0; j < m; j++) for (let i = 0; i < ny; i++) for (let c = 0; c < nx; c++) {
+      let s = 0, w = 0;
+      for (let di = -r; di <= r; di++) for (let dc = -r; dc <= r; dc++) {
+        const ii = i + di, cc = c + dc;
+        if (ii < 0 || ii >= ny || cc < 0 || cc >= nx) continue;
+        const v = a[(ii * nx + cc) * m + j];
+        if (!Number.isFinite(v)) continue;
+        const wt = g[di + r] * g[dc + r]; s += wt * v; w += wt;
+      }
+      const p = i * nx + c;
+      b[p * m + j] = Number.isFinite(a[p * m + j]) && w ? s / w : a[p * m + j];
+    }
+    out[q] = b;
+  }
+  return out;
 }
 $("#grid-select").onchange = e => { if (S.results) loadResults(S.results.r.choices[+e.target.value]); };
 
@@ -852,7 +921,7 @@ function splatShow() {
     $("#sp-run").disabled = $("#sp-run2").disabled = true;
     return;
   }
-  $("#sp-run").disabled = $("#sp-run2").disabled = !!splatState().running;
+  $("#sp-run").disabled = $("#sp-run2").disabled = !!splatState().running || !S.health.splat;
   const st = splatState();
   buildChips();
   if (st.field) { showField(st.field); if (st.result) showMetrics(st.result); drawLoss(st.history || []); }
@@ -1164,9 +1233,11 @@ function renderPF() {
   const t = $("#pt-table"); t.textContent = "";
   t.append(el("tr", {}, ...["#", "X, Y (µm)", "⌀ µm", "Convexity", "Elong. %", r.name].map(h => el("th", {}, h))));
   const top = [...idx].sort((a, b) => r.values[b] - r.values[a]).slice(0, 150);
-  for (const p of top) t.append(el("tr", { class: "click" + (p === S.pinned ? " on" : ""), title: "Show this particle's spectrum",
-    onclick: () => { setPinned(p); renderPF(); } },
-    el("td", {}, `${p + 1}`), el("td", { class: "sub" }, `${fmt(S.points.x[p], 4)}, ${fmt(S.points.y[p], 4)}`),
+  for (const p of top) t.append(el("tr", { class: "click" + (p === S.pinned ? " on" : ""), title: "Show this particle's spectrum and zoom onto it",
+    onclick: () => { setPinned(p); pmap.zoomTo(S.points.x[p], S.points.y[p], Math.max(8 * S.points.ecd[p], 15)); renderPF(); } },
+    el("td", {}, el("button", { class: "link pnum", title: "Open the D, G, Ratio and Error maps zoomed onto this particle",
+      onclick: e => { e.stopPropagation(); switchTab("qc"); setTimeout(() => zoomToPoint(p), 40); } }, `#${p + 1}`)),
+    el("td", { class: "sub" }, `${fmt(S.points.x[p], 4)}, ${fmt(S.points.y[p], 4)}`),
     el("td", {}, fmt(S.points.ecd[p], 3)), el("td", {}, fmt(S.points.convexity[p], 3)), el("td", {}, fmt(S.points.elongation[p], 3)),
     el("td", {}, fmt(r.values[p]))));
   if (idx.length > top.length) t.append(el("tr", {}, el("td", { colspan: 6, class: "sub" }, `${fmt(top.length)} highest of ${fmt(idx.length)} shown; Export all (CSV) has every particle`)));
@@ -1309,6 +1380,13 @@ themeButton();
     setActive(0);
     moveInk();
     renderRecent();
-    if (!S.health.splat) { $("#sp-status").textContent = S.health.splat_why; }
+    if (!S.health.splat) {
+      $("#sp-status").textContent = S.health.splat_why;
+      if (S.health.browser) {
+        $("#gl-empty-h").textContent = "Splat 3D: work in progress";
+        $("#gl-empty-p").textContent = "Spectral Gaussian splatting (each map as a field of 3-D Gaussians in x, y and Raman shift) is being brought to the web version. It is not available here yet.";
+      }
+      $("#sp-run").disabled = $("#sp-run2").disabled = true;
+    }
   } catch (e) { setStatus("Server not reachable", "err"); toast(e.message, "error"); }
 })();

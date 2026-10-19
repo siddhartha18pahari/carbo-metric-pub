@@ -16,5 +16,6 @@
   "antistokes_map": "a .l6m map whose spectra start below 0 cm-1 (recorded through the laser line)",
   "antistokes_red_map": "LabSpec's red map (.l6i) of that map",
   "twin_axis_map": "a .l6m map that stores its X axis twice",
-  "twin_axis_red_map": "LabSpec's red map (.l6i) of that map"
+  "twin_axis_red_map": "LabSpec's red map (.l6i) of that map",
+  "incomplete_map": "a LabSpec text map whose acquisition stopped 3 points before the end of its 11 x 11 grid"
 }
