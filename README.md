@@ -130,4 +130,4 @@ vercel.json             static deployment of web/
 
 ## License
 
-MIT. See `LICENSE`.
+Copyright (c) 2026 Siddhartha Pahari. All rights reserved. No part of this software may be copied, modified, distributed or used in other work without prior written permission. See `LICENSE`.
