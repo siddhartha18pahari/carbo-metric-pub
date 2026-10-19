@@ -1,6 +1,8 @@
 // A Raman map panel: isotropic um axes, colour bar, scale bar, hover read-out,
 // linked crosshair, optional map filter and interpolation (display only) and overlays.
 // Stage convention as on the instrument: X to the right, Y increasing DOWN.
+// Two geometries: a pixel grid, or ParticleFinder points (one circle per
+// particle at its stage position, sized by its diameter).
 
 import { cssGradient, lut, COLORMAPS } from "./colormaps.js";
 import { el, fmt, hidpi, niceTicks, quantile } from "./util.js";
@@ -55,10 +57,28 @@ export class MapView {
     new ResizeObserver(() => this.render()).observe(this.body);
   }
 
-  setGeometry({ nx, ny, x, y }) {
+  setGeometry({ nx, ny, x, y, points = null }) {
     this.nx = nx; this.ny = ny; this.x = x; this.y = y;
-    this.off.width = nx; this.off.height = ny;
+    this.points = points; this._ptsCache = null;
     this._dirty = true;
+    if (points) {
+      // extent of all particles plus a margin; "pixel" size = median diameter
+      let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+      for (let p = 0; p < points.x.length; p++) {
+        const r = points.ecd[p] / 2;
+        x0 = Math.min(x0, points.x[p] - r); x1 = Math.max(x1, points.x[p] + r);
+        y0 = Math.min(y0, points.y[p] - r); y1 = Math.max(y1, points.y[p] + r);
+      }
+      const m = 0.03 * Math.max(x1 - x0, y1 - y0, 1);
+      Object.assign(this, { x0: x0 - m, x1: x1 + m, y0: y0 - m, y1: y1 + m, xAsc: true, yAsc: true });
+      const d = Float64Array.from(points.ecd).sort();
+      this.dx = this.dy = d[Math.floor(d.length / 2)] || 1;
+      const k = 2048 / Math.max(this.x1 - this.x0, this.y1 - this.y0);   // overlay buffer, ~2k px across
+      this.off.width = Math.max(1, Math.round((this.x1 - this.x0) * k));
+      this.off.height = Math.max(1, Math.round((this.y1 - this.y0) * k));
+      return;
+    }
+    this.off.width = nx; this.off.height = ny;
     this.dx = nx > 1 ? Math.abs(x[1] - x[0]) : 1;
     this.dy = ny > 1 ? Math.abs(y[1] - y[0]) : 1;
     this.xAsc = nx < 2 || x[nx - 1] > x[0];
@@ -81,7 +101,7 @@ export class MapView {
   // the values drawn: the map itself, or filtered over valid neighbours
   shown() {
     const v = this.values;
-    if (!v || this.filter === "none") return v;
+    if (!v || this.filter === "none" || this.points) return v;
     if (this._shownCache && this._shownCache.f === this.filter) return this._shownCache.v;
     const { nx, ny, valid } = this, k = +this.filter.slice(-1), r = (k - 1) / 2, med = this.filter.startsWith("median");
     const g = Array.from({ length: k }, (_, i) => Math.exp(-0.5 * ((i - r) / (k / 4)) ** 2));
@@ -116,7 +136,33 @@ export class MapView {
     if (!(this.vmax > this.vmin)) this.vmax = this.vmin + (Math.abs(this.vmin) || 1) * 1e-3;
   }
 
+  // particles as filled circles: invalid ones as faint rings underneath, valid
+  // ones in increasing value so the high values sit on top
+  _paintPoints(g, k, ox, oy, minR) {
+    const { points: pt, valid } = this, v = this.shown(), L = lut(this.cmap), span = this.vmax - this.vmin;
+    const order = [];
+    for (let p = 0; p < pt.x.length; p++) if (!valid || valid[p]) order.push(p);
+    order.sort((a, b) => v[a] - v[b]);
+    g.lineWidth = 1; g.strokeStyle = T.hatchLine;
+    if (valid) for (let p = 0; p < pt.x.length; p++) {
+      if (valid[p]) continue;
+      g.beginPath(); g.arc(ox + (pt.x[p] - this.x0) * k, oy + (pt.y[p] - this.y0) * k, Math.max(minR, pt.ecd[p] / 2 * k), 0, 7); g.stroke();
+    }
+    for (const p of order) {
+      if (!Number.isFinite(v[p])) continue;
+      const t = Math.max(0, Math.min(255, Math.round((v[p] - this.vmin) / span * 255))) * 3;
+      g.fillStyle = `rgb(${L[t]},${L[t + 1]},${L[t + 2]})`;
+      g.beginPath(); g.arc(ox + (pt.x[p] - this.x0) * k, oy + (pt.y[p] - this.y0) * k, Math.max(minR, pt.ecd[p] / 2 * k), 0, 7); g.fill();
+    }
+  }
+
   _paintImage() {
+    if (this.points) {
+      const g = this.off.getContext("2d"), k = this.off.width / (this.x1 - this.x0);
+      g.clearRect(0, 0, this.off.width, this.off.height);
+      this._paintPoints(g, k, 0, 0, 2);
+      return;
+    }
     const { nx, ny, valid } = this, v = this.shown();
     const g = this.off.getContext("2d");
     const img = g.createImageData(nx, ny);
@@ -151,13 +197,29 @@ export class MapView {
     this.plot = { x: padL + (aw - pw) / 2, y: padT + (ah - ph) / 2, w: pw, h: ph };
     const P = this.plot;
 
-    ctx.fillStyle = ctx.createPattern(HATCH(), "repeat");
-    ctx.fillRect(P.x, P.y, P.w, P.h);
-    if (this.values) {
-      if (this._dirty) { this._paintImage(); this._dirty = false; }
-      ctx.imageSmoothingEnabled = this.smooth;
-      ctx.imageSmoothingQuality = "high";
-      ctx.drawImage(this.off, P.x, P.y, P.w, P.h);
+    if (this.points) {
+      // particles drawn at screen resolution, cached until the data or size changes
+      ctx.fillStyle = T.hatchBg; ctx.fillRect(P.x, P.y, P.w, P.h);
+      if (this.values) {
+        if (this._dirty) { this._paintImage(); this._dirty = false; this._ptsCache = null; }
+        const dpr = this.canvas.width / W, key = `${W}x${H}`;
+        if (!this._ptsCache || this._ptsCache.key !== key) {
+          const c = document.createElement("canvas"); c.width = this.canvas.width; c.height = this.canvas.height;
+          const g = c.getContext("2d"); g.scale(dpr, dpr);
+          this._paintPoints(g, this.k, P.x, P.y, 2.2);
+          this._ptsCache = { key, c };
+        }
+        ctx.drawImage(this._ptsCache.c, 0, 0, W, H);
+      }
+    } else {
+      ctx.fillStyle = ctx.createPattern(HATCH(), "repeat");
+      ctx.fillRect(P.x, P.y, P.w, P.h);
+      if (this.values) {
+        if (this._dirty) { this._paintImage(); this._dirty = false; }
+        ctx.imageSmoothingEnabled = this.smooth;
+        ctx.imageSmoothingQuality = "high";
+        ctx.drawImage(this.off, P.x, P.y, P.w, P.h);
+      }
     }
     for (const o of this.overlays) o(ctx, this);
 
@@ -208,7 +270,10 @@ export class MapView {
     this._drawCursor();
   }
 
-  idxXY(p) { const i = Math.floor(p / this.nx), j = p % this.nx; return [this.x[j], this.y[i]]; }
+  idxXY(p) {
+    if (this.points) return [this.points.x[p], this.points.y[p]];
+    const i = Math.floor(p / this.nx), j = p % this.nx; return [this.x[j], this.y[i]];
+  }
 
   _drawCursor() {
     const ctx = this.ctx, P = this.plot; if (!ctx) return;
@@ -221,7 +286,8 @@ export class MapView {
         ctx.beginPath(); ctx.moveTo(P.x, Y + .5); ctx.lineTo(P.x + P.w, Y + .5);
         ctx.moveTo(X + .5, P.y); ctx.lineTo(X + .5, P.y + P.h); ctx.stroke();
       }
-      ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(X, Y, Math.max(3, this.k * this.dx * 0.6), 0, 7); ctx.stroke();
+      const rad = this.points ? Math.max(5, this.k * this.points.ecd[p] * 0.6) : Math.max(3, this.k * this.dx * 0.6);
+      ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(X, Y, rad, 0, 7); ctx.stroke();
       ctx.restore();
     };
     mark(this.pinned, "#7dff6a", true);
@@ -239,6 +305,17 @@ export class MapView {
     const xu = this.x0 + (e.clientX - r.left - this.plot.x) / this.k;
     const yu = this.y0 + (e.clientY - r.top - this.plot.y) / this.k;
     if (xu < this.x0 || xu > this.x1 || yu < this.y0 || yu > this.y1) return null;
+    if (this.points) {
+      // nearest particle, if the pointer is on it or within a few screen pixels
+      const pt = this.points;
+      let best = -1, bd = Infinity;
+      for (let p = 0; p < pt.x.length; p++) {
+        const d = (pt.x[p] - xu) ** 2 + (pt.y[p] - yu) ** 2;
+        if (d < bd) { bd = d; best = p; }
+      }
+      const reach = Math.max(pt.ecd[best] / 2, 8 / this.k);
+      return best >= 0 && Math.sqrt(bd) <= reach ? best : null;
+    }
     let j = Math.floor((xu - this.x0) / this.dx), i = Math.floor((yu - this.y0) / this.dy);
     j = Math.max(0, Math.min(this.nx - 1, this.xAsc ? j : this.nx - 1 - j));
     i = Math.max(0, Math.min(this.ny - 1, this.yAsc ? i : this.ny - 1 - i));
@@ -252,7 +329,8 @@ export class MapView {
     const v = this.values ? this.values[p] : NaN;
     const bad = this.valid && !this.valid[p];
     const filt = this.filter !== "none" && this.values ? ` (filtered ${fmt(this.shown()[p])})` : "";
-    this.readout.textContent = `${fmt(xu, 3)}, ${fmt(yu, 3)} µm  →  ${bad ? "invalid" : fmt(v) + filt}`;
+    const who = this.points ? `#${p + 1} · ` : "";
+    this.readout.textContent = `${who}${fmt(xu, 3)}, ${fmt(yu, 3)} µm  →  ${bad ? "invalid" : fmt(v) + filt}`;
     this.opts.onHover && this.opts.onHover(p);
   }
 

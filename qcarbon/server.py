@@ -22,7 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from . import splat as splat_mod
 from .config import Config
 from .fitter import fit_spectra, smooth_spectra
-from .labspec import TEXT_EXT, RamanMap, VideoImage, find_video, read_l6v, read_map
+from .labspec import PF_LABELS, TEXT_EXT, RamanMap, VideoImage, read_any
 from .library import APP_DIR, Library, item_id
 from .results import export_table, quality, ratios, statistics, valid_mask
 
@@ -51,15 +51,15 @@ class Dataset:
     def __init__(self, path: str):
         self.path = path
         self.id = item_id(path)
-        self.map: RamanMap = read_map(path)
+        self.map, video = read_any(path)
         self.video: VideoImage | None = None
         self.video_png: bytes | None = None
-        vp = find_video(path) if path.lower().endswith(".l6m") else None
-        if vp:
-            try:
-                self.video = read_l6v(vp)
-            except Exception:
-                self.video = None
+        if video is not None:
+            # a ParticleFinder mosaic can be 8000 px square: keep a copy at
+            # most ~4000 px across (and let the file's bytes go)
+            f = max(1, int(np.ceil(max(video.rgb.shape[:2]) / 4096)))
+            self.video = VideoImage(rgb=np.ascontiguousarray(video.rgb[::f, ::f]),
+                                    x=video.x[::f].copy(), y=video.y[::f].copy())
         self.fit = None
         self.fit_cfg: Config | None = None
         self.fit_job = {"state": "idle"}
@@ -78,6 +78,11 @@ class Dataset:
             v = self.video
             d["video"] = {"w": int(v.rgb.shape[1]), "h": int(v.rgb.shape[0]),
                           "x": [float(v.x[0]), float(v.x[-1])], "y": [float(v.y[0]), float(v.y[-1])]}
+        pts = m.meta.get("points")
+        if pts is not None:
+            d["kind"] = "particles"
+            d["points"] = {k: b64(v) for k, v in pts.items()}
+            d["point_labels"] = PF_LABELS
         return d
 
 
@@ -165,6 +170,9 @@ async def upload(files: list[UploadFile] = File(...)):
         if name.lower().endswith((".l6m",) + TEXT_EXT) and main is None:
             main = dest
     if main is None:
+        main = next((os.path.join(folder, os.path.basename(f.filename or "")) for f in files
+                     if (f.filename or "").lower().endswith(".l6pf")), None)
+    if main is None:
         raise HTTPException(422, f"open a .l6m map (optionally with its .l6v video) or a text export "
                                  f"({', '.join(TEXT_EXT)})")
     return open_path(main).info()
@@ -182,12 +190,13 @@ def video_png(ds_id: str):
     ds = get_ds(ds_id)
     if ds.video is None:
         raise HTTPException(404, "no video image saved with this map")
+    big = ds.video.rgb.shape[0] * ds.video.rgb.shape[1] > 4_000_000
     if ds.video_png is None:
         from PIL import Image
         buf = io.BytesIO()
-        Image.fromarray(ds.video.rgb).save(buf, format="PNG")
+        Image.fromarray(ds.video.rgb).save(buf, format="JPEG" if big else "PNG", quality=88)
         ds.video_png = buf.getvalue()
-    return Response(ds.video_png, media_type="image/png")
+    return Response(ds.video_png, media_type="image/jpeg" if big else "image/png")
 
 
 # -- fitting ---------------------------------------------------------------
@@ -267,11 +276,20 @@ async def export(ds_id: str, request: Request):
     cfg = _with_view(ds, body)
     m = ds.map
     if body.get("format") == "full":
-        xx, yy = np.meshgrid(m.x, m.y)
+        pts = m.meta.get("points")
+        if pts is not None:
+            xx, yy = pts["x"], pts["y"]
+        else:
+            xx, yy = (a.ravel() for a in np.meshgrid(m.x, m.y))
         r = ds.fit
         v = valid_mask(r, cfg)
         rat = ratios(r, cfg)
-        cols = [("X (um)", xx.ravel()), ("Y (um)", yy.ravel()), ("Valid", v.astype(float))]
+        cols = [("X (um)", xx), ("Y (um)", yy), ("Valid", v.astype(float))]
+        if pts is not None:
+            # ASCII units, like "X (um)": Excel misreads a BOM-less UTF-8 "µ"
+            ascii_unit = lambda u: u.replace("µm²", "um2").replace("µm³", "um3").replace("µm", "um")
+            cols += [(f"{PF_LABELS[k][0]} ({ascii_unit(PF_LABELS[k][1])})" if PF_LABELS[k][1] else PF_LABELS[k][0], pts[k])
+                     for k in PF_LABELS] + [("Class", pts["cls"])]
         for j, n in enumerate(r.names):
             cols += [(f"{n} Intensity", r.intensity[:, j]), (f"{n} Position", r.position[:, j]),
                      (f"{n} Width", r.width[:, j]), (f"{n} Area", r.area[:, j])]
@@ -314,6 +332,8 @@ async def splat_start(ds_id: str, request: Request):
     ok, why = splat_mod.available()
     if not ok:
         raise HTTPException(501, why)
+    if ds.map.meta.get("kind") == "particles":
+        raise HTTPException(422, "Splat 3D needs a gridded map; ParticleFinder spectra are one point per particle")
     if ds.fit is None:
         raise HTTPException(409, "fit the map first: the splat uses each pixel's fitted baseline")
     if ds.splat_job.get("state") == "running":

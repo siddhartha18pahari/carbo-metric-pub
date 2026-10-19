@@ -34,7 +34,13 @@ _MAGIC = b"LabSpec6"
 _MAT = b"tam"
 _TAGS = (b"tam", b"typm", b"uni", b"axi", b"temx")
 _RECORD = 24
-_SHIFT_MIN, _SHIFT_MAX = -300.0, 4500.0
+# spectra recorded through the laser line start in the anti-Stokes region
+# (e.g. -1130 to 1939 cm-1); a -300 floor made those maps unreadable
+_SHIFT_MIN, _SHIFT_MAX = -4000.0, 4500.0
+
+
+class PointListError(ValueError):
+    """A .l6m holding a list of spectra with no stage grid (ParticleFinder)."""
 
 
 @dataclass
@@ -168,30 +174,47 @@ def read_l6m(path: str) -> RamanMap:
             and payload.size % a.size == 0]
     if not spec:
         raise ValueError(f"{os.path.basename(path)}: no Raman-shift axis fits the data")
-    wn_off, wn = max(spec, key=lambda t: t[1].size)
-    K = wn.size
-    n = payload.size // K
-    if n < 4:
-        raise ValueError(f"{os.path.basename(path)}: {n} spectra -- not a map")
 
-    # candidate stage axes, in file order (order breaks ties for square maps)
-    stage = [(o, a) for o, a in axes if o != wn_off and a.size <= n and _is_stage_axis(a)]
-    best = None
-    for o_slow, a_slow in stage:
-        for o_fast, a_fast in stage:
-            if o_slow == o_fast or a_slow.size * a_fast.size != n:
-                continue
-            cube = payload.reshape(a_slow.size, a_fast.size, K)
-            score = abs(np.log(max(_anisotropy(cube), 1e-9)))
-            # equal-size axes: the isotropy score cannot tell them apart, so
-            # prefer X listed first (as in .l6v/.l6i files)
-            key = (round(score, 6), 0 if o_fast < o_slow else 1)
-            if best is None or key < best[0]:
-                best = (key, cube, a_fast, a_slow)
+    def grid_for(wn_off, K):
+        """Best (fast, slow) stage-axis pair for K channels, or None."""
+        n = payload.size // K
+        # candidate stage axes, in file order (order breaks ties for square maps)
+        stage = [(o, a) for o, a in axes if o != wn_off and a.size <= n and _is_stage_axis(a)]
+        best = None
+        for o_slow, a_slow in stage:
+            for o_fast, a_fast in stage:
+                if o_slow == o_fast or a_slow.size * a_fast.size != n:
+                    continue
+                cube = payload.reshape(a_slow.size, a_fast.size, K)
+                score = abs(np.log(max(_anisotropy(cube), 1e-9)))
+                # Some files store the X axis twice (X, Y, X again), so an
+                # identical pair is a last resort; a centred square map can
+                # legitimately have X == Y. Equal-size axes: the isotropy score
+                # cannot tell them apart, so prefer X listed first (as in .l6v/.l6i).
+                same = int(np.array_equal(a_slow, a_fast))
+                key = (same, round(score, 6), 0 if o_fast < o_slow else 1)
+                if best is None or key < best[0]:
+                    best = (key, cube, a_fast, a_slow)
+        return best
+
+    # The spectral axis is the one that leaves a consistent X x Y grid. Taking
+    # simply the longest "plausible" axis can pick a stage axis instead (a
+    # 91-point X axis divides the payload too).
+    best = wn = None
+    for wn_off, cand in sorted(spec, key=lambda t: -t[1].size):
+        best = grid_for(wn_off, cand.size)
+        if best is not None:
+            wn = cand
+            break
     if best is None:
-        raise ValueError(
-            f"{os.path.basename(path)}: {n} spectra but no evenly stepped stage-axis "
-            f"pair multiplies to {n} (point list / ParticleFinder maps are not grids)")
+        wn = max(spec, key=lambda t: t[1].size)[1]
+        n = payload.size // wn.size
+        err = PointListError(
+            f"{os.path.basename(path)}: {n} spectra with no stage grid. This is a "
+            f"ParticleFinder spectra list: open its .l6pf project, which holds the particle positions")
+        err.spectra, err.wn = payload.reshape(n, wn.size), np.asarray(wn, np.float64)
+        raise err
+    K = wn.size
     _, cube, x, y = best
 
     cube = np.asarray(cube, np.float32)
@@ -203,6 +226,146 @@ def read_l6m(path: str) -> RamanMap:
     return RamanMap(cube=np.ascontiguousarray(cube), wn=wn, x=x, y=y,
                     name=os.path.splitext(os.path.basename(path))[0], source=path,
                     meta={"format": "l6m", "version": int.from_bytes(raw[12:16], "little")})
+
+
+# --------------------------------------------------------------------------
+# ParticleFinder projects (.l6pf)
+# --------------------------------------------------------------------------
+# A .l6pf holds the mosaic camera image (uint8 RGB with its X and Y stage
+# axes), one spectrum per particle (with a 1..P index axis), and a particle
+# table of P records of 24 float32. Field meanings were pinned against the
+# instrument (a 4575-particle project: seven rows of LabSpec's own Results table, matched on
+# their "Red cursor" value, agree on all four morphology columns at the same
+# index, so record k describes spectrum k):
+PF_FIELDS = {"x": 0, "y": 1, "area": 2, "ecd": 3, "min_diam": 11, "convexity": 15,
+             "elongation": 16, "volume": 18, "xmin": 19, "ymin": 20, "xmax": 21, "ymax": 22,
+             "cls": 23}
+PF_LABELS = {"ecd": ("Diameter (circle equiv.)", "µm"), "area": ("Area", "µm²"),
+             "min_diam": ("Min diameter", "µm"), "convexity": ("Convexity", ""),
+             "elongation": ("Elongation", "%"), "volume": ("Volume", "µm³")}
+_PF_REC = 24          # floats per particle record
+
+
+def _pf_table(raw: bytes, P: int, lo: int, hi: int) -> int | None:
+    """Byte offset of P consecutive particle records inside raw[lo:hi].
+
+    Records are recognised by an identity that cannot hold by chance: field 3
+    (circle-equivalent diameter) = sqrt(4 * field 2 (area) / pi). Records are
+    not 4-byte aligned in the file, so each byte alignment is tried."""
+    chunk, overlap = 1 << 24, P * _PF_REC + 64
+    for al in range(4):
+        start = lo + ((al - lo) % 4)
+        n_all = (hi - start) // 4
+        for c0 in range(0, n_all, chunk - overlap):
+            n = min(chunk, n_all - c0)
+            f = np.frombuffer(raw, "<f4", count=n, offset=start + 4 * c0)
+            a, e = f[2:-1], f[3:]
+            with np.errstate(all="ignore"):
+                ok = (a > 0) & (a < 1e9) & (np.abs(e * e - np.float32(4 / np.pi) * a) <= np.float32(1e-3) * a)
+            for r in range(_PF_REC):
+                col = ok[r::_PF_REC]
+                if col.size < P:
+                    continue
+                cs = np.concatenate([[0], np.cumsum(col, dtype=np.int64)])
+                hit = np.flatnonzero(cs[P:] - cs[:-P] == P)
+                if hit.size:
+                    return start + 4 * (c0 + r + _PF_REC * int(hit[0]))
+    return None
+
+
+def read_l6pf(path: str) -> tuple[RamanMap, VideoImage | None]:
+    """A ParticleFinder project: particle spectra, positions, morphology and
+    the mosaic image. The map is a 1 x P list of spectra (fit and statistics
+    work unchanged); positions and morphology are in ``meta["points"]``."""
+    raw = _read(path)
+    name = os.path.basename(path)
+    blocks = _mat_blocks(raw)
+    arrays = [(o, n, _f32(raw, o, n)) for o, n in blocks if n < 64 << 20]
+    axes = [(o, a) for o, n, a in arrays if _is_axis(a)]
+    index = [(o, a) for o, a in axes if a[0] == 1 and np.all(np.diff(a) == 1)]
+    if not index:
+        raise ValueError(f"{name}: no particle index in this ParticleFinder project")
+    P = int(max(a.size for _, a in index))
+    specs = [(o, a) for o, a in axes
+             if a.size >= 16 and not (a[0] == 1 and np.all(np.diff(a) == 1))
+             and _SHIFT_MIN < min(a[0], a[-1]) and max(a[0], a[-1]) < _SHIFT_MAX]
+    found = None
+    for wo, wn in sorted(specs, key=lambda t: -t[1].size):
+        for o, n in blocks:
+            if n // 4 == P * wn.size:
+                found = (o, wn, wo)
+                break
+        if found:
+            break
+    if found is None:
+        raise ValueError(f"{name}: {P} particles but no matching block of spectra "
+                         f"(the project may hold images only)")
+    s_off, wn, wn_off = found
+    K = wn.size
+    spectra = np.frombuffer(raw, "<f4", count=P * K, offset=s_off).reshape(P, K)
+
+    # mosaic: two evenly stepped stage axes W, H and W*H*3 bytes of RGB
+    video, image_end = None, 0
+    stage = [(o, a) for o, a in axes if o != wn_off and a.size > 16 and _is_stage_axis(a, tol=0.02)
+             and not (a[0] == 1 and np.all(np.diff(a) == 1))]
+    for i in range(len(stage) - 1):
+        (xo, xa), (yo, ya) = stage[i], stage[i + 1]
+        need = xa.size * ya.size * 3
+        img_off = next((o for o, n in blocks if n == need), None)
+        if img_off is None:
+            # not tagged as a matrix in some versions: it ends just before the X axis
+            rec = xo - _RECORD
+            best = None
+            for st in range(max(0, rec - need - 1024), rec - need + 1):
+                a8 = np.frombuffer(raw, np.uint8, count=need, offset=st).reshape(ya.size, xa.size, 3)[::16, ::16]
+                sm = float(np.abs(np.diff(a8.astype(np.int16), axis=1)).mean())
+                if best is None or sm < best[0]:
+                    best = (sm, st)
+            img_off = best[1] if best else None
+        if img_off is not None:
+            rgb = np.frombuffer(raw, np.uint8, count=need, offset=img_off).reshape(ya.size, xa.size, 3)
+            video = VideoImage(rgb=rgb, x=xa.astype(float), y=ya.astype(float))
+            image_end = img_off + need
+            break
+
+    t_off = _pf_table(raw, P, image_end, len(raw))
+    if t_off is None:
+        raise ValueError(f"{name}: no particle table with {P} records")
+    T = np.frombuffer(raw, "<f4", count=P * _PF_REC, offset=t_off).reshape(P, _PF_REC).astype(float)
+    pts = {k: T[:, c].copy() for k, c in PF_FIELDS.items()}
+    inside = ((pts["x"] >= pts["xmin"] - 1e-3) & (pts["x"] <= pts["xmax"] + 1e-3)
+              & (pts["y"] >= pts["ymin"] - 1e-3) & (pts["y"] <= pts["ymax"] + 1e-3))
+    if inside.mean() < 0.95:
+        raise ValueError(f"{name}: particle table found but positions fall outside their boxes")
+
+    wn = np.asarray(wn, np.float64)
+    cube = np.ascontiguousarray(spectra[None].astype(np.float32))
+    if wn[0] > wn[-1]:
+        wn, cube = wn[::-1].copy(), np.ascontiguousarray(cube[..., ::-1])
+    m = RamanMap(cube=cube, wn=wn, x=np.arange(1, P + 1, dtype=float), y=np.zeros(1),
+                 name=os.path.splitext(name)[0], source=path,
+                 meta={"format": "l6pf", "kind": "particles", "points": pts})
+    return m, video
+
+
+def pf_for_spectra_list(l6m_path: str, n_spectra: int) -> str | None:
+    """The .l6pf saved with a ParticleFinder spectra list (.l6m): same folder,
+    same particle count. Counting needs only the project's small index axis."""
+    folder = os.path.dirname(l6m_path)
+    for f in sorted(os.listdir(folder)):
+        if not f.lower().endswith(".l6pf"):
+            continue
+        p = os.path.join(folder, f)
+        try:
+            raw = _read(p)
+        except ValueError:
+            continue
+        for o, n in _mat_blocks(raw):
+            if n // 4 == n_spectra and n < 64 << 20:
+                a = _f32(raw, o, n)
+                if a[0] == 1 and np.all(np.diff(a) == 1):
+                    return p
+    return None
 
 
 TEXT_EXT = (".txt", ".csv", ".tsv", ".dat")
@@ -319,9 +482,43 @@ def read_map(path: str) -> RamanMap:
     ext = os.path.splitext(path)[1].lower()
     if ext == ".l6m":
         return read_l6m(path)
+    if ext == ".l6pf":
+        return read_l6pf(path)[0]
     if ext in TEXT_EXT:
         return read_text(path)
-    raise ValueError(f"unsupported file type {ext}: open a .l6m map or a text export ({', '.join(TEXT_EXT)})")
+    raise ValueError(f"unsupported file type {ext}: open a .l6m map, a ParticleFinder .l6pf "
+                     f"or a text export ({', '.join(TEXT_EXT)})")
+
+
+def read_any(path: str) -> tuple[RamanMap, VideoImage | None]:
+    """A map with its optical image: the .l6v next to a grid map, or the
+    mosaic of a ParticleFinder project. A ParticleFinder spectra list (.l6m)
+    takes positions, morphology and mosaic from the .l6pf saved beside it."""
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".l6pf":
+        return read_l6pf(path)
+    try:
+        m = read_map(path)
+    except PointListError as e:
+        pf = pf_for_spectra_list(path, e.spectra.shape[0])
+        if pf is None:
+            raise
+        pm, video = read_l6pf(pf)
+        wn, cube = e.wn, np.ascontiguousarray(e.spectra[None].astype(np.float32))
+        if wn[0] > wn[-1]:
+            wn, cube = wn[::-1].copy(), np.ascontiguousarray(cube[..., ::-1])
+        m = RamanMap(cube=cube, wn=wn, x=pm.x, y=pm.y,
+                     name=os.path.splitext(os.path.basename(path))[0], source=path,
+                     meta={**pm.meta, "format": "l6m", "project": pf})
+        return m, video
+    video = None
+    vp = find_video(path) if ext == ".l6m" else None
+    if vp:
+        try:
+            video = read_l6v(vp)
+        except Exception:
+            video = None
+    return m, video
 
 
 # --------------------------------------------------------------------------
@@ -357,8 +554,17 @@ def read_l6_image(path: str, shape: tuple[int, int]) -> np.ndarray:
     ny, nx = shape
     need = ny * nx
     for o, n in sorted(_mat_blocks(raw), key=lambda t: -t[1]):
-        if n // 4 >= need:
-            a = _f32(raw, o, n)[-need:]
+        # Blocks can open with NUL-terminated labels: "1/cm x counts\0Peak
+        # area\0" (Q-Carbon result images) or "Max height\0" (red maps). The values start
+        # after the last label, off the 4-byte grid when the labels are odd.
+        pos = 0
+        for _ in range(3):
+            nul = raw.find(b"\x00", o + pos, o + pos + 48) - o
+            if nul - pos < 3 or not all(32 <= c < 127 for c in raw[o + pos:o + nul]):
+                break
+            pos = nul + 1
+        if (n - pos) // 4 >= need:
+            a = np.frombuffer(raw, "<f4", count=need, offset=o + pos) if pos else _f32(raw, o, n)[-need:]
             return np.asarray(a, float).reshape(ny, nx)
     raise ValueError(f"{os.path.basename(path)}: no block with {need} values")
 

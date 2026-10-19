@@ -6,14 +6,15 @@ Per-pixel D and G band fitting of Raman maps of carbons, with maps of every band
 
 ## What it opens
 
-- LabSpec 6 binary maps (`.l6m`), read directly with no export step, plus the white-light image saved with them (`.l6v`).
+- LabSpec 6 binary maps (`.l6m`), read directly with no export step, plus the white-light image saved with them (`.l6v`). Maps recorded through the laser line (spectra starting in the anti-Stokes region, e.g. −1130 to 1940 cm⁻¹) are read too.
+- LabSpec ParticleFinder projects (`.l6pf`): one spectrum per particle, with each particle's stage position, size and shape and the mosaic camera image. A ParticleFinder spectra list (`.l6m` with no grid) opens with the `.l6pf` saved beside it (in the web app, drop both together).
 - Text exports from any instrument (`.txt`, `.csv`, `.tsv`, `.dat`; tab, comma, semicolon or space separated, decimal commas allowed):
   - a LabSpec matrix export (first row = Raman shift, then one row per point);
   - an x / y / shift / intensity table (e.g. Renishaw WiRE);
   - a two-column spectrum (shift, intensity), shown as a single point.
 - Fitted-result tables: Q-Carbon's own *Export data* `.txt` (per point: D/G intensity, width, area and ratios) and this app's *Export all (CSV)*. They hold fitted values and no spectra, so they open as maps, histograms, statistics, particles and a report, with nothing to refit. Q-Carbon's export has no coordinates: open it together with its `.l6m` (and `.l6v`) to use the real grid and white-light image. Opened alone, its grid is inferred from the point count, choosing the most isotropic map with a mild preference for square shapes. On 34 exports with a same-size `.l6m` on disk the first choice was right 33 times. The Spectral data panel lets you pick another grid.
 
-Point lists that do not form a full grid (e.g. ParticleFinder) and older 32-bit LabSpec files are refused with a message rather than guessed at.
+Older 32-bit LabSpec files, and spectra lists without their ParticleFinder project, are refused with a message rather than guessed at.
 
 ## Two ways to run it
 
@@ -58,6 +59,7 @@ The default configuration is a typical five-band carbon model: poly order 2 base
 - **Linked cursor.** Hovering any map updates all four maps, the spectrum and the optical image. Click to pin a point, and use the arrow keys to step through pixels. The spectrum shows each fitted band, the baseline and the residual. Drag to zoom.
 - **Exclude substrate (Otsu).** One click sets the intensity limit so bare substrate stops counting. On one test map the D3/G intensity ratio over all points is 0.37 ± 2.09; on the 3 325 particle points it is 0.060 ± 0.035. Per-pixel ratios on bare substrate are noise divided by noise.
 - **Particles tab.** Finds particles (Otsu on log(1 + I_G)) and splits touching ones at the neck with a marker watershed. It reports pixel-level vs particle-level statistics. Neighbouring pixels are not independent samples, so compare samples on particle means.
+- **ParticleFinder particles.** Every particle's spectrum is fitted with the same configuration as a map. The maps draw each particle as a circle at its stage position, sized by its diameter and coloured by the fitted value, over the mosaic image. The Particles tab plots any fitted value against the instrument's morphology (diameter, area, min diameter, convexity, elongation, volume) with binned medians and a rank correlation, and lists the particles; click one to see its spectrum. *Export all (CSV)* adds position, morphology and class per particle. Splat 3D needs a grid and is off for these files.
 - **Splat 3D tab** (desktop version). Spectral Gaussian splatting: the baseline-corrected cube on the particles becomes a field of 3-D Gaussians in (x, y, Raman shift), fitted with `ramansp.splatting`. The WebGL viewer projects each Gaussian as in 3D Gaussian splatting. Every 5th channel is held out; on a 9 000-point map the held-out error is 0.97× the map's own noise, with 1 568 Gaussians and 58× fewer numbers than the cube.
 - **Display.** Colour maps (LabSpec rainbow, Viridis, Inferno, Magma, Turbo, Cividis, ...), 1–99 % / full / manual scaling, optional smoothing (display only; statistics always use raw pixels), enlarged map view, PNG export.
 
@@ -71,6 +73,8 @@ The default configuration is a typical five-band carbon model: poly order 2 base
 | Std. error convention | map B vs Q-Carbon `ERROR.l6i` | √(SSR / (N − 3 × bands)): ratio 1.00 on pixels where both fits agree |
 | Map orientation | map C vs LabSpec's own screenshot of it | r = 0.949; rotated 0.48, mirrored ≈ 0 |
 | Text export | a LabSpec text matrix vs the same map's `.l6m` | identical cube and axes |
+| ParticleFinder fields and order | a 4 575-particle project vs rows of LabSpec's own Results table | each row's red-cursor height finds one spectrum; that particle's min diameter, convexity, elongation and volume all match (7 of 7 rows) |
+| Maps through the laser line | two such maps vs LabSpec's red map of each | r = 0.999 and 0.989; mirrored ≈ 0 |
 
 **D3: shapes from the mean spectrum.**
 
@@ -80,6 +84,8 @@ The default configuration is a typical five-band carbon model: poly order 2 base
 - **Which bands are held** is decided per map, and the app says which under the Peaks table. Typically D3 and D4, plus D2 on noisier maps.
 - **Limits.** A single pixel carries D3 at only about 1–2 σ at typical count levels, so some speckle is physics. D3 values left on bare substrate are background, not carbon: use *Exclude substrate (Otsu)*. A higher baseline order does not help (order 4 makes D3 worse).
 - **Turning it off** gives the plain per-pixel fit. Q-Carbon itself sets D3 to zero in 38 % of map A's pixels. Compare D3 numbers like-for-like only, and not between programs.
+
+**ParticleFinder format.** A `.l6pf` holds the mosaic (uint8 RGB with its X and Y stage axes), the spectra (one per particle, with a 1…P index axis) and a particle table of 24 float32 per particle: X, Y, area, circle-equivalent diameter, …, min diameter (field 11), convexity (15), elongation (16), volume (18), bounding box (19–22), class (23). The table is found by an identity that cannot hold by chance, diameter = √(4 · area / π), and every position must lie inside its own box. Fields not pinned against the instrument are not shown.
 
 **Map orientation.** LabSpec rasters X fast and draws Y downwards, and its text export writes the Y column first. Reading the slow axis as X transposes the map: statistics are unaffected, but images and overlays are not. Both readers here follow LabSpec's convention.
 

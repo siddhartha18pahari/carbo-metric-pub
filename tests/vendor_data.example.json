@@ -9,5 +9,12 @@
   "screenshot_map": "a 97 x 92 .l6m map (with its .l6v next to it)",
   "screenshot_png": "LabSpec's own screenshot of that map (red map panel)",
   "text_export": "a map exported by LabSpec as a text matrix",
-  "text_export_binary": "the same map's .l6m"
+  "text_export_binary": "the same map's .l6m",
+  "pf_project": "a ParticleFinder .l6pf project with spectra (the 4575-particle one whose Results table rows are in the test)",
+  "pf_spectra_list": "the .l6m spectra list saved next to that project",
+  "pf_small_project": "a second, small ParticleFinder .l6pf",
+  "antistokes_map": "a .l6m map whose spectra start below 0 cm-1 (recorded through the laser line)",
+  "antistokes_red_map": "LabSpec's red map (.l6i) of that map",
+  "twin_axis_map": "a .l6m map that stores its X axis twice",
+  "twin_axis_red_map": "LabSpec's red map (.l6i) of that map"
 }

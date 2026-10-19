@@ -568,3 +568,9 @@ table.stats .sub { color: var(--dim); }
 .results-only [data-sec="processing"], .results-only [data-sec="peaks"] { opacity: .45; pointer-events: none; }
 #results-note { margin-top: 6px; line-height: 1.45; }
 #results-note:empty { display: none; }
+
+/* ParticleFinder datasets: particles come from the instrument, not segmentation */
+.pf-only { display: none; }
+body.particles-mode .pf-only { display: block; }
+body.particles-mode .seg-only { display: none; }
+#pt-table tr.click { cursor: pointer; }

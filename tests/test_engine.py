@@ -347,3 +347,80 @@ def test_smoothing_settings_are_checked_and_saved():
         Config(spatial_kernel=4).check()
     cfg = Config(smooth_window=9, smooth_order=3, spatial_kernel=5)
     assert Config.from_ini(cfg.to_ini()).to_dict() == cfg.to_dict()
+
+
+# ---------------------------------------------------------------- ParticleFinder
+# Rows of LabSpec's own ParticleFinder Results table for the 4575-particle
+# project (min diam., convexity, elongation, volume, "Red cursor" height),
+# each matched to its spectrum through the red-cursor value.
+PF_SCREENSHOT_ROWS = [(2.64, 0.95, 100.00, 6.76, 8078.00), (2.29, 0.95, 100.00, 5.68, 9365.00),
+                      (2.64, 0.97, 100.00, 6.31, 7284.00), (3.03, 0.90, 51.98, 8.10, 7432.00),
+                      (2.71, 0.92, 56.18, 6.86, 7866.00), (2.45, 0.95, 100.00, 6.81, 7310.00),
+                      (2.64, 0.96, 100.00, 6.64, 6529.00)]
+
+
+def _max_height(path, P):
+    from qcarbon.labspec import _mat_blocks, _read
+    raw = _read(path)
+    for o, n in _mat_blocks(raw):
+        if raw[o:o + 11] == b"Max height\x00":
+            return np.frombuffer(raw, "<f4", count=P, offset=o + 11).astype(float)
+    pytest.skip("no Max height block")
+
+
+def test_particlefinder_table_rows_match_labspec_results_table():
+    from qcarbon.labspec import read_l6pf
+    path = vendor("pf_project")
+    m, video = read_l6pf(path)
+    P = m.cube.shape[1]
+    pts = m.meta["points"]
+    assert P == 4575 and video is not None
+    np.testing.assert_allclose(pts["ecd"], np.sqrt(4 * pts["area"] / np.pi), rtol=1e-3)
+    inside = (pts["x"] >= pts["xmin"]) & (pts["x"] <= pts["xmax"]) & (pts["y"] >= pts["ymin"]) & (pts["y"] <= pts["ymax"])
+    assert inside.all()
+    # the spectral "Max height" is in spectrum order...
+    mh = _max_height(path, P)
+    assert np.corrcoef(mh, m.cube[0].max(axis=1))[0, 1] > 0.95
+    # ...and the row that carries a screenshot particle's height carries its morphology too
+    for dmin, conv, elong, vol, red in PF_SCREENSHOT_ROWS:
+        k = int(np.flatnonzero(np.abs(mh - red) < 0.6)[-1])
+        assert pts["min_diam"][k] == pytest.approx(dmin, abs=0.006)
+        assert pts["convexity"][k] == pytest.approx(conv, abs=0.006)
+        assert pts["elongation"][k] == pytest.approx(elong, abs=0.006)
+        assert pts["volume"][k] == pytest.approx(vol, abs=0.006)
+
+
+def test_spectra_list_takes_positions_from_its_project():
+    from qcarbon.labspec import PointListError, read_any, read_l6pf
+    lst, prj = vendor("pf_spectra_list", "pf_project")
+    with pytest.raises(PointListError):
+        read_l6m(lst)
+    m, video = read_any(lst)
+    pm, _ = read_l6pf(prj)
+    assert m.meta["kind"] == "particles" and video is not None
+    np.testing.assert_array_equal(m.cube, pm.cube)
+    np.testing.assert_array_equal(m.meta["points"]["x"], pm.meta["points"]["x"])
+
+
+def test_small_project_mosaic_axes():
+    from qcarbon.labspec import read_l6pf
+    m, video = read_l6pf(vendor("pf_small_project"))
+    assert m.cube.shape[:2] == (1, 364)
+    assert video.rgb.shape == (video.y.size, video.x.size, 3)
+    pts = m.meta["points"]
+    assert (pts["x"] >= video.x.min()).all() and (pts["x"] <= video.x.max()).all()
+
+
+@pytest.mark.parametrize("map_key,red_key,shape", [("antistokes_map", "antistokes_red_map", (57, 91)),
+                                                   ("twin_axis_map", "twin_axis_red_map", (51, 51))])
+def test_maps_recorded_through_the_laser_line_read_as_grids(map_key, red_key, shape):
+    """Spectra from -1130 cm-1 used to be rejected (the 91-point X axis was taken
+    for the spectrum); a file storing X twice used to pair X with itself."""
+    mp, rp = vendor(map_key, red_key)
+    m = read_l6m(mp)
+    assert m.cube.shape[:2] == shape and m.wn[0] < -1000
+    assert not np.array_equal(m.x, m.y)
+    red = read_l6_image(rp, shape)       # values start after the "Max height" label, off the 4-byte grid
+    best = max(np.corrcoef(m.cube[:, :, max(0, c - 9):c + 10].max(axis=2).ravel(), red.ravel())[0, 1]
+               for c in range(0, m.wn.size, 4))
+    assert best > 0.98

@@ -13,7 +13,7 @@ import json
 import os
 import threading
 
-from .labspec import TEXT_EXT, find_video, read_map
+from .labspec import TEXT_EXT, read_any
 
 APP_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 CACHE = os.path.join(APP_DIR, ".cache", "library.json")
@@ -68,7 +68,7 @@ class Library:
                 dns[:] = [d for d in dns if d.lower() not in SKIP_DIRS]
                 for f in fns:
                     p = os.path.join(dp, f)
-                    if f.lower().endswith(".l6m") and os.path.getsize(p) > 50_000:
+                    if f.lower().endswith((".l6m", ".l6pf")) and os.path.getsize(p) > 50_000:
                         out.append(p)
                     elif texts and f.lower().endswith(TEXT_EXT):
                         out.append(p)
@@ -84,11 +84,13 @@ class Library:
             return hit
         info = {"stamp": stamp}
         try:
-            m = read_map(path)
+            m, video = read_any(path)
             info.update(ok=True, nx=int(m.cube.shape[1]), ny=int(m.cube.shape[0]),
                         k=int(m.wn.size), wn=[float(m.wn[0]), float(m.wn[-1])],
                         step=float(abs(m.x[1] - m.x[0])) if m.x.size > 1 else 0.0,
-                        video=find_video(path) is not None)
+                        video=video is not None)
+            if m.meta.get("kind") == "particles":
+                info.update(particles=int(m.cube.shape[1]), step=0.0)
         except Exception as e:
             info.update(ok=False, why=str(e).split(": ", 1)[-1][:160])
         with self._lock:

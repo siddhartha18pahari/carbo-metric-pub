@@ -204,7 +204,10 @@ function renderCursor() {
   if (S.fit) d.fit = evalFit(p);
   cursorPlot.setData(d);
   const i = Math.floor(p / S.nx), j = p % S.nx;
-  $("#cursor-info").textContent = `· point ${p + 1} · X ${fmt(S.x[j], 4)} µm, Y ${fmt(S.y[i], 4)} µm${S.hover != null && S.hover !== S.pinned ? "" : " · pinned"}${S.valid && !S.valid[p] ? " · not valid" : ""}`;
+  const where = S.points
+    ? `· particle ${p + 1} · X ${fmt(S.points.x[p], 4)} µm, Y ${fmt(S.points.y[p], 4)} µm · ⌀ ${fmt(S.points.ecd[p], 3)} µm`
+    : `· point ${p + 1} · X ${fmt(S.x[j], 4)} µm, Y ${fmt(S.y[i], 4)} µm`;
+  $("#cursor-info").textContent = `${where}${S.hover != null && S.hover !== S.pinned ? "" : " · pinned"}${S.valid && !S.valid[p] ? " · not valid" : ""}`;
   const tb = $("#cursor-table"); tb.textContent = "";
   if (S.fit) {
     d.fit.comps.forEach((c, j2) => tb.append(el("span", {}, el("b", { style: `color:${PEAK_COLOURS[j2 % PEAK_COLOURS.length]}` }, c.name), ` ${fmt(c.A, 3)} @ ${c.pos.toFixed(1)} w ${c.width.toFixed(1)}`)));
@@ -230,6 +233,7 @@ document.addEventListener("keydown", e => {
   const mv = { ArrowLeft: [0, -1], ArrowRight: [0, 1], ArrowUp: [-1, 0], ArrowDown: [1, 0] }[e.key];
   if (!mv) return;
   e.preventDefault();
+  if (S.points) { setPinned(Math.max(0, Math.min(S.nx - 1, S.pinned + mv[1] + 10 * mv[0]))); return; }
   const di = maps[0].yAsc ? mv[0] : -mv[0], dj = maps[0].xAsc ? mv[1] : -mv[1];
   const ni = Math.max(0, Math.min(S.ny - 1, i + di)), nj = Math.max(0, Math.min(S.nx - 1, j + dj));
   setPinned(ni * S.nx + nj);
@@ -613,9 +617,12 @@ async function loadDataset(info) {
   $("#grid-row").classList.add("hidden"); $("#results-note").textContent = "";
   S.ds = info; S.nx = info.nx; S.ny = info.ny; S.k = info.k;
   S.wn = f32(info.wn); S.x = f32(info.x); S.y = f32(info.y);
+  S.points = info.points ? Object.fromEntries(Object.entries(info.points).map(([k, v]) => [k, f32(v)])) : null;
+  S.pointLabels = info.point_labels || null;
+  document.body.classList.toggle("particles-mode", !!S.points);
   S.fit = null; $("#held-note").textContent = ""; S.ratio = null; S.valid = null; S.counts = null; S.seg = null; S.pinned = null; S.hover = null;
   $("#file-name").textContent = info.name;
-  $("#spec-name").textContent = `${info.nx} × ${info.ny} · ${info.k} ch`;
+  $("#spec-name").textContent = S.points ? `${fmt(info.nx)} particles · ${info.k} ch` : `${info.nx} × ${info.ny} · ${info.k} ch`;
   document.title = `${info.name} · Carbo Metrics`;
   $("#welcome").classList.add("hidden");
   setStatus("Loading spectra…", "busy");
@@ -627,7 +634,7 @@ async function loadDataset(info) {
     const ok = await new Promise(res => { img.onload = () => res(true); img.onerror = () => res(false); img.src = videoSrc(info.id); });
     if (ok) S.video = img;
   }
-  for (const m of [...maps, pmap]) { m.setGeometry({ nx: S.nx, ny: S.ny, x: S.x, y: S.y }); m.values = null; }
+  for (const m of [...maps, pmap]) { m.setGeometry({ nx: S.nx, ny: S.ny, x: S.x, y: S.y, points: S.points }); m.values = null; }
   setActive(S.active);
   renderDensity(); renderVideo();
   splatReset();
@@ -662,7 +669,10 @@ function renderLibrary() {
   const q = $("#lib-search").value.toLowerCase().trim();
   const only = $("#lib-ok").checked;
   const items = S.library.filter(it => (!q || (it.name + " " + it.folder).toLowerCase().includes(q)) && !(only && it.ok === false));
-  const why = it => /no matrix records/.test(it.why) ? "older file format" : /stage-axis/.test(it.why) ? "point list, not a grid" : "not a map";
+  const why = it => /no matrix records/.test(it.why) ? "older file format"
+    : /ParticleFinder spectra list/.test(it.why) ? "particle list: open its .l6pf"
+    : /stage-axis|no stage grid/.test(it.why) ? "point list, not a grid"
+    : /images only/.test(it.why) ? "image only, no spectra" : "not a map";
   const t = $("#lib-table"); t.textContent = "";
   t.append(el("tr", {}, ...["Map", "Folder", "Grid", "Points", "Range (cm⁻¹)", "Video", "Saved"].map(h => el("th", {}, h))));
   for (const it of items) {
@@ -673,7 +683,7 @@ function renderLibrary() {
     },
       el("td", {}, el("b", {}, it.name)),
       el("td", { class: "folder" }, `${it.root} › ${it.folder}`),
-      el("td", { class: "num" }, it.ok ? `${it.nx} × ${it.ny}` : it.ok === false ? el("span", { class: "tag no" }, why(it)) : "–"),
+      el("td", { class: "num" }, it.ok ? (it.particles ? "particles" : `${it.nx} × ${it.ny}`) : it.ok === false ? el("span", { class: "tag no" }, why(it)) : "–"),
       el("td", { class: "num" }, it.ok ? fmt(it.nx * it.ny) : "–"),
       el("td", { class: "num" }, it.ok ? `${Math.round(it.wn[0])}–${Math.round(it.wn[1])}` : "–"),
       el("td", {}, known && it.ok ? (it.video ? el("span", { class: "tag ok" }, "yes") : el("span", { class: "tag" }, "no")) : ""),
@@ -699,7 +709,7 @@ async function renderRecent() {
     const ok = r.items.filter(i => i.ok !== false).slice(0, 6);
     $("#recent").replaceChildren(...ok.map(it => el("button", { onclick: () => openPath(it.path) },
       el("b", {}, it.name), el("span", {}, `${it.root} › ${it.folder}`),
-      el("span", {}, it.ok ? `${it.nx} × ${it.ny} points · ${new Date(it.mtime * 1000).toLocaleDateString()}` : new Date(it.mtime * 1000).toLocaleDateString()))));
+      el("span", {}, it.ok ? `${it.particles ? `${fmt(it.particles)} particles` : `${it.nx} × ${it.ny} points`} · ${new Date(it.mtime * 1000).toLocaleDateString()}` : new Date(it.mtime * 1000).toLocaleDateString()))));
   } catch { /* library optional */ }
 }
 
@@ -719,6 +729,7 @@ async function loadResults(grid) {
   const { info, fit } = R.resultsDataset(r, grid, S.cfg);
   S.ds = info; S.nx = info.nx; S.ny = info.ny; S.k = 0;
   S.wn = new Float32Array(0); S.x = f32(info.x); S.y = f32(info.y);
+  S.points = null; S.pointLabels = null; document.body.classList.remove("particles-mode");
   S.cube = null; S.fit = null; S.ratio = null; S.valid = null; S.counts = null; S.seg = null; S.pinned = null; S.hover = null;
   S.cfg.ratio_num = fit.config.ratio_num; S.cfg.ratio_den = fit.config.ratio_den;
   document.body.classList.add("results-only");
@@ -835,6 +846,13 @@ function splatShow() {
     $("#sp-rotate").onchange = e => { sview.autoRotate = e.target.checked; sview.draw(); };
     $("#sp-reset").onclick = () => sview.resetView();
   }
+  if (S.points) {
+    $("#gl-empty").classList.remove("hidden");
+    $("#sp-status").textContent = "Splat 3D needs a gridded map: ParticleFinder spectra are one point per particle.";
+    $("#sp-run").disabled = $("#sp-run2").disabled = true;
+    return;
+  }
+  $("#sp-run").disabled = $("#sp-run2").disabled = !!splatState().running;
   const st = splatState();
   buildChips();
   if (st.field) { showField(st.field); if (st.result) showMetrics(st.result); drawLoss(st.history || []); }
@@ -985,7 +1003,7 @@ const pmap = new MapView($("#map-p"), {
 });
 pmap.cmap = "Viridis";
 const stripHost = $("#pt-strip"), stripCanvas = el("canvas"); stripHost.append(stripCanvas);
-new ResizeObserver(() => S.seg && drawStrip()).observe(stripHost);
+new ResizeObserver(() => (S.points ? S.pf && drawScatter() : S.seg && drawStrip())).observe(stripHost);
 
 function segSource() {
   const v = $("#pt-src").value || `log:${S.cfg.ratio_den}`;
@@ -997,6 +1015,7 @@ function segSource() {
 
 function particlesInit() {
   if (!S.fit) return;
+  if (S.points) { pfInit(); return; }
   const src = $("#pt-src"), cur = src.value;
   src.textContent = "";
   for (const n of S.fit.names) src.append(el("option", { value: `log:${n}` }, `log(1 + ${n} intensity)`));
@@ -1041,6 +1060,8 @@ function particleStats() {
 
 function renderParticles() {
   if (!S.fit) return;
+  if (S.points) { renderPF(); return; }
+  $("#pt-cards-h").textContent = "Pixels vs particles"; $("#pt-strip-h").textContent = "Ratio by particle";
   const r = resolve(S.pspec);
   pmap.setTitle(r.title);
   pmap.overlays = [outlineOverlay(S.seg)];
@@ -1089,6 +1110,113 @@ function drawStrip() {
 }
 
 // =========================================================================
+// ParticleFinder: one spectrum per particle, with the instrument's morphology
+// =========================================================================
+const LOGX = new Set(["ecd", "area", "min_diam", "volume"]);
+
+function ranks(a) {
+  const idx = a.map((v, i) => i).sort((p, q) => a[p] - a[q]), r = new Float64Array(a.length);
+  for (let i = 0; i < idx.length;) {
+    let j = i; while (j + 1 < idx.length && a[idx[j + 1]] === a[idx[i]]) j++;
+    for (let k = i; k <= j; k++) r[idx[k]] = (i + j) / 2;
+    i = j + 1;
+  }
+  return r;
+}
+function spearman(x, y) {
+  if (x.length < 3) return NaN;
+  const rx = ranks(x), ry = ranks(y), n = x.length, mx = (n - 1) / 2;
+  let sxy = 0, sxx = 0, syy = 0;
+  for (let i = 0; i < n; i++) { sxy += (rx[i] - mx) * (ry[i] - mx); sxx += (rx[i] - mx) ** 2; syy += (ry[i] - mx) ** 2; }
+  return sxy / Math.sqrt(sxx * syy);
+}
+
+function pfInit() {
+  const sel = $("#pf-x");
+  if (!sel.options.length) {
+    for (const [k, [lab, unit]] of Object.entries(S.pointLabels || {})) sel.append(el("option", { value: k }, unit ? `${lab} (${unit})` : lab));
+    sel.value = "ecd";
+    sel.onchange = () => renderPF();
+  }
+  renderPF();
+}
+
+function renderPF() {
+  const r = resolve(S.pspec);
+  pmap.setTitle(r.title);
+  pmap.overlays = [];
+  if (r.values) pmap.setData(r.values, { valid: r.useValid ? S.valid : null, label: r.label, unit: r.unit });
+  pmap.setCursor(null, S.pinned);
+  const xk = $("#pf-x").value || "ecd", X = S.points[xk], [xlab, xunit] = S.pointLabels[xk];
+  const idx = [];
+  for (let p = 0; p < S.nx; p++) if ((!r.useValid || !S.valid || S.valid[p]) && Number.isFinite(r.values[p]) && Number.isFinite(X[p])) idx.push(p);
+  const st = summary(idx.map(p => r.values[p])), rho = spearman(idx.map(p => X[p]), idx.map(p => r.values[p]));
+  const dia = summary(Array.from(S.points.ecd));
+  S.pf = { r, idx, X, xk, xlab, xunit, st, rho };
+  S.pstats = null;
+  $("#pt-cards-h").textContent = "Particles"; $("#pt-strip-h").textContent = `${r.name} against ${xlab.toLowerCase()}`;
+  const card = (k, v, s2) => el("div", { class: "card" }, el("div", { class: "k" }, k), el("div", { class: "v" }, v), el("div", { class: "s" }, s2));
+  $("#pt-cards").replaceChildren(
+    card("Particles", fmt(S.nx), `${fmt(idx.length)} valid`),
+    card("Median diameter", `${fmt(dia.median, 3)} µm`, `IQR ${fmt(dia.q1, 3)}–${fmt(dia.q3, 3)} µm`),
+    card(r.name, `${fmt(st.mean)} ± ${fmt(st.sd, 3)}`, `median ${fmt(st.median)} · n = ${fmt(st.n)} particles`),
+    card(`Rank correlation with ${xlab.toLowerCase()}`, Number.isFinite(rho) ? rho.toFixed(3) : "–", "Spearman ρ over valid particles"));
+  const t = $("#pt-table"); t.textContent = "";
+  t.append(el("tr", {}, ...["#", "X, Y (µm)", "⌀ µm", "Convexity", "Elong. %", r.name].map(h => el("th", {}, h))));
+  const top = [...idx].sort((a, b) => r.values[b] - r.values[a]).slice(0, 150);
+  for (const p of top) t.append(el("tr", { class: "click" + (p === S.pinned ? " on" : ""), title: "Show this particle's spectrum",
+    onclick: () => { setPinned(p); renderPF(); } },
+    el("td", {}, `${p + 1}`), el("td", { class: "sub" }, `${fmt(S.points.x[p], 4)}, ${fmt(S.points.y[p], 4)}`),
+    el("td", {}, fmt(S.points.ecd[p], 3)), el("td", {}, fmt(S.points.convexity[p], 3)), el("td", {}, fmt(S.points.elongation[p], 3)),
+    el("td", {}, fmt(r.values[p]))));
+  if (idx.length > top.length) t.append(el("tr", {}, el("td", { colspan: 6, class: "sub" }, `${fmt(top.length)} highest of ${fmt(idx.length)} shown; Export all (CSV) has every particle`)));
+  drawScatter();
+}
+
+function drawScatter() {
+  const F = S.pf; if (!F) return;
+  const W = stripHost.clientWidth, H = stripHost.clientHeight; if (W < 20) return;
+  const ctx = hidpi(stripCanvas, W, H);
+  const { idx, X, r } = F; if (!idx.length) return;
+  const logx = LOGX.has(F.xk) && idx.every(p => X[p] > 0);
+  const xs = idx.map(p => (logx ? Math.log10(X[p]) : X[p])), ys = idx.map(p => r.values[p]);
+  const sx = Float64Array.from(xs).sort(), sy = Float64Array.from(ys).sort();
+  const xlo = quantile(sx, 0.005), xhi = quantile(sx, 0.995) || xlo + 1, ylo = quantile(sy, 0.01), yhi = quantile(sy, 0.99) || ylo + 1;
+  const L = 46, B = 30, Rr = 8, Tt = 8;
+  const PX = v => L + (v - xlo) / ((xhi - xlo) || 1) * (W - L - Rr), PY = v => Tt + (1 - (v - ylo) / ((yhi - ylo) || 1)) * (H - Tt - B);
+  ctx.font = font(11); ctx.textBaseline = "middle";
+  for (const t of niceTicks(ylo, yhi, 4)) { ctx.fillStyle = T.grid; ctx.fillRect(L, PY(t), W - L - Rr, 1); ctx.fillStyle = T.ink; ctx.textAlign = "right"; ctx.fillText(fmt(t, 3), L - 4, PY(t)); }
+  ctx.textAlign = "center"; ctx.textBaseline = "top";
+  const xt = logx ? [-2, -1, 0, 1, 2, 3, 4, 5].filter(v => v >= xlo && v <= xhi) : niceTicks(xlo, xhi, 5);
+  for (const t of xt) { ctx.fillStyle = T.grid; ctx.fillRect(PX(t), Tt, 1, H - Tt - B); ctx.fillStyle = T.ink; ctx.fillText(logx ? fmt(10 ** t, 3) : fmt(t, 3), PX(t), H - B + 4); }
+  ctx.fillStyle = T.label; ctx.fillText(`${F.xlab}${F.xunit ? ` (${F.xunit})` : ""}${logx ? ", log scale" : ""}`, (L + W - Rr) / 2, H - 13);
+  const cls = S.points.cls, cols = ["#3fe0ff", "#ff9f40", "#b18cff", "#7dff6a"];
+  ctx.globalAlpha = Math.max(0.15, Math.min(0.8, 300 / idx.length));
+  idx.forEach((p, i) => {
+    if (ys[i] < ylo || ys[i] > yhi || xs[i] < xlo || xs[i] > xhi) return;
+    ctx.fillStyle = cols[Math.max(0, cls[p]) % cols.length];
+    ctx.fillRect(PX(xs[i]) - 1.2, PY(ys[i]) - 1.2, 2.4, 2.4);
+  });
+  ctx.globalAlpha = 1;
+  // binned medians: the trend without assuming a shape
+  const nb = 10, bins = Array.from({ length: nb }, () => []);
+  xs.forEach((v, i) => { const b = Math.floor((v - xlo) / ((xhi - xlo) || 1) * nb); if (b >= 0 && b < nb) bins[b].push(ys[i]); });
+  ctx.strokeStyle = T.strong; ctx.lineWidth = 2; ctx.beginPath();
+  let started = false;
+  bins.forEach((b, k) => {
+    if (b.length < 8) return;
+    b.sort((u, v) => u - v);
+    const x = PX(xlo + (k + 0.5) / nb * (xhi - xlo)), y = PY(quantile(b, 0.5));
+    if (started) ctx.lineTo(x, y); else { ctx.moveTo(x, y); started = true; }
+  });
+  ctx.stroke();
+  if (S.pinned != null && idx.includes(S.pinned)) {
+    const i = idx.indexOf(S.pinned);
+    ctx.strokeStyle = "#7dff6a"; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(PX(xs[i]), PY(ys[i]), 5, 0, 7); ctx.stroke();
+  }
+}
+
+// =========================================================================
 // report
 // =========================================================================
 // Report figures are drawn off-screen at a fixed size, so they are current
@@ -1109,7 +1237,7 @@ function reportFigures() {
   maps.forEach((src, i) => {
     const host = offscreen(520, 440), mv = new MapView(host, {});
     Object.assign(mv, { cmap: src.cmap, scale: src.scale, manual: src.manual, smooth: src.smooth, filter: src.filter });
-    mv.setGeometry({ nx: S.nx, ny: S.ny, x: S.x, y: S.y });
+    mv.setGeometry({ nx: S.nx, ny: S.ny, x: S.x, y: S.y, points: S.points });
     const r = resolve(S.specs[i]);
     mv.setTitle(r.title);
     if (r.values) mv.setData(r.values, { valid: r.useValid ? S.valid : null, label: r.label, unit: r.unit });

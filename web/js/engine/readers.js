@@ -8,7 +8,9 @@
 const TAGS = ["tam", "typm", "uni", "axi", "temx"].map(s => Uint8Array.from(s, c => c.charCodeAt(0)));
 const MAT = TAGS[0];
 const RECORD = 24;
-const SHIFT_MIN = -300, SHIFT_MAX = 4500;
+// spectra recorded through the laser line start in the anti-Stokes region
+// (e.g. -1130 to 1939 cm-1); a -300 floor made those maps unreadable
+const SHIFT_MIN = -4000, SHIFT_MAX = 4500;
 export const TEXT_EXT = [".txt", ".csv", ".tsv", ".dat"];
 const TEXT_LAYOUTS = "a LabSpec matrix export (first row = Raman shift, then one row per point), " +
   "an x / y / shift / intensity table, or a two-column spectrum (shift, intensity)";
@@ -103,30 +105,49 @@ export function readL6m(buf, name) {
   const spec = axes.filter(([, a]) => a.length >= 16 && SHIFT_MIN < Math.min(a[0], a[a.length - 1])
     && Math.max(a[0], a[a.length - 1]) < SHIFT_MAX && payload.length % a.length === 0);
   if (!spec.length) throw new Error(`${name}: no Raman-shift axis fits the data`);
-  let [wnOff, wn] = spec[0];
-  for (const s of spec) if (s[1].length > wn.length) [wnOff, wn] = s;
-  const K = wn.length, n = payload.length / K;
-  if (n < 4) throw new Error(`${name}: ${n} spectra, not a map`);
 
-  // mean counts per spectrum, in file order, for the isotropy score
-  const mean = new Float64Array(n);
-  for (let p = 0; p < n; p++) { let s = 0; for (let k = 0; k < K; k++) s += payload[p * K + k]; mean[p] = s / K; }
-  const aniso = (rows, cols) => {
-    let dv = 0, dh = 0;
-    for (let i = 0; i < rows - 1; i++) for (let j = 0; j < cols; j++) dv += Math.abs(mean[(i + 1) * cols + j] - mean[i * cols + j]);
-    for (let i = 0; i < rows; i++) for (let j = 0; j < cols - 1; j++) dh += Math.abs(mean[i * cols + j + 1] - mean[i * cols + j]);
-    dv /= (rows - 1) * cols; dh /= rows * (cols - 1);
-    return dh > 0 ? dv / dh : Infinity;
+  const gridFor = (wnOff, K) => {
+    const n = payload.length / K;
+    // mean counts per spectrum, in file order, for the isotropy score
+    const mean = new Float64Array(n);
+    for (let p = 0; p < n; p++) { let s = 0; for (let k = 0; k < K; k++) s += payload[p * K + k]; mean[p] = s / K; }
+    const aniso = (rows, cols) => {
+      let dv = 0, dh = 0;
+      for (let i = 0; i < rows - 1; i++) for (let j = 0; j < cols; j++) dv += Math.abs(mean[(i + 1) * cols + j] - mean[i * cols + j]);
+      for (let i = 0; i < rows; i++) for (let j = 0; j < cols - 1; j++) dh += Math.abs(mean[i * cols + j + 1] - mean[i * cols + j]);
+      dv /= (rows - 1) * cols; dh /= rows * (cols - 1);
+      return dh > 0 ? dv / dh : Infinity;
+    };
+    const same = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
+    const less = (a, b) => { for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return a[i] < b[i]; return false; };
+    const stage = axes.filter(([o, a]) => o !== wnOff && a.length <= n && isStageAxis(a));
+    let best = null;
+    for (const [oS, aS] of stage) for (const [oF, aF] of stage) {
+      if (oS === oF || aS.length * aF.length !== n) continue;
+      // some files store the X axis twice: an identical pair is a last resort
+      const score = Math.round(Math.abs(Math.log(Math.max(aniso(aS.length, aF.length), 1e-9))) * 1e6) / 1e6;
+      const key = [same(aS, aF) ? 1 : 0, score, oF < oS ? 0 : 1];
+      if (!best || less(key, best.key)) best = { key, x: aF, y: aS };
+    }
+    return best;
   };
-  const stage = axes.filter(([o, a]) => o !== wnOff && a.length <= n && isStageAxis(a));
-  let best = null;
-  for (const [oS, aS] of stage) for (const [oF, aF] of stage) {
-    if (oS === oF || aS.length * aF.length !== n) continue;
-    const score = Math.round(Math.abs(Math.log(Math.max(aniso(aS.length, aF.length), 1e-9))) * 1e6) / 1e6;
-    const key = [score, oF < oS ? 0 : 1];
-    if (!best || key[0] < best.key[0] || (key[0] === best.key[0] && key[1] < best.key[1])) best = { key, x: aF, y: aS };
+
+  // the spectral axis is the one that leaves a consistent X x Y grid (a
+  // 91-point X axis divides the payload too)
+  let best = null, wn = null;
+  for (const [wo, cand] of [...spec].sort((a, b) => b[1].length - a[1].length)) {
+    best = gridFor(wo, cand.length);
+    if (best) { wn = cand; break; }
   }
-  if (!best) throw new Error(`${name}: ${n} spectra but no evenly stepped stage-axis pair multiplies to ${n} (point lists and ParticleFinder maps are not grids)`);
+  if (!best) {
+    wn = spec.reduce((a, b) => (b[1].length > a[1].length ? b : a))[1];
+    const n = payload.length / wn.length;
+    const err = new Error(`${name}: ${n} spectra with no stage grid. This is a ParticleFinder spectra list: ` +
+      "open its .l6pf project, which holds the particle positions");
+    Object.assign(err, { pointList: true, spectra: payload, wn, n });
+    throw err;
+  }
+  const K = wn.length, n = payload.length / K;
 
   let cube = payload, wnOut = Float64Array.from(wn);
   if (wn[0] > wn[K - 1]) {
@@ -150,6 +171,129 @@ export function readL6v(buf, name) {
   for (const b of blocks) if (b[1] > big[1]) big = b;
   if (big[1] < need) throw new Error(`${name}: image block too small`);
   return { rgb: raw.slice(big[0], big[0] + need), w: x.length, h: y.length, x, y };
+}
+
+// --------------------------------------------------------------------------
+// ParticleFinder projects (.l6pf): mosaic image, one spectrum per particle and
+// a table of 24 float32 per particle (see qcarbon/labspec.py, where the field
+// meanings were pinned against the instrument's own Results table).
+// --------------------------------------------------------------------------
+export const PF_FIELDS = { x: 0, y: 1, area: 2, ecd: 3, min_diam: 11, convexity: 15, elongation: 16, volume: 18,
+                           xmin: 19, ymin: 20, xmax: 21, ymax: 22, cls: 23 };
+export const PF_LABELS = { ecd: ["Diameter (circle equiv.)", "µm"], area: ["Area", "µm²"], min_diam: ["Min diameter", "µm"],
+                           convexity: ["Convexity", ""], elongation: ["Elongation", "%"], volume: ["Volume", "µm³"] };
+const PF_REC = 24;
+const isIndex = a => a[0] === 1 && a.every((v, i) => !i || v - a[i - 1] === 1);
+
+// P consecutive records, found by an identity that cannot hold by chance:
+// field 3 (circle-equivalent diameter) = sqrt(4 * field 2 (area) / pi).
+// Records are not 4-byte aligned, so every byte alignment is tried; one pass,
+// counting the run of valid records separately for each of the 24 phases.
+function pfTable(raw, P, lo) {
+  const dv = new DataView(raw.buffer, raw.byteOffset, raw.byteLength), c = 4 / Math.PI;
+  for (let al = 0; al < 4; al++) {
+    const start = lo + (((al - lo) % 4) + 4) % 4, nf = Math.floor((raw.length - start) / 4);
+    const run = new Int32Array(PF_REC);
+    for (let i = 0; i + 3 < nf; i++) {
+      const a = dv.getFloat32(start + 4 * (i + 2), true), e = dv.getFloat32(start + 4 * (i + 3), true);
+      const r = i % PF_REC;
+      run[r] = a > 0 && a < 1e9 && Math.abs(e * e - c * a) <= 1e-3 * a ? run[r] + 1 : 0;
+      if (run[r] === P) return start + 4 * (i - PF_REC * (P - 1));
+    }
+  }
+  return -1;
+}
+
+export function readL6pf(buf, name) {
+  const raw = new Uint8Array(buf);
+  magic(raw, name);
+  const blocks = matBlocks(raw);
+  const arrays = blocks.filter(([, n]) => n < 64 << 20).map(([o, n]) => [o, f32(raw, o, n)]);
+  const axes = arrays.filter(([, a]) => isAxis(a));
+  const index = axes.filter(([, a]) => isIndex(a));
+  if (!index.length) throw new Error(`${name}: no particle index in this ParticleFinder project`);
+  const P = Math.max(...index.map(([, a]) => a.length));
+  const specs = axes.filter(([, a]) => a.length >= 16 && !isIndex(a) && SHIFT_MIN < Math.min(a[0], a[a.length - 1])
+    && Math.max(a[0], a[a.length - 1]) < SHIFT_MAX).sort((a, b) => b[1].length - a[1].length);
+  let found = null;
+  for (const [wo, wn] of specs) {
+    const blk = blocks.find(([, n]) => Math.floor(n / 4) === P * wn.length);
+    if (blk) { found = { off: blk[0], wn, wo }; break; }
+  }
+  if (!found) throw new Error(`${name}: ${P} particles but no matching block of spectra (the project may hold images only)`);
+  const K = found.wn.length;
+  let spectra = f32(raw, found.off, P * K * 4);
+
+  // mosaic: two evenly stepped stage axes W, H and W*H*3 bytes of RGB, reduced
+  // to at most ~4000 px across for the page
+  let video = null, imageEnd = 0;
+  const stage = axes.filter(([o, a]) => o !== found.wo && a.length > 16 && isStageAxis(a, 0.02) && !isIndex(a));
+  for (let i = 0; i + 1 < stage.length && !video; i++) {
+    const [xo, xa] = stage[i], [, ya] = stage[i + 1], W = xa.length, H = ya.length, need = W * H * 3;
+    let off = (blocks.find(([, n]) => n === need) || [null])[0];
+    if (off == null) {          // not tagged as a matrix in some versions: it ends just before the X axis
+      const rec = xo - RECORD;
+      let best = null;
+      for (let st = Math.max(0, rec - need - 1024); st <= rec - need; st++) {
+        let sm = 0, cnt = 0;
+        for (let r = 0; r < H; r += 16) for (let q = 0; q + 16 < W; q += 16) {
+          const o = st + (r * W + q) * 3;
+          for (let ch = 0; ch < 3; ch++) sm += Math.abs(raw[o + ch] - raw[o + 3 + ch]);
+          cnt++;
+        }
+        sm /= cnt || 1;
+        if (!best || sm < best[0]) best = [sm, st];
+      }
+      off = best ? best[1] : null;
+    }
+    if (off == null) continue;
+    const f = Math.max(1, Math.ceil(Math.max(W, H) / 4096)), w = Math.ceil(W / f), h = Math.ceil(H / f);
+    const rgb = new Uint8Array(w * h * 3);
+    for (let r = 0; r < h; r++) for (let q = 0; q < w; q++) {
+      const s0 = off + ((r * f) * W + q * f) * 3, d0 = (r * w + q) * 3;
+      rgb[d0] = raw[s0]; rgb[d0 + 1] = raw[s0 + 1]; rgb[d0 + 2] = raw[s0 + 2];
+    }
+    const xs = Float64Array.from({ length: w }, (_, q) => xa[q * f]), ys = Float64Array.from({ length: h }, (_, r) => ya[r * f]);
+    video = { rgb, w, h, x: xs, y: ys };
+    imageEnd = off + need;
+  }
+
+  const t = pfTable(raw, P, imageEnd);
+  if (t < 0) throw new Error(`${name}: no particle table with ${P} records`);
+  const dv = new DataView(raw.buffer, raw.byteOffset + t, P * PF_REC * 4), points = {};
+  for (const [k, c] of Object.entries(PF_FIELDS)) {
+    const a = new Float32Array(P);
+    for (let p = 0; p < P; p++) a[p] = dv.getFloat32((p * PF_REC + c) * 4, true);
+    points[k] = a;
+  }
+  let inside = 0;
+  for (let p = 0; p < P; p++) if (points.x[p] >= points.xmin[p] - 1e-3 && points.x[p] <= points.xmax[p] + 1e-3
+    && points.y[p] >= points.ymin[p] - 1e-3 && points.y[p] <= points.ymax[p] + 1e-3) inside++;
+  if (inside < 0.95 * P) throw new Error(`${name}: particle table found but positions fall outside their boxes`);
+
+  const wnOut = Float64Array.from(found.wn);
+  if (wnOut[0] > wnOut[K - 1]) {
+    const flipped = new Float32Array(spectra.length);
+    for (let p = 0; p < P; p++) for (let k = 0; k < K; k++) flipped[p * K + k] = spectra[p * K + K - 1 - k];
+    spectra = flipped; wnOut.reverse();
+  }
+  const map = { cube: spectra, wn: wnOut, x: Float64Array.from({ length: P }, (_, p) => p + 1), y: Float64Array.of(0),
+                nx: P, ny: 1, name: stem(name), format: "l6pf", kind: "particles", points };
+  return { map, video };
+}
+
+// a ParticleFinder spectra list (.l6m) placed with the project saved beside it
+export function placeSpectraList(err, pf, name) {
+  if (pf.map.nx !== err.n) throw new Error(`${name}: ${err.n} spectra but the project has ${pf.map.nx} particles`);
+  const K = err.wn.length;
+  let cube = err.spectra;
+  const wn = Float64Array.from(err.wn);
+  if (wn[0] > wn[K - 1]) {
+    cube = new Float32Array(err.spectra.length);
+    for (let p = 0; p < err.n; p++) for (let k = 0; k < K; k++) cube[p * K + k] = err.spectra[p * K + K - 1 - k];
+    wn.reverse();
+  }
+  return { ...pf.map, cube, wn, name: stem(name), format: "l6m" };
 }
 
 // --------------------------------------------------------------------------
@@ -356,6 +500,7 @@ export function placeResults(t, grid) {
 export function readMap(buf, name) {
   const ext = (name.match(/\.[^.]+$/) || [""])[0].toLowerCase();
   if (ext === ".l6m") return readL6m(buf, name);
+  if (ext === ".l6pf") return readL6pf(buf, name).map;
   if (TEXT_EXT.includes(ext)) return readText(new TextDecoder("utf-8").decode(buf), name);
-  throw new Error(`unsupported file type ${ext || "(none)"}: open a .l6m map or a text export (${TEXT_EXT.join(", ")})`);
+  throw new Error(`unsupported file type ${ext || "(none)"}: open a .l6m map, a ParticleFinder .l6pf or a text export (${TEXT_EXT.join(", ")})`);
 }

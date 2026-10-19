@@ -3,7 +3,7 @@
 // user's disk into the page, fits run in Web Workers, nothing is uploaded.
 // Splat 3D needs the Python engine and stays in the desktop version.
 
-import { readMap, readL6v, TEXT_EXT } from "./readers.js";
+import { readMap, readL6v, readL6pf, placeSpectraList, PF_LABELS, TEXT_EXT } from "./readers.js";
 import { prepareFit, finishFit, lmBatch, smoothSpectra } from "./core.js";
 import { DEFAULT_CONFIG, toIni, fromIni } from "./config.js";
 
@@ -76,7 +76,9 @@ export async function videoUrl(v) {
     img.data[j] = v.rgb[i]; img.data[j + 1] = v.rgb[i + 1]; img.data[j + 2] = v.rgb[i + 2]; img.data[j + 3] = 255;
   }
   c.getContext("2d").putImageData(img, 0, 0);
-  const blob = await new Promise(r => c.toBlob(r, "image/png"));
+  // a ParticleFinder mosaic is millions of pixels: JPEG keeps it quick
+  const big = v.w * v.h > 4e6;
+  const blob = await new Promise(r => c.toBlob(r, big ? "image/jpeg" : "image/png", 0.88));
   return URL.createObjectURL(blob);
 }
 
@@ -88,16 +90,30 @@ function info(ds) {
     const v = ds.video;
     d.video = { w: v.w, h: v.h, x: [v.x[0], v.x[v.x.length - 1]], y: [v.y[0], v.y[v.y.length - 1]] };
   }
+  if (m.points) { d.kind = "particles"; d.points = m.points; d.point_labels = PF_LABELS; }
   return d;
 }
 
 async function upload(files) {
   const lower = f => f.name.toLowerCase();
-  const main = files.find(f => lower(f).endsWith(".l6m")) || files.find(f => TEXT_EXT.some(e => lower(f).endsWith(e)));
-  if (!main) throw new Error(`open a .l6m map (optionally with its .l6v video) or a text export (${TEXT_EXT.join(", ")})`);
-  const map = readMap(await main.arrayBuffer(), main.name);
+  const projects = files.filter(f => lower(f).endsWith(".l6pf"));
+  const main = files.find(f => lower(f).endsWith(".l6m")) || files.find(f => TEXT_EXT.some(e => lower(f).endsWith(e))) || projects[0];
+  if (!main) throw new Error(`open a .l6m map (optionally with its .l6v video), a ParticleFinder .l6pf or a text export (${TEXT_EXT.join(", ")})`);
+  let map, pfVideo = null;
+  if (lower(main).endsWith(".l6pf")) ({ map, video: pfVideo } = readL6pf(await main.arrayBuffer(), main.name));
+  else {
+    try { map = readMap(await main.arrayBuffer(), main.name); }
+    catch (e) {
+      // a ParticleFinder spectra list: positions come from the project dropped with it
+      if (!e.pointList) throw e;
+      if (!projects.length) throw new Error(`${e.message} (drop the .l6m together with its .l6pf, or the .l6pf alone)`);
+      const pf = readL6pf(await projects[0].arrayBuffer(), projects[0].name);
+      map = placeSpectraList(e, pf, main.name); pfVideo = pf.video;
+    }
+  }
   const ds = { id: `local-${++seq}`, map, video: null, videoUrl: null, fit: null, fitCfg: null, job: { state: "idle" } };
-  if (lower(main).endsWith(".l6m")) {
+  if (pfVideo) { ds.video = pfVideo; ds.videoUrl = await videoUrl(pfVideo); }
+  else if (lower(main).endsWith(".l6m")) {
     const stemOf = f => lower(f).replace(/\.[^.]+$/, "");
     const vids = files.filter(f => lower(f).endsWith(".l6v"));
     const vf = vids.find(f => stemOf(f) === stemOf(main)) || (vids.length === 1 ? vids[0] : null);
@@ -177,9 +193,16 @@ export function exportText(ds, body) {
   for (const k of ["ratio_num", "ratio_den", "intensity", "ratio_i", "ratio_a"]) if (k in body) cfg[k] = body[k];
   const fit = ds.fit, m = ds.map, { n, d, r, valid } = derived(fit, cfg), P = valid.length;
   if (body.format === "full") {
-    const cols = [["X (um)", Float64Array.from({ length: P }, (_, p) => m.x[p % m.nx])],
-                  ["Y (um)", Float64Array.from({ length: P }, (_, p) => m.y[Math.floor(p / m.nx)])],
+    const pts = m.points;
+    const cols = [["X (um)", pts ? Float64Array.from(pts.x) : Float64Array.from({ length: P }, (_, p) => m.x[p % m.nx])],
+                  ["Y (um)", pts ? Float64Array.from(pts.y) : Float64Array.from({ length: P }, (_, p) => m.y[Math.floor(p / m.nx)])],
                   ["Valid", Float64Array.from(valid)]];
+    if (pts) {
+      // ASCII units, like "X (um)": Excel misreads a BOM-less UTF-8 "µ"
+      const ascii = u => u.replace("µm²", "um2").replace("µm³", "um3").replace("µm", "um");
+      for (const [k, [label, unit]] of Object.entries(PF_LABELS)) cols.push([unit ? `${label} (${ascii(unit)})` : label, Float64Array.from(pts[k])]);
+      cols.push(["Class", Float64Array.from(pts.cls)]);
+    }
     for (const name of fit.names)
       for (const q of ["intensity", "position", "width", "area"]) cols.push([`${name} ${cap(q)}`, column(fit, name, q)]);
     for (const q of Q) cols.push([`Ratio ${cap(q)} ${cfg.ratio_num}/${cfg.ratio_den}`, r[q]]);
@@ -225,7 +248,9 @@ export function createLocalBackend() {
       case "export":
         if (!ds.fit) throw new Error("fit the map first");
         return exportText(ds, body);
-      case "splat": throw new Error("Splat 3D runs in the desktop version (python run.py)");
+      case "splat":
+        if (ds.map.points) throw new Error("Splat 3D needs a gridded map; ParticleFinder spectra are one point per particle");
+        throw new Error("Splat 3D runs in the desktop version (python run.py)");
       default: throw new Error(`unknown request ${p}`);
     }
   }

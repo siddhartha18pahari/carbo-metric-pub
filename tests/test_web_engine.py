@@ -50,3 +50,32 @@ def test_browser_engine_matches_python(tmp_path, overrides):
     for q in ("intensity", "position", "width", "area"):
         np.testing.assert_allclose(np.reshape(js[q], (-1, k)), getattr(r, q), rtol=1e-7, atol=1e-7)
     np.testing.assert_allclose(js["std_error"], r.std_error, rtol=1e-9)
+
+
+def _vendor_path(key):
+    try:
+        with open(os.path.join(HERE, "vendor_data.json"), encoding="utf-8") as fh:
+            p = json.load(fh).get(key, "")
+    except FileNotFoundError:
+        pytest.skip("no tests/vendor_data.json")
+    if not os.path.exists(p):
+        pytest.skip(f"data not on this machine: {key}")
+    return p
+
+
+@pytest.mark.skipif(NODE is None, reason="Node.js not installed")
+@pytest.mark.parametrize("key", ["pf_small_project", "antistokes_map", "twin_axis_map"])
+def test_browser_reader_matches_python_on_lab_files(key):
+    from qcarbon.labspec import read_any
+    p = _vendor_path(key)
+    out = subprocess.run([NODE, os.path.join(HERE, "js", "read_file.mjs"), p], capture_output=True, text=True, check=True)
+    js = json.loads(out.stdout)
+    m, video = read_any(p)
+    assert (js["ny"], js["nx"], js["k"]) == m.cube.shape
+    assert np.allclose(js["wn"], m.wn[[0, -1]]) and np.allclose(js["x"], m.x[[0, -1]]) and np.allclose(js["y"], m.y[[0, -1]])
+    flat = m.cube.reshape(-1)
+    assert js["cube_probe"] == pytest.approx(float(flat[::997].astype(np.float64).sum()), rel=1e-9)
+    if "points" in m.meta:
+        for k, v in js["points"].items():
+            np.testing.assert_allclose(v, m.meta["points"][k][:5], rtol=1e-6)
+        assert (js["video"]["w"], js["video"]["h"]) == (video.x.size, video.y.size)

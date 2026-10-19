@@ -215,7 +215,12 @@
   <section id="tab-particles" class="tab">
     <div class="panel map big" id="map-p"></div>
     <aside class="side">
-      <div class="sec">
+      <div class="sec pf-only">
+        <div class="sec-h">ParticleFinder particles</div>
+        <div class="frow"><label>Plot against</label><select id="pf-x"></select></div>
+        <div class="muted small">One spectrum per particle, placed at the particle's stage position and sized by its diameter. Positions and morphology are read from the project; each spectrum is fitted with the same configuration as a map.</div>
+      </div>
+      <div class="sec seg-only">
         <div class="sec-h">Find particles</div>
         <div class="frow"><label>Segment on</label><select id="pt-src"></select></div>
         <div class="frow"><label>Threshold</label><div class="row2"><input type="range" id="pt-thr" min="0" max="1" step="0.001"><input type="number" id="pt-thr-n" step="any"></div></div>
@@ -223,12 +228,12 @@
         <div class="frow"><label></label><label class="chk" title="Distance-transform watershed: particles that touch are cut at their neck"><input type="checkbox" id="pt-split" checked> Split touching particles</label></div>
       </div>
       <div class="sec">
-        <div class="sec-h">Pixels vs particles</div>
+        <div class="sec-h" id="pt-cards-h">Pixels vs particles</div>
         <div class="cards" id="pt-cards"></div>
-        <div class="muted small">Neighbouring pixels of one particle are not independent samples. Compare samples on particle means (n = particles); the pixel SD describes heterogeneity within the map, not measurement precision.</div>
+        <div class="muted small seg-only">Neighbouring pixels of one particle are not independent samples. Compare samples on particle means (n = particles); the pixel SD describes heterogeneity within the map, not measurement precision.</div>
       </div>
       <div class="sec">
-        <div class="sec-h">Ratio by particle</div>
+        <div class="sec-h" id="pt-strip-h">Ratio by particle</div>
         <div class="plot strip" id="pt-strip"></div>
       </div>
       <div class="sec">
@@ -264,7 +269,7 @@
   </div>
 </div>
 <div id="drop" class="drop hidden"><div>Drop a map, spectrum or result table<br><span>.l6m (+ .l6v white-light image) · .txt · .csv</span></div></div>
-<input type="file" id="file-input" multiple accept=".l6m,.l6v,.txt,.csv,.tsv,.dat" hidden>
+<input type="file" id="file-input" multiple accept=".l6m,.l6v,.l6pf,.txt,.csv,.tsv,.dat" hidden>
 <div id="toasts"></div>
 <script type="module" src="/static/js/app.js"></script>
 </body>
