@@ -268,6 +268,13 @@ footer.credit {
   border: 1px solid var(--line-2); background: none; color: var(--muted);
 }
 .map-chip.on { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 50%, transparent); background: var(--accent-soft); }
+/* narrow cards (four maps across): a smaller title and chips, so the title fits */
+.mapview { container-type: inline-size; }
+@container (max-width: 380px) {
+  .map-head { gap: 4px; padding: 4px 6px; }
+  .map-title { font-size: 12.5px; padding: 2px 3px; }
+  .map-chip { padding: 0 6px; font-size: 10px; }
+}
 .map-readout { flex: 1 1 0; min-width: 0; text-align: right; font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .map-tools {
   position: absolute; top: 4px; right: 4px; z-index: 2; display: flex; gap: 1px; padding: 2px; border-radius: 9px;

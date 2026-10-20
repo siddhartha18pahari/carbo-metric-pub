@@ -9,7 +9,7 @@ import { el, fmt, hidpi, niceTicks, quantile } from "./util.js";
 import { T, font } from "./theme.js";
 
 // margins around the map: axis, colour bar and its labels
-const PAD = { l: 34, b: 26, t: 6, cb: 12, cbPad: 50 };
+const PAD = { l: 34, b: 26, t: 18, cb: 12, cbPad: 50 };        // t: room for the scale bar
 
 // diagonal hatch behind invalid points, in the current theme's colours
 let hatch = null;
@@ -28,7 +28,7 @@ export class MapView {
   constructor(host, opts = {}) {
     this.host = host;
     this.opts = opts;
-    this.cmap = opts.cmap || "LabSpec";
+    this.cmap = opts.cmap || "Viridis";      // even brightness steps; the LabSpec rainbow is in the menu
     this.scale = "robust";
     this.vmin = 0; this.vmax = 1;
     this.manual = [null, null];
@@ -40,6 +40,8 @@ export class MapView {
     this.overlays = [];
     this.emptyText = null;           // shown over the map when it cannot have values
     this.categories = null;          // particles coloured by group: { index, colours, names }
+    this.backdrop = null;            // the camera image under the particles: { img, x: [first, last], y: [first, last], w, h }
+    this.backdropOn = true;
     this.profile = false;            // a particle list drawn as Q-Carbon does: value against particle number
     this.label = ""; this.unit = "";
 
@@ -143,6 +145,9 @@ export class MapView {
 
   // particles coloured by group instead of by value (index -1: in no group)
   setCategories(c) { this.categories = c; this._ptsCache = null; this._dirty = true; this.render(); }
+
+  // the camera image under the particles (null for none)
+  setBackdrop(b) { this.backdrop = b; this._ptsCache = null; this.render(); }
 
   // display smoothing: a filter over valid neighbours and/or interpolated pixels
   smoothed() { return this.filter !== "none" || this.smooth; }
@@ -293,13 +298,36 @@ export class MapView {
     return (this._shp = { pt, a, b, t, c, s });
   }
 
+  // How big to draw the particles when many are in view and each is only a few screen
+  // pixels across, so their colours can still be compared. Sizes are compressed about a
+  // readable size R0 (a sixth of the typical spacing between particles, 2.5 to 4 px): a
+  // particle of the median size is drawn at R0, others at R0 x sqrt(size / median), so
+  // the bigger still look bigger, up to 2 x R0; nothing is drawn smaller than it is. Null
+  // when the median particle is already that big. The scale bar says when this is on.
+  _boostFor(P) {
+    const pt = this.points, sh = this._shapes(), r = [];
+    for (let p = 0; p < pt.x.length; p++)
+      if (pt.x[p] >= this.x0 && pt.x[p] <= this.x1 && pt.y[p] >= this.y0 && pt.y[p] <= this.y1) r.push(Math.sqrt(sh.a[p] * sh.b[p]));
+    if (!r.length) return null;
+    r.sort((u, v) => u - v);
+    const R0 = Math.min(4, Math.max(2.5, Math.sqrt(P.w * P.h / r.length) / 6)), rmed = r[r.length >> 1] * this.k;
+    return rmed > 0 && rmed < R0 ? { R0, rmed } : null;
+  }
+  // the factor on particle p's own size when drawn on screen
+  _grow(p) {
+    const b = this._boost; if (!b || this.profile) return 1;
+    const sh = this._shapes(), rt = Math.sqrt(sh.a[p] * sh.b[p]) * this.k;
+    if (!(rt > 0)) return 1;
+    return Math.max(rt, Math.min(b.R0 * Math.sqrt(rt / b.rmed), 2 * b.R0)) / rt;
+  }
+
   // particles as filled shapes: invalid ones as faint outlines underneath, valid
   // ones in increasing value so the high values sit on top. clip: [x0, y0, x1, y1]
-  // in um, to leave out particles that cannot show
-  _paintPoints(g, k, ox, oy, minR, origin = this, labels = false, clip = null) {
+  // in um, to leave out particles that cannot show; grow: particle -> factor on its size
+  _paintPoints(g, k, ox, oy, minR, origin = this, labels = false, clip = null, grow = null) {
     const { points: pt, valid } = this, v = this.shown(), L = lut(this.cmap), span = this.vmax - this.vmin;
     const X = p => ox + (pt.x[p] - origin.x0) * k, Y = p => oy + (pt.y[p] - origin.y0) * k;
-    const sh = this._shapes(), A = p => Math.max(minR, sh.a[p] * k), B = p => Math.max(minR, sh.b[p] * k);
+    const sh = this._shapes(), f = p => (grow ? grow(p) : 1), A = p => Math.max(minR, sh.a[p] * k * f(p)), B = p => Math.max(minR, sh.b[p] * k * f(p));
     const outline = p => { g.beginPath(); g.ellipse(X(p), Y(p), A(p), B(p), sh.t[p], 0, 2 * Math.PI); };
     const shows = p => !clip || (pt.x[p] + sh.a[p] >= clip[0] && pt.x[p] - sh.a[p] <= clip[2] && pt.y[p] + sh.a[p] >= clip[1] && pt.y[p] - sh.a[p] <= clip[3]);
     const order = [];
@@ -310,26 +338,31 @@ export class MapView {
       if (valid[p] || !shows(p)) continue;
       outline(p); g.stroke();
     }
-    const C = this.categories;
+    const C = this.categories, hex = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16));
     for (const p of order) {
+      let rgb;
       if (C) {
         const c = C.index[p];
         if (c < 0) { g.lineWidth = 1; g.strokeStyle = T.hatchLine; outline(p); g.stroke(); continue; }
-        g.fillStyle = C.colours[c % C.colours.length];
+        g.fillStyle = C.colours[c % C.colours.length]; rgb = hex(g.fillStyle);
       } else {
         if (!Number.isFinite(v[p])) continue;
         const t = Math.max(0, Math.min(255, Math.round((v[p] - this.vmin) / span * 255))) * 3;
-        g.fillStyle = `rgb(${L[t]},${L[t + 1]},${L[t + 2]})`;
+        rgb = [L[t], L[t + 1], L[t + 2]]; g.fillStyle = `rgb(${rgb})`;
       }
       outline(p); g.fill();
-      // a darker rim once the shape is big enough to read, so touching particles stay apart
-      if (B(p) >= 2.5) { g.lineWidth = Math.min(1.5, 0.25 * B(p)); g.strokeStyle = "rgba(0,0,0,.32)"; g.stroke(); }
+      // a rim once the shape is big enough to read, so touching particles stay apart: darker
+      // than the fill, or lighter on the darkest colours (which would vanish on the camera image)
+      if (B(p) >= 2.5) {
+        const dark = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2] < 70;
+        g.lineWidth = Math.min(1.5, 0.25 * B(p)); g.strokeStyle = dark ? "rgba(255,255,255,.6)" : "rgba(0,0,0,.32)"; g.stroke();
+      }
     }
     if (!labels) return;
     // particle numbers once few enough are in view to read them
     const P = this.plot, inView = [];
     for (let p = 0; p < pt.x.length; p++) { const xx = X(p), yy = Y(p); if (xx >= P.x && xx <= P.x + P.w && yy >= P.y && yy <= P.y + P.h) inView.push(p); }
-    if (inView.length > 160) return;
+    if (inView.length > Math.min(160, P.w * P.h / 900)) return;      // about one number per 30 x 30 px
     g.font = font(11, "bold"); g.textAlign = "left"; g.textBaseline = "middle";
     g.lineWidth = 3; g.strokeStyle = T.paper; g.fillStyle = T.strong;
     for (const p of inView) {
@@ -385,22 +418,33 @@ export class MapView {
     const { l: padL, b: padB, t: padT, cb: cbW, cbPad } = PAD;
     const aw = W - padL - cbW - cbPad - 8, ah = H - padB - padT;
     const wu = this.x1 - this.x0, hu = this.y1 - this.y0;
-    this.k = Math.max(0.1, Math.min(aw / wu, ah / hu));
+    this.k = Math.max(1e-6, Math.min(aw / wu, ah / hu));        // a large field in a small card needs well under 0.1 px/um
     const pw = wu * this.k, ph = hu * this.k;
     this.plot = { x: padL + (aw - pw) / 2, y: padT + (ah - ph) / 2, w: pw, h: ph };
     const P = this.plot;
 
     ctx.save(); ctx.beginPath(); ctx.rect(P.x, P.y, P.w, P.h); ctx.clip();
     if (this.points) {
-      // particles drawn at screen resolution, cached until the data, size or view changes
+      // particles drawn at screen resolution over the camera image (greyscale, so it
+      // cannot be read as part of the colour scale), cached until the data, size or view changes
       ctx.fillStyle = T.hatchBg; ctx.fillRect(P.x, P.y, P.w, P.h);
       if (this.values) {
         if (this._dirty) { this._paintImage(); this._dirty = false; this._ptsCache = null; }
-        const dpr = this.canvas.width / W, key = `${W}x${H}:${this.x0}:${this.x1}:${this.y0}:${this.y1}`;
+        const B = this.backdropOn && this.backdrop;
+        const dpr = this.canvas.width / W, key = `${W}x${H}:${this.x0}:${this.x1}:${this.y0}:${this.y1}:${!!B}:${T.paper}`;
         if (!this._ptsCache || this._ptsCache.key !== key) {
           const c = document.createElement("canvas"); c.width = this.canvas.width; c.height = this.canvas.height;
           const g = c.getContext("2d"); g.scale(dpr, dpr);
-          this._paintPoints(g, this.k, P.x, P.y, 2.2, this, true);
+          if (B) {
+            const dxv = (B.x[1] - B.x[0]) / (B.w - 1), dyv = (B.y[1] - B.y[0]) / (B.h - 1);
+            g.save(); g.beginPath(); g.rect(P.x, P.y, P.w, P.h); g.clip();
+            g.globalAlpha = 0.3; g.filter = "grayscale(1)"; g.imageSmoothingEnabled = true;
+            g.translate(this.sx(B.x[0] - dxv / 2), this.sy(B.y[0] - dyv / 2)); g.scale(dxv * this.k, dyv * this.k);
+            g.drawImage(B.img, 0, 0);
+            g.restore();
+          }
+          this._boost = this._boostFor(P);
+          this._paintPoints(g, this.k, P.x, P.y, 2.2, this, true, null, q => this._grow(q));
           this._ptsCache = { key, c };
         }
         ctx.drawImage(this._ptsCache.c, 0, 0, W, H);
@@ -451,15 +495,19 @@ export class MapView {
     ctx.textAlign = "center"; ctx.fillText("X (µm)", P.x + P.w / 2, H - 6);
     ctx.translate(9, P.y + P.h / 2); ctx.rotate(-Math.PI / 2); ctx.fillText("Y (µm)", 0, 0); ctx.restore();
 
-    // scale bar (as on the instrument: cyan, bottom right)
-    const target = wu * 0.22, mag = 10 ** Math.floor(Math.log10(target));
-    const len = [1, 2, 5, 10].map(m => m * mag).filter(v => v <= target).pop() || mag;
-    const bx = P.x + P.w - 10 - len * this.k, by = P.y + P.h - 12;
-    if (P.w > 120) {
-      ctx.fillStyle = "rgba(0,0,0,.35)"; ctx.fillRect(bx - 5, by - 15, len * this.k + 10, 22);
-      ctx.fillStyle = "#3fe0ff"; ctx.fillRect(bx, by, len * this.k, 4);
-      ctx.font = font(12, "bold"); ctx.textAlign = "center"; ctx.textBaseline = "bottom";
-      ctx.fillText(`${len} µm`, bx + len * this.k / 2, by - 2);
+    // scale bar above the plot, at the right, so it never covers the data; with how much the
+    // particles are enlarged when they are drawn bigger than they are
+    const target = wu * 0.22, decade = 10 ** Math.floor(Math.log10(target));
+    const len = [1, 2, 5, 10].map(m => m * decade).filter(v => v <= target).pop() || decade;
+    if (P.w > 90) {
+      const bw = len * this.k, bx = P.x + P.w - bw, by = P.y - 10;
+      ctx.fillStyle = T.accent; ctx.fillRect(bx, by, bw, 3);
+      ctx.fillRect(bx, by - 2, 1, 7); ctx.fillRect(bx + bw - 1, by - 2, 1, 7);
+      ctx.fillStyle = T.ink; ctx.font = font(11); ctx.textAlign = "right"; ctx.textBaseline = "middle";
+      // the longest note that fits in the margin to the left of the bar
+      const notes = this.points && this._boost ? [" · small particles drawn larger", " · enlarged", ""] : [""];
+      const text = notes.map(n => `${fmt(len, 3)} µm${n}`).find(t => ctx.measureText(t).width <= bx - 10) || `${fmt(len, 3)} µm`;
+      ctx.fillText(text, bx - 6, by + 1.5);
     }
 
     // colour bar, or the legend of the groups
@@ -472,7 +520,11 @@ export class MapView {
       ctx.fillStyle = grad; ctx.fillRect(cx, cy, cbW, ch);
       ctx.strokeStyle = T.frame; ctx.strokeRect(cx - .5, cy - .5, cbW + 1, ch + 1);
       ctx.fillStyle = T.ink; ctx.font = font(11); ctx.textAlign = "left"; ctx.textBaseline = "middle";
-      for (const t of niceTicks(this.vmin, this.vmax, Math.max(2, Math.floor(ch / 40)))) {
+      // at least three labels however short the bar (one alone cannot show the scale)
+      const n = Math.max(4, Math.floor(ch / 28));
+      let ticks = niceTicks(this.vmin, this.vmax, n);
+      if (ticks.length < 3) ticks = niceTicks(this.vmin, this.vmax, n + 3);
+      for (const t of ticks) {
         const Y = cy + ch - (t - this.vmin) / (this.vmax - this.vmin) * ch;
         ctx.fillRect(cx + cbW, Y, 3, 1); ctx.fillText(fmt(t, 3), cx + cbW + 5, Y);
       }
@@ -511,14 +563,17 @@ export class MapView {
       ctx.save();
       ctx.beginPath(); ctx.rect(P.x, P.y, P.w, P.h); ctx.clip();
       ctx.strokeStyle = colour; ctx.lineWidth = 1;
-      if (cross) {
+      if (cross) {                                   // light and dashed, so the data shows through
+        ctx.save(); ctx.globalAlpha = 0.5; ctx.setLineDash([4, 4]);
         ctx.beginPath(); ctx.moveTo(P.x, Y + .5); ctx.lineTo(P.x + P.w, Y + .5);
         ctx.moveTo(X + .5, P.y); ctx.lineTo(X + .5, P.y + P.h); ctx.stroke();
+        ctx.restore();
       }
       ctx.lineWidth = 1.5; ctx.beginPath();
       if (this.points) {                             // a ring just outside the particle's own shape
         const sh = this._shapes();
-        ctx.ellipse(X, Y, Math.max(5, this.k * sh.a[p] + 3), Math.max(5, this.k * sh.b[p] + 3), sh.t[p], 0, 2 * Math.PI);
+        const f = this.k * this._grow(p);
+        ctx.ellipse(X, Y, Math.max(5, f * sh.a[p] + 3), Math.max(5, f * sh.b[p] + 3), sh.t[p], 0, 2 * Math.PI);
       } else ctx.arc(X, Y, Math.max(3, this.k * this.dx * 0.6), 0, 7);
       ctx.stroke();
       ctx.restore();
@@ -550,7 +605,7 @@ export class MapView {
       for (let p = 0; p < pt.x.length; p++) {
         const ex = xu - pt.x[p], ey = yu - pt.y[p], d = ex * ex + ey * ey;
         if (d < bd) { bd = d; best = p; }
-        const u = (ex * sh.c[p] + ey * sh.s[p]) / sh.a[p], w = (ey * sh.c[p] - ex * sh.s[p]) / sh.b[p];
+        const g = this._grow(p), u = (ex * sh.c[p] + ey * sh.s[p]) / (sh.a[p] * g), w = (ey * sh.c[p] - ex * sh.s[p]) / (sh.b[p] * g);
         if (u * u + w * w <= 1 && sh.a[p] * sh.b[p] < ha) { ha = sh.a[p] * sh.b[p]; hit = p; }
       }
       if (hit >= 0) return hit;
@@ -611,6 +666,12 @@ export class MapView {
       el("div", { class: "pop-h" }, "Scale"), mode, el("div", { class: "row2" }, lo, hi),
       el("div", { class: "pop-h" }, "Filter ", el("span", { class: "muted" }, "(display only, stats use raw pixels)")), filter,
       el("label", { class: "chk" }, smooth, " Interpolate pixels ", el("span", { class: "muted" }, "(display only)")));
+    if (this.points && this.backdrop) {
+      const under = el("input", { type: "checkbox", checked: this.backdropOn, onchange: () => {
+        this.backdropOn = under.checked; this._ptsCache = null; this.render(); this.opts.onBackdrop && this.opts.onBackdrop(under.checked);
+      } });
+      pop.append(el("label", { class: "chk" }, under, " Camera image underneath ", el("span", { class: "muted" }, "(greyscale)")));
+    }
     document.body.append(pop);
     const r = e.currentTarget.getBoundingClientRect();
     pop.style.left = Math.min(window.innerWidth - 250, r.left - 200) + "px";

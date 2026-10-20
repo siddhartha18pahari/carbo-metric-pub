@@ -109,6 +109,7 @@ const maps = [0, 1, 2, 3].map(i => new MapView($(`#map-${i}`), {
   onView: (v, src) => { for (const m of maps) if (m !== src) m.setView(v ? { ...v } : null); renderVideo(); },
   onSmoothChange: rememberSmoothing,
   onProfile: on => { for (const m of maps) m.setProfile(on); },      // all four maps, as Q-Carbon shows them
+  onBackdrop: on => { for (const m of [...maps, pmap]) { m.backdropOn = on; m._ptsCache = null; m.render(); } },
 }));
 maps.forEach((mv, i) => mv.host.addEventListener("mousedown", () => setActive(i)));
 
@@ -722,7 +723,9 @@ async function loadDataset(info) {
     const ok = await new Promise(res => { img.onload = () => res(true); img.onerror = () => res(false); img.src = videoSrc(info.id); });
     if (ok) S.video = img;
   }
-  for (const m of [...maps, pmap]) { m.setGeometry({ nx: S.nx, ny: S.ny, x: S.x, y: S.y, points: S.points }); m.values = null; }
+  // particles are drawn over their camera image (a grid map covers its own)
+  const back = S.points && S.video && info.video ? { img: S.video, ...info.video } : null;
+  for (const m of [...maps, pmap]) { m.setGeometry({ nx: S.nx, ny: S.ny, x: S.x, y: S.y, points: S.points }); m.values = null; m.backdrop = back; }
   fitMapRow();
   S.vidFull = false;
   setActive(S.active);
@@ -844,7 +847,7 @@ async function loadResults(grid) {
     const img = new Image();
     if (await new Promise(res => { img.onload = () => res(true); img.onerror = () => res(false); img.src = r.video.url; })) S.video = img;
   }
-  for (const m of [...maps, pmap]) { m.setGeometry({ nx: S.nx, ny: S.ny, x: S.x, y: S.y }); m.values = null; }
+  for (const m of [...maps, pmap]) { m.setGeometry({ nx: S.nx, ny: S.ny, x: S.x, y: S.y }); m.values = null; m.backdrop = null; }
   fitMapRow();
   // no spectra in the file: the graphs show the bands its fitted values describe
   S.wn = Float32Array.from({ length: 321 }, (_, c) => S.cfg.range_lo + (S.cfg.range_hi - S.cfg.range_lo) * c / 320);
