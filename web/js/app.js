@@ -8,10 +8,10 @@ import { $, $$, el, api, apiUpload, videoSrc, setLocalBackend, isBrowserOnly, f3
 import { MapView } from "./mapview.js";
 import { SpectrumPlot, HistogramPlot, DensityPlot, PEAK_COLOURS } from "./plots.js";
 import { SplatView, sliceField } from "./splat3d.js";
-import { segment, outlineOverlay, PARTICLE_COLOURS } from "./particles.js";
+import { segment, outlineOverlay, distance, PARTICLE_COLOURS } from "./particles.js";
 import { buildReport } from "./report.js";
 import { wilson, weightedQuantile, laCancado, robustScale, bestGmm, bootstrapShares, median, quantileSorted,
-         heightCovariances, ratioVariance, heterogeneity, moranI, spearmanCI } from "./pf-analysis.js";
+         heightCovariances, ratioVariance, heterogeneity, moranI, spearmanCI, coverage, pairRatio } from "./pf-analysis.js";
 import { T, font, setTheme, currentTheme } from "./theme.js";
 
 const QUANT = { intensity: "Intensity", width: "Width", area: "Area", position: "Position" };
@@ -1568,6 +1568,7 @@ function renderParticles() {
     el("td", {}, fmt(p.n)), el("td", {}, fmt(p.area, 3)), el("td", {}, fmt(p.st.median)), el("td", { class: "sub" }, `${fmt(p.st.q1, 3)}–${fmt(p.st.q3, 3)}`),
     el("td", {}, fmt(p.gw, 3)), el("td", { class: "sub" }, `${fmt(p.cx, 3)}, ${fmt(p.cy, 3)}`)));
   drawStrip();
+  renderSegCoating(card);
 }
 
 function drawStrip() {
@@ -1595,6 +1596,188 @@ function drawStrip() {
     ctx.fillStyle = col; ctx.textAlign = "center"; ctx.fillText(p.id, cx, H - 8);
   });
 }
+
+// =========================================================================
+// Coating uniformity on a map: inside each particle, and between particles
+// =========================================================================
+// Each pixel inside a particle whose G is quantified carries its coating index
+// (the coating band over G) with that value's standard error from its own fit.
+// coverage() tests each particle's pixels for one common value, pools that
+// within-particle spread, and compares the particle means between particles.
+// Each pixel is then placed against its own particle's mean and noise band.
+const SEG_KD = 3, SEG_KQ = 10;
+
+function segCoating() {
+  const f = S.fit, c = S.cfg, seg = S.seg, fc = f.config || c;
+  const sel = $("#seg-coat-band"), others = f.names.filter(b => b.toLowerCase() !== "g");
+  if ([...sel.options].map(o => o.value).join() !== others.join()) {
+    const keep = sel.value;
+    sel.replaceChildren(...others.map(b => el("option", { value: b }, `${b}/G`)));
+    sel.value = others.includes(keep) ? keep : (others.find(b => b.toLowerCase() === "d3") || others[0] || "");
+  }
+  const band = sel.value;
+  if (f.resultsOnly) return { why: "This file holds fitted values without spectra, so no pixel has a standard error. Open the map itself (.l6m) to judge the coating." };
+  if (fc.smooth_window || fc.spatial_kernel) return { why: "The spectra were smoothed before the fit, so a pixel's residual no longer measures its noise (and spatial smoothing makes neighbours share it). Switch the smoothing off in the Carbon fit tab to judge the coating." };
+  const m = f.m, jG = f.names.findIndex(b => b.toLowerCase() === "g"), jC = f.names.indexOf(band);
+  if (jG < 0 || jC < 0) return { why: "Choose a coating band; the fit needs a G band." };
+  const rim = Math.max(0, +$("#seg-rim").value || 0), rimRef = rim || 1;
+  const key = [S.ds.id, f.seconds, f.names.join(), stableJSON(VIEW_KEYS.map(k => c[k])), band, rim].join("|");
+  if (S.segCoat && S.segCoat.key === key && S.segCoat.seg === seg) return S.segCoat;
+  // the pixels used: G at least SEG_KQ x the residual noise, inside its bounds, passing the constraints
+  const gp = fc.peaks.find(q => q.name === f.names[jG]), near = (v, b, span) => Math.abs(v - b) < 1e-3 * span;
+  const onBound = p => {
+    if (!gp) return false;
+    const x = f.position[p * m + jG], w = f.width[p * m + jG], sx = gp.pos_max - gp.pos_min, sw = gp.width_max - gp.width_min;
+    return near(x, gp.pos_min, sx) || near(x, gp.pos_max, sx) || near(w, gp.width_min, sw) || near(w, gp.width_max, sw);
+  };
+  const quant = seg.parts.map(pt => pt.pixels.filter(p => f.std_error[p] > 0 && f.intensity[p * m + jG] >= SEG_KQ * f.std_error[p] && !onBound(p) && (!S.valid || S.valid[p])));
+  // and not on the rim, where the laser spot lies partly off the particle: depth is the
+  // distance from the pixel's centre to the particle's edge
+  const step = Math.min(S.nx > 1 ? Math.abs(S.x[1] - S.x[0]) : Infinity, S.ny > 1 ? Math.abs(S.y[1] - S.y[0]) : Infinity);
+  if (!S.segDepth || S.segDepth.seg !== seg) S.segDepth = { seg, d: distance(Uint8Array.from(seg.labels, l => (l ? 1 : 0)), S.nx, S.ny) };
+  const depth = p => (S.segDepth.d[p] - 0.5) * step;
+  const groups = quant.map(g => g.filter(p => depth(p) >= rim)), rimPx = quant.map(g => g.filter(p => depth(p) < rimRef));
+  const used = groups.flat();
+  // band-height errors, once per fit and pixel (a new threshold only adds pixels)
+  const ckey = `${S.ds.id}|${f.seconds}|${f.names.join()}`;
+  if (!S.segCov || S.segCov.key !== ckey) S.segCov = { key: ckey, cov: new Float64Array(P() * m * m).fill(NaN), done: new Uint8Array(P()) };
+  const fill = () => { const todo = used.filter(p => !S.segCov.done[p]); heightCovariances(f, fc, S.wn, todo, S.segCov.cov); for (const p of todo) S.segCov.done[p] = 1; };
+  const nTodo = used.filter(p => !S.segCov.done[p]).length;
+  if (nTodo > 1500) {
+    // about half a millisecond a pixel: draw the rest of the tab first
+    setTimeout(() => { if (S.segCov && S.segCov.key === ckey) fill(); if (S.seg === seg) renderParticles(); }, 30);
+    return { why: `Working out the band-height errors of ${fmt(nTodo)} pixels…` };
+  }
+  if (nTodo) fill();
+  const cov = S.segCov.cov, n = P();
+  const y = new Float64Array(n).fill(NaN), se = new Float64Array(n).fill(NaN), z = new Float64Array(n).fill(NaN);
+  for (const p of used) {
+    const o = p * m * m, a = f.intensity[p * m + jC], g = f.intensity[p * m + jG];
+    y[p] = a / g; se[p] = Math.sqrt(Math.max(0, ratioVariance(cov, o, m, jC, jG, a, g))); z[p] = a / Math.sqrt(cov[o + jC * m + jC]);
+  }
+  const C = coverage(y, se, groups);
+  if (!C) return (S.segCoat = { key, seg, band, why: `No particle has 3 or more pixels with a quantified G${rim ? ` deeper than ${fmt(rim, 3)} µm inside it` : ""}.` });
+  // the rim against the rest: the coating index over each particle's mean, G over its median
+  let rs = 0, gs = 0, rn = 0;
+  rimPx.forEach((g, k) => {
+    const h = C.parts[k]; if (!h || !g.length) return;
+    const gm = median(groups[k].map(p => f.intensity[p * m + jG]));
+    for (const p of g) { const G = f.intensity[p * m + jG]; rs += f.intensity[p * m + jC] / G / h.mu; gs += G / gm; rn++; }
+  });
+  // each pixel against its own particle's mean: 0 below, 1 within, 2 above the 95 % noise band, 3 on the rim (left out)
+  const cat = new Int16Array(n).fill(-1), lab = new Int32Array(n), cnt = [0, 0, 0];
+  if (rim) for (const pt of seg.parts) for (const p of pt.pixels) if (depth(p) < rim) cat[p] = 3;
+  const rows = seg.parts.map((pt, k) => {
+    const h = C.parts[k], g = groups[k];
+    const r = { id: pt.id, total: pt.pixels.length, used: g.length, h, det: g.filter(p => z[p] >= SEG_KD).length };
+    if (!h) return r;
+    for (const p of g) {
+      if (!(se[p] > 0)) continue;
+      const d = (y[p] - h.mu) / se[p], k2 = d > 1.959964 ? 2 : d < -1.959964 ? 0 : 1;
+      cat[p] = k2; cnt[k2]++; lab[p] = pt.id;
+    }
+    return r;
+  });
+  // pixel pairs against their errors: the nearest, about 1 µm and about 3 µm apart
+  const lags = [...new Set([1, Math.round(1 / step), Math.round(3 / step)])].filter(L => L >= 1 && L < Math.max(S.nx, S.ny));
+  const pairs = lags.map(L => ({ L, um: L * step, ...pairRatio(y, se, lab, S.nx, S.ny, L) })).filter(q => q.n >= 30);
+  const nUsed = cnt[0] + cnt[1] + cnt[2], nDet = rows.reduce((s, r) => s + (r.h ? r.det : 0), 0);
+  const nQuant = quant.reduce((s, g) => s + g.length, 0);
+  return (S.segCoat = { key, seg, band, C, rows, cat, below: cnt[0], within: cnt[1], above: cnt[2], n: nUsed, nDet, step, pairs, rim,
+                        rimCmp: rn ? { ratio: rs / rn, g: gs / rn, n: rn, width: rimRef } : null, rimLeft: nQuant - used.length,
+                        left: seg.parts.reduce((s, pt) => s + pt.pixels.length, 0) - nQuant, small: rows.filter(r => !r.h).length });
+}
+
+function renderSegCoating(card) {
+  const A = segCoating(), box = $("#seg-verdict"), t = $("#seg-coat-table");
+  const byCoat = $("#seg-colour").value === "coat" && A && A.C;
+  if (byCoat) {
+    pmap.setCategories({ index: A.cat, colours: [...COAT_COLOURS(), T.label], names: ["below", "within", "above", ...(A.rim ? ["rim, left out"] : [])] });
+    pmap.setTitle(`Coating <u>${escHTML(A.band)}/G</u> against each particle's mean`);
+  }
+  if (!A || !A.C) {
+    box.className = "verdict"; box.textContent = ""; t.textContent = "";
+    $("#seg-coat-cards").replaceChildren();
+    $("#seg-coat-note").textContent = A ? A.why : "";
+    return;
+  }
+  const { C, band: b } = A, W = C.within, B = C.between, mu = C.mu, cvs = h => `${pct(h.tauLo / mu)}–${pct(h.tauHi / mu)}`;
+  // a standard error to the decimals of the 3-digit mean it belongs to
+  const pm = (v, s) => `± ${s.toFixed(Math.max(0, 2 - Math.floor(Math.log10(Math.abs(v) || 1))))}`;
+  const grade = h => (h.p >= 0.05 ? 0 : h.I2 < 0.25 ? 1 : h.I2 < 0.75 ? 2 : 3);
+  // particle means rest on hundreds of pixels, so any real difference between them gives an I²
+  // near 1: they are judged against the spread inside a particle instead
+  const gw = grade(W), gb = !B || B.p >= 0.05 ? 0 : B.tau < W.tau ? 1 : 2;
+  const head = ["Even within particles", "Nearly even within particles", "Moderately patchy within particles", "Strongly patchy within particles"][gw] + "; " +
+    (B ? ["the same on every particle", "particles differ less than places within one", "particles differ more than places within one"][gb] : "too few particles to compare them");
+  // the pixels scatter less than their errors predict (Q below its lower 2.5 % point): the
+  // interval collapses to 0, and only the plain scatter still limits a real spread
+  const low = h => h.p > 0.975;
+  const body = W.p >= 0.05
+    ? `Inside the particles, ${b}/G scatters from pixel to pixel only as much as each pixel's measurement error allows. ` + (low(W)
+      ? `It scatters even less (Q/df ${fmt(W.Q / W.df, 2)}): the errors are on the large side, since misfit of the band model counts as noise, so real patchiness could hide in them. The plain scatter limits it to a CV of at most ${pct(W.sd / mu)}.`
+      : `Any real patchiness is below a CV of ${pct(W.tauHi / mu)} (upper 95 % limit).`)
+    : `${pct(W.I2)} of the pixel-to-pixel spread of ${b}/G inside the particles is real (I², p ${pFmt(W.p)}); the rest is measurement noise. Within a particle the coating index varies with a CV of ${pct(W.tau / mu)} (95 % CI ${cvs(W)}) around ${fmt(mu, 3)}.`;
+  const more = [];
+  more.push(!B ? `Only ${C.particles} particle${C.particles === 1 ? "" : "s"} could be analysed: comparing particles needs at least 3.`
+    : B.p >= 0.05 ? `Between particles, the means differ only as their errors allow (any real difference below a CV of ${pct(B.tauHi / mu)}).`
+    : `Between particles, the means differ with a CV of ${pct(B.tau / mu)} (95 % CI ${cvs(B)}; I² ${pct(B.I2)}, p ${pFmt(B.p)}).`);
+  if (B && Number.isFinite(C.shareWithin)) more.push(`Of the real variation, ${pct(C.shareWithin)} lies within particles and ${pct(1 - C.shareWithin)} between them.`);
+  const RC = A.rimCmp;
+  if (RC) more.push(A.rim
+    ? `In the outer ${fmt(A.rim, 3)} µm of the particles, ${b}/G is ${RC.ratio.toFixed(2)} × the value further in and G falls to ${RC.g.toFixed(2)} ×: the laser spot lies partly off the particle there, so these ${fmt(A.rimLeft)} pixels are left out (set the rim to 0 to include them).`
+    : `Within 1 µm of the edges, ${b}/G is ${RC.ratio.toFixed(2)} × the particle's mean and G falls to ${RC.g.toFixed(2)} ×. These pixels are included, but the laser spot lies partly off the particle there, so that part of the spread may not be the coating.`);
+  more.push(`${b} is detected (height ≥ ${SEG_KD} standard errors) in ${pct(A.nDet / A.n)} of the pixels used.` + (A.nDet / A.n < 0.2 ? " That is few: these numbers rest mostly on noise, and a longer acquisition per pixel would tell more." : ""));
+  const nPatchy = A.rows.filter(r => r.h && r.h.p < 0.05).length;
+  if (C.particles > 1) more.push(`${nPatchy} of ${C.particles} particles are patchy on their own (p < 0.05 each; ${fmt(0.05 * C.particles, 2)} would be by chance).`);
+  // real patches differ more the further apart two pixels are; errors that are too small add the same excess at every distance
+  const [p1, ...far] = A.pairs, pFar = far[far.length - 1];
+  if (p1 && pFar && W.p < 0.05) {
+    if (pFar.ratio > p1.ratio + 0.2) more.push(`The excess is organised in space: pixels ${fmt(p1.um, 2)} µm apart differ ${p1.ratio.toFixed(2)} × what their errors allow, pixels ${fmt(pFar.um, 2)} µm apart ${pFar.ratio.toFixed(2)} ×. These are patches of the coating index on the micrometre scale, not pixel noise.`);
+    else if (p1.ratio > 1.3) more.push(`Neighbouring pixels differ by ${p1.ratio.toFixed(2)} × what their errors allow, and pixels ${fmt(pFar.um, 2)} µm apart hardly more (${pFar.ratio.toFixed(2)} ×), as noise would. The errors look too small, so the within-particle numbers overstate the patchiness.`);
+  }
+  box.className = `verdict ${["good", "good", "warn", "bad"][Math.max(gw, gb === 2 ? 2 : 0)]}`;
+  box.replaceChildren(el("b", {}, head), el("div", {}, body), ...more.map(s => el("p", {}, s)));
+
+  $("#seg-coat-cards").replaceChildren(
+    card(`Mean ${b}/G`, fmt(mu, 3), `${B ? `${pm(mu, B.seMu)} · ` : ""}${C.particles} particle${C.particles === 1 ? "" : "s"} · ${fmt(W.n)} pixels`),
+    card("Within-particle CV", pct(W.tau / mu), low(W) ? `at most ${pct(W.sd / mu)} (plain scatter) · errors on the large side` : `95 % CI ${cvs(W)} · noise taken out`),
+    card("Real share of the spread inside", pct(W.I2), `I² · p ${pFmt(W.p)}`),
+    card("Between-particle CV", B ? pct(B.tau / mu) : "–", B ? `95 % CI ${cvs(B)} · I² ${pct(B.I2)}` : "needs 3 particles"),
+    card("Real variation within particles", B ? pct(C.shareWithin) : "–", B ? "the rest between particles" : ""),
+    card(`${b} detected`, pct(A.nDet / A.n), `${fmt(A.nDet)} of ${fmt(A.n)} pixels · height ≥ ${SEG_KD} SE`),
+    card("Outside the noise band", `${pct(A.above / A.n)} above · ${pct(A.below / A.n)} below`, "each particle's mean · 2.5 % each if even"),
+    card("Patchy particles", `${nPatchy} of ${C.particles}`, `p < 0.05 each · ${fmt(0.05 * C.particles, 2)} by chance`),
+    card("Pixel pairs vs their errors", p1 ? `${p1.ratio.toFixed(2)} × at ${fmt(p1.um, 2)} µm` : "–",
+      far.length ? far.map(q => `${q.ratio.toFixed(2)} × at ${fmt(q.um, 2)} µm`).join(" · ") + " · 1 if no real change" : "1 if the errors are right"),
+    card("Rim vs the rest", RC ? `${RC.ratio.toFixed(2)} × ${b}/G` : "–", RC ? `outer ${fmt(RC.width, 3)} µm · G ${RC.g.toFixed(2)} × · ${A.rim ? "left out" : "included"}` : "no rim pixels"));
+
+  t.textContent = "";
+  t.append(el("tr", {}, ...["#", "Pixels", `${b}/G`, "CV inside", "I²", `${b} detected`].map(h => el("th", {}, h))));
+  for (const r of A.rows) t.append(el("tr", {},
+    el("td", {}, el("b", { style: `color:${PARTICLE_COLOURS[(r.id - 1) % PARTICLE_COLOURS.length]}` }, `● ${r.id}`)),
+    el("td", {}, fmt(r.used), el("div", { class: "sub" }, `of ${fmt(r.total)}`)),
+    ...(r.h ? [el("td", {}, fmt(r.h.mu, 3), el("div", { class: "sub" }, pm(r.h.mu, r.h.seMu))),
+               el("td", {}, pct(r.h.tau / r.h.mu), el("div", { class: "sub" }, low(r.h) ? `≤ ${pct(r.h.sd / r.h.mu)}` : `${pct(r.h.tauLo / r.h.mu)}–${pct(r.h.tauHi / r.h.mu)}`)),
+               el("td", {}, pct(r.h.I2), el("div", { class: "sub" }, `p ${pFmt(r.h.p)}`)), el("td", {}, pct(r.det / r.used))]
+             : [el("td", { colspan: 4, class: "sub" }, "fewer than 3 pixels with a quantified G")])));
+
+  const spot = A.step < 1 ? `The step here is ${fmt(A.step, 2)} µm and a 532 nm laser spot is about 1 µm across, so one spot covers about ${fmt(Math.PI * (0.5 / A.step) ** 2, 2)} pixels and neighbouring spectra share most of what they probe. ` : `The step here (${fmt(A.step, 2)} µm) is at least the size of a 532 nm laser spot (about 1 µm), so neighbouring spectra hardly overlap. `;
+  $("#seg-coat-note").textContent =
+    `How: every pixel inside a particle whose G is at least ${SEG_KQ} × its noise (inside its fit bounds and the Constraints) carries ${b}/G, with its standard error from that pixel's own fit (the delta method on the fitted heights). ` +
+    `Inside each particle, Cochran's Q tests whether the pixels share one value; I² is the share of the spread beyond the errors, and the CV is the SD of the true values (Paule-Mandel, with its Q-profile 95 % interval) over the mean, pooled over the particles in the cards and per particle in the table. ` +
+    `Each particle's mean, with the error its pixels give, is then compared between particles in the same way. The map colours each pixel against its own particle's mean: within, above or below the band its error allows (95 %). ` +
+    `Pixel pairs: the mean squared difference of two pixels of one particle over what their errors predict; 1 when the errors are right and nothing changes over that distance. Below 1 means neighbours share part of their error (misfit of the band model), and a rise with distance means real patches. ` +
+    `Where the pixels scatter less than their errors predict, the interval collapses to 0 and the plain scatter (noise and real spread together) is quoted as the upper limit (≤ in the table). ` +
+    `Rim: pixels closer than the rim width to a particle's edge are left out. The laser spot lies partly off the particle there and G falls; ${b}/G rises at the edges of an uncoated reference map as well, so the rim says little about the coating. ` +
+    (A.left ? `${fmt(A.left)} more pixels inside the particles were left out (G too weak or on a bound, or outside the Constraints)${A.small ? `, and ${A.small} particle${A.small > 1 ? "s" : ""} had too few pixels` : ""}. ` : "") +
+    `Limits: neighbouring pixels are not independent samples. ${spot}` +
+    `Each spectrum still carries its own noise, so the test of one common value holds. But patches smaller than the spot are averaged away, so the CV describes the coating on the scale of the spot; and the intervals and the particle means' errors count the pixels as more independent than they are, so they are too narrow and the between-particle part is somewhat overstated. ` +
+    `${b}/G rises with the amount of amorphous carbon in the probed volume but not in proportion to its thickness, so compare maps measured the same way.`;
+}
+$("#seg-coat-band").onchange = () => { if (S.seg) renderParticles(); };
+$("#seg-colour").onchange = () => { if (S.seg) renderParticles(); };
+$("#seg-rim").onchange = () => { if (S.seg) renderParticles(); };
 
 // =========================================================================
 // ParticleFinder: one spectrum per particle, with the instrument's morphology

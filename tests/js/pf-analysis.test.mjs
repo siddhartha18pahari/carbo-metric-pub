@@ -181,3 +181,119 @@ test("Spearman interval narrows with n and stays inside -1..1", () => {
   const [a, b] = spearmanCI(0.3, 1000), [c, d] = spearmanCI(0.3, 50);
   assert.ok(a > 0.24 && b < 0.36 && c < a && d > b && c > -1 && d < 1);
 });
+
+import { coverage } from "../../web/js/pf-analysis.js";
+
+// a map's particles as index groups: n pixels each, true value mu + between offset + within deviation, seen with noise se
+function particlesOf({ k, n, mu = 0.05, sdB = 0, sdW = 0, seed = 13 }) {
+  const R = rng(seed), g = () => Math.sqrt(-2 * Math.log(R() + 1e-12)) * Math.cos(2 * Math.PI * R());
+  const y = [], se = [], groups = [], b = [], w = [];
+  for (let i = 0; i < k; i++) {
+    const off = sdB * g(), idx = [];
+    b.push(off);
+    for (let j = 0; j < n; j++) { const s = 0.004 + 0.006 * R(), dev = sdW * g(); w.push([i, dev]); idx.push(y.length); se.push(s); y.push(mu + off + dev + s * g()); }
+    groups.push(idx);
+  }
+  // the spreads actually drawn: between, and pooled within (about each particle's own mean)
+  const mw = Array.from({ length: k }, (_, i) => w.filter(v => v[0] === i).reduce((s, v) => s + v[1], 0) / n);
+  const realW = Math.sqrt(w.reduce((s, [i, d]) => s + (d - mw[i]) ** 2, 0) / (k * (n - 1)));
+  return { y, se, groups, realB: sd(b), realW };
+}
+
+test("coverage: an even coating on every particle shows no spread within or between", () => {
+  const { y, se, groups } = particlesOf({ k: 20, n: 120 });
+  const c = coverage(y, se, groups);
+  assert.equal(c.particles, 20);
+  assert.ok(c.within.p > 0.01 && c.within.I2 < 0.1 && c.within.tauLo === 0, JSON.stringify(c.within));
+  assert.ok(c.between.p > 0.01 && c.between.tauLo === 0, JSON.stringify(c.between));
+  near(c.mu, 0.05, 0.001);
+  // each particle tested on its own: about 5 % flagged by chance
+  assert.ok(c.parts.filter(h => h.p < 0.05).length <= 4);
+  // errors 30 % too large: the pixels scatter less than they predict, the interval
+  // collapses to 0, and only the plain scatter still bounds a real spread
+  const big = coverage(y, se.map(s => 1.3 * s), groups);
+  assert.ok(big.within.p > 0.975 && big.within.tauHi === 0, JSON.stringify(big.within));
+  near(big.within.sd, c.within.noise, 0.1 * c.within.noise);
+});
+
+test("coverage: known spreads within and between particles are recovered and split", () => {
+  const { y, se, groups, realB, realW } = particlesOf({ k: 40, n: 150, sdB: 0.006, sdW: 0.01 });
+  const c = coverage(y, se, groups);
+  assert.ok(c.within.p < 1e-6 && c.within.tauLo < realW && c.within.tauHi > realW, `within ${JSON.stringify(c.within)} vs ${realW}`);
+  near(c.within.tau, realW, 0.1 * realW);
+  assert.ok(c.between.p < 1e-6 && c.between.tauLo < realB && c.between.tauHi > realB, `between ${JSON.stringify(c.between)} vs ${realB}`);
+  near(c.between.tau, realB, 0.25 * realB);
+  near(c.shareWithin, realW ** 2 / (realW ** 2 + realB ** 2), 0.1);
+  // the plain scatter inside the particles is the noise and the real spread together
+  near(c.within.sd ** 2, c.within.noise ** 2 + realW ** 2, 0.1 * c.within.sd ** 2);
+  // each particle's own within-particle SD, around the common one
+  const taus = c.parts.map(h => h.tau);
+  near(taus.reduce((s, v) => s + v, 0) / taus.length, 0.01, 0.0015);
+});
+
+test("coverage: particles that differ but are each evenly coated", () => {
+  const { y, se, groups } = particlesOf({ k: 15, n: 100, sdB: 0.01 });
+  const c = coverage(y, se, groups);
+  assert.ok(c.within.p > 0.01 && c.within.tauLo === 0, JSON.stringify(c.within));
+  assert.ok(c.between.p < 1e-6 && c.between.I2 > 0.9, JSON.stringify(c.between));
+  assert.ok(c.shareWithin < 0.05);
+});
+
+test("coverage: one patchy particle stands out among even ones", () => {
+  const { y, se, groups } = particlesOf({ k: 10, n: 120 });
+  groups[3].forEach((i, j) => { if (j % 2) y[i] += 0.02; });     // half its pixels carry 40 % more coating
+  const c = coverage(y, se, groups);
+  assert.ok(c.parts[3].p < 1e-6 && c.parts[3].I2 > 0.5, JSON.stringify(c.parts[3]));
+  for (const [k, h] of c.parts.entries()) if (k !== 3) assert.ok(h.I2 < 0.3, `particle ${k}: I2 ${h.I2}`);
+  assert.ok(c.within.p < 1e-6);
+});
+
+test("coverage through the fit: an evenly coated particle passes, a patchy one does not", () => {
+  // two particles of 200 spectra each; in the second, D3 is 2.5 counts on half the pixels and 6 on the rest
+  const R = rng(31), g = () => Math.sqrt(-2 * Math.log(R() + 1e-12)) * Math.cos(2 * Math.PI * R());
+  const wn = Float64Array.from({ length: 297 }, (_, k) => 1000 + k * 800 / 296), K = wn.length, P = 400;
+  const lor = (x, c, w) => 1 / (1 + (2 * (x - c) / w) ** 2), gau = (x, c, w) => Math.exp(-2.772588722239781 * ((x - c) / w) ** 2);
+  const spec = (x, d3) => { const t = (x - 1400) / 400; return 40 + 5 * t - 3 * t * t + 60 * lor(x, 1581, 22) + 15 * lor(x, 1348, 55) + 5 * lor(x, 1618, 30) + d3 * gau(x, 1505, 150) + 3 * lor(x, 1200, 80); };
+  const cube = new Float32Array(P * K);
+  for (let p = 0; p < P; p++) { const d3 = p < 200 || p % 2 ? 2.5 : 6; for (let k = 0; k < K; k++) cube[p * K + k] = spec(wn[k], d3) + 1.2 * g(); }
+  const cfg = structuredClone(DEFAULT_CONFIG), fit = fitSpectra(cube, P, wn, cfg), m = fit.m;
+  const cov = heightCovariances(fit, cfg, wn), j3 = fit.names.indexOf("D3"), jG = fit.names.indexOf("G");
+  const y = [], se = [];
+  for (let p = 0; p < P; p++) {
+    const a3 = fit.intensity[p * m + j3], aG = fit.intensity[p * m + jG];
+    y.push(a3 / aG); se.push(Math.sqrt(ratioVariance(cov, p * m * m, m, j3, jG, a3, aG)));
+  }
+  const groups = [Array.from({ length: 200 }, (_, i) => i), Array.from({ length: 200 }, (_, i) => 200 + i)];
+  const c = coverage(y, se, groups);
+  assert.ok(c.parts[0].p > 0.01 && c.parts[0].I2 < 0.25, `even particle: p ${c.parts[0].p}, I2 ${c.parts[0].I2}`);
+  assert.ok(c.parts[1].p < 1e-6 && c.parts[1].I2 > 0.5, `patchy particle: p ${c.parts[1].p}, I2 ${c.parts[1].I2}`);
+  // the patchy particle's true spread: D3/G of 2.5/60 and 6/60 in equal parts, SD 1.75/60
+  near(c.parts[1].tau, 1.75 / 60, 0.25 * 1.75 / 60);
+  assert.equal(c.between, null);                                 // two particles cannot be compared this way
+});
+
+import { pairRatio } from "../../web/js/pf-analysis.js";
+
+test("neighbour pairs: 1 for noise alone, rising with distance over a real pattern, never across particles", () => {
+  const R = rng(17), g = () => Math.sqrt(-2 * Math.log(R() + 1e-12)) * Math.cos(2 * Math.PI * R());
+  const nx = 60, ny = 60, N = nx * ny, se = Float64Array.from({ length: N }, () => 0.004 + 0.006 * R());
+  // two particles side by side with very different means: pairs across the border would inflate the ratio
+  const labels = Int32Array.from({ length: N }, (_, p) => ((p % nx) < 30 ? 1 : 2));
+  const flat = Float64Array.from({ length: N }, (_, p) => (labels[p] === 1 ? 0.03 : 0.08) + se[p] * g());
+  const r1 = pairRatio(flat, se, labels, nx, ny, 1);
+  near(r1.ratio, 1, 0.06);
+  assert.equal(r1.n, ny * (nx - 2) + nx * (ny - 1));              // rows lose the pair across the border
+  // a patch pattern 20 pixels across (SD 0.007): little change between neighbours, more further apart
+  const patch = Float64Array.from({ length: N }, (_, p) => flat[p] + 0.007 * Math.SQRT2 * Math.sin(2 * Math.PI * (p % nx) / 20) * Math.sin(2 * Math.PI * Math.floor(p / nx) / 20));
+  const [a, b, c] = [1, 3, 6].map(L => pairRatio(patch, se, labels, nx, ny, L).ratio);
+  assert.ok(a < 1.1 && b > a + 0.1 && c > b + 0.3, `${a} ${b} ${c}`);
+});
+
+test("band-height covariances for a subset of spectra match the full computation", () => {
+  const { cube, wn } = replicates(30);
+  const cfg = structuredClone(DEFAULT_CONFIG), fit = fitSpectra(cube, 30, wn, cfg), mm = fit.m * fit.m;
+  const all = heightCovariances(fit, cfg, wn), out = new Float64Array(30 * mm).fill(NaN);
+  heightCovariances(fit, cfg, wn, [4, 17], out);
+  for (const p of [4, 17]) for (let k = 0; k < mm; k++) assert.equal(out[p * mm + k], all[p * mm + k]);
+  assert.ok(Number.isNaN(out[5 * mm]));                           // the others are left alone
+});

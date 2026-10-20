@@ -68,6 +68,24 @@ The default configuration is a typical five-band carbon model: poly order 2 base
   - *Crystallite size* L<sub>a</sub> = 2.4 × 10⁻¹⁰ λ⁴ (A<sub>D1</sub>/A<sub>G</sub>)⁻¹ nm (Cançado et al. 2006), with λ = 532 nm by default (the lab's 532 nm edge laser; LabSpec's acquisition record, when it has one, is shown beside it). Values outside the calibrated range (about 2 to 500 nm) are counted, not hidden.
   - *Size*: D10, D50, D90 by number and by volume, the ratio by diameter quartile, the volume-weighted mean ratio and its rank correlation with diameter. *Export particle analysis (CSV)* writes every particle with its signal-to-noise, G height over its error, detection, population, ratio, G width and position, A<sub>D1</sub>/A<sub>G</sub>, L<sub>a</sub>, and its coating index with its error, detection and place against the noise band.
   - *By particle* (Carbon fit tab): the four maps of a particle list can also be drawn as Q-Carbon draws them, each particle's value against its number; the chip on any map switches all four.
+- **Coating coverage on maps** (Particles tab, gridded maps, after *Find particles*). ParticleFinder measures one spot per particle; a map of coated particles shows whether the coating covers each particle evenly.
+  - *Pixels*: every pixel inside a particle whose G is at least 10 × its noise (inside its fit bounds and the Constraints) carries the coating index (D3/G by default), with its standard error from that pixel's own fit, as for ParticleFinder.
+  - *Rim*: pixels within 1 µm of a particle's edge (editable) are left out. The laser spot lies partly off the particle there and G falls. D3/G rises at the rim of an uncoated reference map too (1.9 × the interior, G 0.53 ×), so the rim says little about the coating. The verdict reports the rim against the interior either way.
+  - *Within each particle*: Cochran's Q over its pixels, I², and the CV of the true values (Paule-Mandel τ, with its Q-profile 95 % interval, over the mean). The cards pool this over the particles (one τ from the summed Q), the table gives it per particle with the share of pixels where the band is detected (height ≥ 3 SE).
+  - *Between particles*: each particle's mean, with the error its pixels give (its noise and its own spread), goes into the same random-effects test, so the real variation splits into a within-particle and a between-particle part. Particle means rest on hundreds of pixels, so I² between them is near 1 for any real difference; the verdict therefore compares the between-particle SD with the within-particle SD.
+  - *Pixel pairs*: two pixels of one particle at a given distance differ, on average, by some multiple of what their errors predict (1 if the errors are right and nothing changes). With a step smaller than the spot, the nearest pairs check the errors: errors that are too small give the same excess at every distance. Real patches give a rise with distance. Rows and columns give the same values on the maps checked, so the patches are not a drift during the acquisition.
+  - *Map*: each pixel coloured against its own particle's mean: within, above or below the band its error allows (95 %), with the rim in grey.
+  - *Errors on the large side*: where the pixels scatter less than their errors predict (Q below its lower 2.5 % point), the Q-profile interval collapses to 0. The plain scatter (noise and real spread together) is then the upper limit quoted.
+  - *Limits*: neighbouring pixels are not independent. With a 0.25 µm step, a 532 nm spot of about 1 µm covers about 13 pixels. Each spectrum still has its own noise, so the test of one common value holds. Patches smaller than the spot are averaged away, though, and the intervals count the pixels as more independent than they are, so they are too narrow. Smoothing before the fit is refused here: it changes the noise each error is computed from.
+  - *Results*:
+
+    | Map | Within-particle CV (I²) | Between particles | Pixel pairs, near to far |
+    |---|---|---|---|
+    | Coated, 7 particles, 0.5 µm step | 22 % (22–23 %), I² 75 %; 6 of 7 particles patchy | CV 8.1 % (5.1–18 %); 88 % of the real variation lies within particles | 1.30 × at 0.5 µm, 3.48 × at 3 µm |
+    | Coated, 2 particles, 0.24 µm step | 16 % (15–16 %), I² 48 % | too few particles | 0.86 × at 0.24 µm, 1.79 × at 3.1 µm |
+    | Uncoated reference, 0.21 µm step | none found (I² 0, Q/df 0.83) | one particle | flat, 0.76 × to 0.82 × |
+
+    D3 is detected in 97–98 % of the coated pixels and 30 % of the uncoated ones. Coating index = D3/G with D3's shape held at the mean spectrum, so compare maps fitted the same way.
 - **Splat 3D tab** (desktop version; a work in progress in the web app). Spectral Gaussian splatting: the baseline-corrected cube on the particles becomes a field of 3-D Gaussians in (x, y, Raman shift), fitted with `ramansp.splatting`. The WebGL viewer projects each Gaussian as in 3D Gaussian splatting. Every 5th channel is held out; on a 9 000-point map the held-out error is 0.97× the map's own noise, with 1 568 Gaussians and 58× fewer numbers than the cube.
 - **Zoom.** Scroll on any map to zoom at the pointer, drag to pan, double-click (or ⟲) for the whole map. The four maps zoom together and the optical image follows; on ParticleFinder data each particle shows its number once you are close enough to read it.
 - **Small windows.** Below 680 px of height the page scrolls (the top bar stays) rather than squeeze the maps and spectra.
@@ -115,6 +133,7 @@ The default configuration is a typical five-band carbon model: poly order 2 base
 ```
 pytest -q tests                           # Python engine, readers, and Python-vs-browser parity
 node --test tests/js/engine.test.mjs      # browser engine
+node --test tests/js/pf-analysis.test.mjs # particle statistics: band errors, coating uniformity, coverage on maps
 ```
 
 The vendor-agreement tests compare against Q-Carbon's own outputs. They need your files: copy `tests/vendor_data.example.json` to `tests/vendor_data.json` and fill in the paths; without it they skip. `python tools/serve_web.py` serves the web build the way Vercel does (static files, no Python engine).

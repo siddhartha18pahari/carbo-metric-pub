@@ -213,18 +213,19 @@ export function bootstrapShares(labels, weights, k, { B = 500, seed = 7, conf = 
 // of each band neither held nor on a bound); σ is the spectrum's residual
 // (its std error). A broad band's height is then judged against everything
 // under it, not against the noise of one channel. Returns P m x m blocks,
-// row-major, NaN for spectra without a fit.
-export function heightCovariances(fit, cfg, wn) {
+// row-major, NaN for spectra without a fit. only: the spectra to compute
+// (all by default), written into out when it is given.
+export function heightCovariances(fit, cfg, wn, only = null, out = null) {
   const [lo, hi] = fit.range, nu = Float64Array.from(wn).filter(v => v >= lo && v <= hi);
   const N = nu.length, m = fit.m, P = fit.std_error.length;
   const nb = cfg.fit_separately ? 0 : cfg.baseline_order + 1, mid = 0.5 * (lo + hi), half = 0.5 * (hi - lo);
   const held = new Set(fit.held || []);
   const shapeFree = cfg.peaks.map(p => p.fit !== false && !cfg.skip_fitting && !held.has(p.name));
   const lorentz = fit.shapes.map(s => s === "Lorentz"), G4 = 2.772588722239781;
-  const out = new Float64Array(P * m * m).fill(NaN);
+  if (!out) out = new Float64Array(P * m * m).fill(NaN);
   const maxQ = nb + 3 * m, J = new Float64Array(N * maxQ), JtJ = new Float64Array(maxQ * maxQ);
   const onBound = (v, a, b) => Math.abs(v - a) <= 1e-6 * (b - a) || Math.abs(v - b) <= 1e-6 * (b - a);
-  for (let p = 0; p < P; p++) {
+  for (const p of only || Array.from({ length: P }, (_, i) => i)) {
     const sigma = fit.std_error[p];
     if (!(sigma > 0)) continue;
     // the columns of J, in order: baseline, then per band its height and any free shape
@@ -275,6 +276,16 @@ export function chi2Upper(x, df) {
 }
 export function chi2Quantile(z, df) { const h = 2 / (9 * df); return df * Math.max(0, 1 - h + z * Math.sqrt(h)) ** 3; }
 
+// tau² at which a Q statistic, which falls as tau² grows, comes down to c;
+// scale is a first guess at its size
+function solveTau2(Qat, c, scale) {
+  if (Qat(0) <= c) return 0;
+  let a = 0, b = Math.max(1e-30, scale);
+  while (Qat(b) > c) b *= 4;
+  for (let it = 0; it < 100; it++) { const h = 0.5 * (a + b); if (Qat(h) > c) a = h; else b = h; }
+  return 0.5 * (a + b);
+}
+
 // Are many measurements of one quantity, each with its own standard error,
 // consistent with a single true value? Cochran's Q, I² (Higgins and Thompson,
 // Stat. Med. 21, 1539, 2002), and the SD tau of the true values between items:
@@ -292,14 +303,8 @@ export function heterogeneity(y, se) {
     return { Q, mu, seMu: Math.sqrt(1 / sw) };
   };
   const { Q, mu: mu0 } = Qat(0);
-  const solve = c => {                              // tau² with Q(tau²) = c (Q falls as tau² grows)
-    if (Qat(0).Q <= c) return 0;
-    let a = 0, b = 1;
-    let vy = 0; for (const i of idx) vy += (y[i] - mu0) ** 2; b = Math.max(1e-30, 10 * vy / n);
-    while (Qat(b).Q > c) b *= 4;
-    for (let it = 0; it < 100; it++) { const h = 0.5 * (a + b); if (Qat(h).Q > c) a = h; else b = h; }
-    return 0.5 * (a + b);
-  };
+  let vy = 0; for (const i of idx) vy += (y[i] - mu0) ** 2;
+  const solve = c => solveTau2(t2 => Qat(t2).Q, c, 10 * vy / n);
   const tau2 = solve(df), lo = solve(chi2Quantile(1.959964, df)), hi = solve(chi2Quantile(-1.959964, df));
   const re = Qat(tau2);
   // the plain spread, and the part of it that the standard errors account for
@@ -307,6 +312,66 @@ export function heterogeneity(y, se) {
   const mean = s / n, sd = Math.sqrt(Math.max(0, (s2 - n * mean * mean) / (n - 1))), noise = Math.sqrt(ms / n);
   return { n, df, Q, p: chi2Upper(Q, df), I2: Q > df ? (Q - df) / Q : 0, tau: Math.sqrt(tau2), tauLo: Math.sqrt(lo), tauHi: Math.sqrt(hi),
            mu: re.mu, seMu: re.seMu, muFixed: mu0, mean, sd, noise };
+}
+
+// Coating coverage on a map: does the coating index vary inside a particle
+// beyond each pixel's own error, and between particles beyond that? groups:
+// per particle, the indices of its pixels into y and se.
+//  - each particle: heterogeneity() over its pixels;
+//  - within, pooled: one SD tau_W of the true values inside a particle,
+//    Paule-Mandel on the summed Q (each particle about its own mean, sum of
+//    n_i - 1 df) with its Q-profile 95 % interval;
+//  - between: heterogeneity() of the particle means, each with the standard
+//    error its pixels give (their noise and that particle's own spread).
+// The true variance then splits into tau_W² within and tau_B² between. The
+// plain pooled scatter sd bounds tau_W without trusting the errors: it is the
+// limit to quote when the pixels scatter less than their errors predict.
+export function coverage(y, se, groups) {
+  const parts = groups.map(g => heterogeneity(g.map(i => y[i]), g.map(i => se[i])));
+  const gs = [];
+  let df = 0, n = 0, ms = 0, vy = 0;
+  groups.forEach((g, k) => {
+    if (!parts[k]) return;
+    const u = g.filter(i => Number.isFinite(y[i]) && se[i] > 0);
+    gs.push(u); df += u.length - 1; n += u.length;
+    for (const i of u) { ms += se[i] ** 2; vy += (y[i] - parts[k].muFixed) ** 2; }
+  });
+  if (!gs.length) return null;
+  const QW = t2 => {
+    let Q = 0;
+    for (const g of gs) {
+      let sw = 0, swy = 0; for (const i of g) { const w = 1 / (se[i] ** 2 + t2); sw += w; swy += w * y[i]; }
+      const mu = swy / sw; for (const i of g) Q += (y[i] - mu) ** 2 / (se[i] ** 2 + t2);
+    }
+    return Q;
+  };
+  const solve = c => solveTau2(QW, c, 10 * vy / n), Q = QW(0), tau2 = solve(df);
+  const within = { n, df, Q, p: chi2Upper(Q, df), I2: Q > df ? (Q - df) / Q : 0, tau: Math.sqrt(tau2),
+                   tauLo: Math.sqrt(solve(chi2Quantile(1.959964, df))), tauHi: Math.sqrt(solve(chi2Quantile(-1.959964, df))),
+                   noise: Math.sqrt(ms / n), sd: Math.sqrt(vy / df) };
+  const ok = parts.filter(Boolean);
+  const between = heterogeneity(ok.map(h => h.mu), ok.map(h => h.seMu));
+  const mu = between ? between.mu : ok.reduce((s, h) => s + h.mu, 0) / ok.length;
+  const tB2 = between ? between.tau ** 2 : NaN;
+  return { parts, within, between, mu, particles: ok.length, shareWithin: tau2 + tB2 > 0 ? tau2 / (tau2 + tB2) : NaN };
+}
+
+// Pixels of one particle lag pixels apart along a row or a column: their mean
+// of (y_p - y_q)² / (se_p² + se_q²), about 1 when the errors are right and the
+// true value does not change over that distance. Where the map's step is
+// smaller than the laser spot, the nearest pairs check the errors; a rise with
+// distance is real variation on that scale. labels: particle of each pixel, 0 for none.
+export function pairRatio(y, se, labels, nx, ny, lag) {
+  const ok = p => labels[p] > 0 && Number.isFinite(y[p]) && se[p] > 0;
+  let s = 0, n = 0;
+  for (let i = 0; i < ny; i++) for (let j = 0; j < nx; j++) {
+    const p = i * nx + j; if (!ok(p)) continue;
+    for (const q of [j + lag < nx ? p + lag : -1, i + lag < ny ? p + lag * nx : -1]) {
+      if (q < 0 || labels[q] !== labels[p] || !ok(q)) continue;
+      s += (y[p] - y[q]) ** 2 / (se[p] ** 2 + se[q] ** 2); n++;
+    }
+  }
+  return { ratio: n ? s / n : NaN, n };
 }
 
 // Moran's I of values at scattered positions, with each point's k nearest

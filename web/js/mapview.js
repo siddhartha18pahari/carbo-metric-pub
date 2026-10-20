@@ -325,10 +325,19 @@ export class MapView {
     const g = this.off.getContext("2d");
     const img = g.createImageData(nx, ny);
     const L = lut(this.cmap), span = this.vmax - this.vmin;
+    // pixels coloured by group (hex colours); index -1 is left clear
+    const C = this.categories, rgb = C && C.colours.map(h => [1, 3, 5].map(k => parseInt(h.slice(k, k + 2), 16)));
     for (let r = 0; r < ny; r++) {
       const i = this.yAsc ? r : ny - 1 - r;
       for (let c = 0; c < nx; c++) {
         const j = this.xAsc ? c : nx - 1 - c, p = i * nx + j, o = (r * nx + c) * 4;
+        if (C) {
+          const k = C.index[p];
+          if (k < 0) { img.data[o + 3] = 0; continue; }
+          const q = rgb[k % rgb.length];
+          img.data[o] = q[0]; img.data[o + 1] = q[1]; img.data[o + 2] = q[2]; img.data[o + 3] = 255;
+          continue;
+        }
         if ((valid && !valid[p]) || !Number.isFinite(v[p])) { img.data[o + 3] = 0; continue; }
         const t = Math.max(0, Math.min(255, Math.round((v[p] - this.vmin) / span * 255))) * 3;
         img.data[o] = L[t]; img.data[o + 1] = L[t + 1]; img.data[o + 2] = L[t + 2]; img.data[o + 3] = 255;
@@ -376,7 +385,7 @@ export class MapView {
       ctx.fillRect(P.x, P.y, P.w, P.h);
       if (this.values) {
         if (this._dirty) { this._paintImage(); this._dirty = false; }
-        ctx.imageSmoothingEnabled = this.smooth;
+        ctx.imageSmoothingEnabled = this.smooth && !this.categories;
         ctx.imageSmoothingQuality = "high";
         // the part of the map image inside the view (the image spans this.ext)
         const E = this.ext, fx = this.off.width / (E.x1 - E.x0), fy = this.off.height / (E.y1 - E.y0);
@@ -430,7 +439,7 @@ export class MapView {
 
     // colour bar, or the legend of the groups
     const cx = P.x + P.w + 12, cy = P.y, ch = P.h;
-    if (this.points && this.categories) this._legend(ctx, cx, cy);
+    if (this.categories) this._legend(ctx, cx, cy);
     else {
       const grad = ctx.createLinearGradient(0, cy + ch, 0, cy);
       const L = lut(this.cmap);
@@ -529,8 +538,9 @@ export class MapView {
     const bad = this.valid && !this.valid[p];
     const filt = this.filter !== "none" && this.values ? ` (filtered ${fmt(this.shown()[p])})` : "";
     const who = this.points ? `#${p + 1} · ` : "";
-    const C = this.points && this.categories;
-    const grp = C ? ` · ${C.index[p] < 0 ? "in no population" : `population ${C.names[C.index[p]]}`}` : "";
+    const C = this.categories;
+    const grp = !C ? "" : this.points ? ` · ${C.index[p] < 0 ? "in no population" : `population ${C.names[C.index[p]]}`}`
+      : ` · ${C.index[p] < 0 ? "not analysed" : C.names[C.index[p]]}`;
     this.readout.textContent = `${who}${fmt(xu, 3)}, ${fmt(yu, 3)} µm  →  ${bad ? "invalid" : fmt(v) + filt}${grp}`;
     this.opts.onHover && this.opts.onHover(p);
   }

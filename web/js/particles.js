@@ -26,7 +26,7 @@ function components(inside, nx, ny) {
 }
 
 // Chamfer (3-4) distance to the nearest outside pixel, in pixels.
-function distance(inside, nx, ny) {
+export function distance(inside, nx, ny) {
   const N = nx * ny, d = new Float32Array(N);
   for (let p = 0; p < N; p++) d[p] = inside[p] ? 1e9 : 0;
   const at = (i, j) => (i < 0 || j < 0 || i >= ny || j >= nx) ? 0 : d[i * nx + j];
