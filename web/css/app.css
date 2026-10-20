@@ -570,7 +570,12 @@ table.stats .sub { color: var(--dim); }
 .browser-only #hero-open, .browser-only #recent { display: none; }
 
 /* a fitted-result table: nothing to refit */
-.results-only [data-sec="processing"], .results-only [data-sec="peaks"] { opacity: .45; pointer-events: none; }
+/* a file of fitted values: the spectral settings have nothing to act on, spatial smoothing does */
+.results-only [data-sec="processing"] .spec-ctl, .results-only [data-sec="peaks"] { opacity: .45; pointer-events: none; }
+.ro-note { display: none; }
+.results-only .ro-note { display: block; margin: 2px 0 8px; }
+#results-bands { font-size: 12px; }
+#results-bands button { margin-top: 6px; }
 #results-note { margin-top: 6px; line-height: 1.45; }
 #results-note:empty { display: none; }
 

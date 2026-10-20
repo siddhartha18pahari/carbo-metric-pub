@@ -92,19 +92,21 @@
         <div class="plot density" id="plot-density"></div>
         <div class="frow hidden" id="grid-row"><label>Grid (columns × rows)</label><select id="grid-select"></select></div>
         <div class="muted small" id="results-note"></div>
+        <div class="ro-note" id="results-bands"></div>
       </div>
 
       <div class="sec" data-sec="processing">
         <div class="sec-h toggle">Processing</div>
         <div class="sec-b">
-          <div class="frow"><label>Baseline</label>
+          <div class="muted small ro-note">This file holds Q-Carbon's fitted values, not spectra: baseline, spectral smoothing and range were applied in Q-Carbon and cannot be redone here. Smoothing (spatial) still works, on the fitted maps. Fit the map (.l6m) to change the rest.</div>
+          <div class="frow spec-ctl"><label>Baseline</label>
             <select id="cfg-baseline">
               <option value="-1">None</option><option value="0">Constant</option><option value="1">Linear</option>
               <option value="2">Poly order 2</option><option value="3">Poly order 3</option><option value="4">Poly order 4</option><option value="5">Poly order 5</option>
             </select></div>
-          <div class="frow"><label></label><label class="chk"><input type="checkbox" id="cfg-separate"> Fit separately</label></div>
-          <div class="frow"><label></label><label class="chk" title="Fit the mean spectrum of the carbon pixels first and start every pixel from its band shapes. A band whose position or width one pixel cannot determine (at this map's noise) keeps the mean shape; only its intensity is fitted per pixel."><input type="checkbox" id="cfg-auto"> Shapes from mean spectrum</label></div>
-          <div class="frow"><label>Smoothing (spectral)</label>
+          <div class="frow spec-ctl"><label></label><label class="chk"><input type="checkbox" id="cfg-separate"> Fit separately</label></div>
+          <div class="frow spec-ctl"><label></label><label class="chk" title="Fit the mean spectrum of the carbon pixels first and start every pixel from its band shapes. A band whose position or width one pixel cannot determine (at this map's noise) keeps the mean shape; only its intensity is fitted per pixel."><input type="checkbox" id="cfg-auto"> Shapes from mean spectrum</label></div>
+          <div class="frow spec-ctl"><label>Smoothing (spectral)</label>
             <div class="row2"><select id="cfg-sgw" title="Savitzky–Golay smoothing along the Raman shift, before the fit. Off fits the raw spectra, as Q-Carbon does. A wide window broadens narrow bands such as G.">
               <option value="0">Off</option><option value="5">SG 5 points</option><option value="7">SG 7 points</option><option value="9">SG 9 points</option><option value="11">SG 11 points</option><option value="15">SG 15 points</option><option value="21">SG 21 points</option>
             </select><select id="cfg-sgo" title="Polynomial order of the Savitzky–Golay filter"><option value="2">order 2</option><option value="3">order 3</option><option value="4">order 4</option></select></div></div>
@@ -112,7 +114,7 @@
             <select id="cfg-spatial" title="Smooth each spectrum with its neighbours on the map (Gaussian weights) before the fit, so every map (D, G, Ratio, Error) follows. Less noise, cleaner weak-band maps, at the cost of resolution; neighbouring points then share data, so per-point statistics overstate the number of independent points. On a file of fitted values (no spectra) the fitted maps themselves are smoothed and the ratios recomputed.">
               <option value="0">Off</option><option value="3">3 × 3 neighbours</option><option value="5">5 × 5 neighbours</option><option value="7">7 × 7 neighbours</option>
             </select></div>
-          <div class="frow"><label>Spectral range (cm⁻¹)</label>
+          <div class="frow spec-ctl"><label>Spectral range (cm⁻¹)</label>
             <div class="row2"><input type="number" id="cfg-lo" step="any"><input type="number" id="cfg-hi" step="any"></div></div>
         </div>
       </div>

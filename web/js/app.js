@@ -120,7 +120,10 @@ maps[3].cmap = "Inferno";
 function renderMap(i) {
   const mv = maps[i], r = resolve(S.specs[i]);
   mv.setTitle(r.title);
+  mv.emptyText = S.fit && S.fit.resultsOnly && S.specs[i].kind === "error"
+    ? "Not in this file: Q-Carbon's export has no error. Fit the map (.l6m) to get it." : null;
   if (r.values) mv.setData(r.values, { valid: r.useValid ? S.valid : null, label: r.label, unit: r.unit });
+  else mv.render();
 }
 function renderMaps() { maps.forEach((_, i) => renderMap(i)); }
 
@@ -172,7 +175,9 @@ function evalFit(p) {
     base[c] = b;
   }
   const comps = f.names.map((name, j) => {
-    const A = f.intensity[p * f.m + j], c0 = f.position[p * f.m + j], w = f.width[p * f.m + j];
+    const A = f.intensity[p * f.m + j], w = f.width[p * f.m + j];
+    let c0 = f.position[p * f.m + j];
+    if (!Number.isFinite(c0) && f.nominalPos && f.nominalPos[j] != null) c0 = f.nominalPos[j];   // the file has no positions
     const y = new Float32Array(n);
     for (let c = 0; c < n; c++) {
       if (f.shapes[j] === "Lorentz") { const u = 2 * (wn[c] - c0) / w; y[c] = A / (1 + u * u); }
@@ -616,7 +621,7 @@ function decodeFit(r) {
     names: r.names, shapes: r.shapes, m: r.m, nb: r.nb, range: r.range, seconds: r.seconds, config: r.config,
     intensity: f32(r.intensity), position: f32(r.position), width: f32(r.width), area: f32(r.area),
     baseline: f32(r.baseline), std_error: f32(r.std_error), red_chi2: f32(r.red_chi2), n_iter: f32(r.n_iter), cols: {},
-    held: r.held || [], resultsOnly: !!r.results_only,
+    held: r.held || [], resultsOnly: !!r.results_only, nominalPos: r.nominal_pos || null,
   };
   $("#held-note").textContent = S.fit.held.length
     ? `Shape held at the mean-spectrum value (one pixel cannot determine it at this noise level): ${S.fit.held.join(", ")}. Only the intensity is fitted per pixel.`
@@ -647,7 +652,7 @@ function refreshAll() {
 async function loadDataset(info) {
   S.results = null;
   document.body.classList.remove("results-only");
-  $("#grid-row").classList.add("hidden"); $("#results-note").textContent = "";
+  $("#grid-row").classList.add("hidden"); $("#results-note").textContent = ""; $("#results-bands").textContent = "";
   S.ds = info; S.nx = info.nx; S.ny = info.ny; S.k = info.k;
   S.wn = f32(info.wn); S.x = f32(info.x); S.y = f32(info.y);
   S.points = info.points ? Object.fromEntries(Object.entries(info.points).map(([k, v]) => [k, f32(v)])) : null;
@@ -774,6 +779,14 @@ async function loadResults(grid) {
   document.body.classList.add("results-only");
   $("#held-note").textContent = "";
   $("#results-note").textContent = r.note;
+  // Q-Carbon's export carries only the two bands of its ratio, no error: the
+  // rest needs the spectra, so offer the map itself
+  const absent = S.cfg.peaks.map(q => q.name).filter(n => !fit.names.includes(n));
+  $("#results-bands").replaceChildren(
+    el("div", { class: "muted small" }, `This file holds ${fit.names.join(" and ")} only (Q-Carbon exports the two bands of its ratio) and no error.` +
+      (absent.length ? ` ${absent.join(", ")} and the error need the spectra.` : " The error needs the spectra.")),
+    r.map ? el("button", { onclick: () => uploadFiles(r.map) }, `Fit all bands from ${r.map[0].name}`)
+          : el("button", { onclick: () => pickFiles() }, "Open the map (.l6m) to fit all bands…"));
   $("#file-name").textContent = info.name;
   $("#spec-name").textContent = `${info.nx} × ${info.ny} · fitted values, no spectra`;
   document.title = `${info.name} · Carbo Metrics`;

@@ -17,7 +17,7 @@ export async function findResultsFile(files) {
 
 export async function openResults(file, files) {
   const t = readResultsTable(await file.text(), file.name);
-  let grid = null, choices = null, video = null, note = "";
+  let grid = null, choices = null, video = null, map = null, note = "";
   const l6m = files.find(f => /\.l6m$/i.test(f.name));
   if (t.x) note = "Grid and coordinates from the file's X and Y columns.";
   else if (l6m) {
@@ -26,6 +26,7 @@ export async function openResults(file, files) {
       grid = { nx: m.nx, ny: m.ny, x: m.x, y: m.y };
       note = `Grid and stage coordinates from ${l6m.name}.`;
       const vf = files.find(f => /\.l6v$/i.test(f.name));
+      map = [l6m, vf].filter(Boolean);         // its spectra: every band can be fitted
       if (vf) {
         try {
           const v = readL6v(await vf.arrayBuffer(), vf.name);
@@ -41,7 +42,7 @@ export async function openResults(file, files) {
     note += `This file has no coordinates: the grid was inferred from its ${t.n} points (the most isotropic map). ` +
       "Positions are point numbers, not µm. If the maps look sheared, pick another grid, or open the table together with its .l6m.";
   }
-  return { id: `results-${++seq}`, table: t, grid, choices, video, note };
+  return { id: `results-${++seq}`, table: t, grid, choices, video, map, note };
 }
 
 // Line shape of each band, read off the file itself: area / (height x FWHM)
@@ -63,22 +64,19 @@ function bandShapes(t, cfg) {
 export function resultsDataset(r, grid, cfg) {
   const t = r.table, { nx, ny, x, y, fit } = placeResults(t, grid), P = nx * ny;
   const nan = () => new Float64Array(P).fill(NaN);
-  // Q-Carbon exports no band positions: draw those bands at their configured
-  // (or standard) positions, and say so
-  const nominal = [];
-  t.bands.forEach((b, j) => {
-    let any = false;
-    for (let p = 0; p < P && !any; p++) if (Number.isFinite(fit.position[p * t.bands.length + j])) any = true;
-    if (any) return;
-    const pk = cfg.peaks.find(q => q.name === b), pos = pk ? pk.pos : NOMINAL[b.toUpperCase()] ?? 1500;
-    for (let p = 0; p < P; p++) fit.position[p * t.bands.length + j] = pos;
+  // Q-Carbon exports no band positions: the graphs draw those bands at their
+  // configured (or standard) positions and say so; the position maps stay empty
+  const nominal = [], nominalPos = t.bands.map((b, j) => {
+    for (let p = 0; p < P; p++) if (Number.isFinite(fit.position[p * t.bands.length + j])) return null;
+    const pk = cfg.peaks.find(q => q.name === b);
     nominal.push(b);
+    return pk ? pk.pos : NOMINAL[b.toUpperCase()] ?? 1500;
   });
   return {
     info: { id: r.id, name: t.name, path: t.name, nx, ny, k: 0, wn: new Float64Array(0), x, y,
             format: "results", resultsOnly: true, video: r.video ? r.video.meta : undefined, nominal },
     fit: { names: t.bands, shapes: bandShapes(t, cfg), m: t.bands.length, nb: 0,
-           range: [cfg.range_lo, cfg.range_hi], seconds: 0, n_channels: 0, held: [], results_only: true,
+           range: [cfg.range_lo, cfg.range_hi], seconds: 0, n_channels: 0, held: [], results_only: true, nominal_pos: nominalPos,
            config: { ...structuredClone(cfg), ratio_num: t.ratio[0], ratio_den: t.ratio[1] },
            ...fit, baseline: new Float64Array(0), std_error: nan(), red_chi2: nan(), n_iter: nan() },
   };

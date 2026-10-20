@@ -35,6 +35,7 @@ export class MapView {
     this.cursor = null; this.pinned = null;
     this.values = null; this.valid = null;
     this.overlays = [];
+    this.emptyText = null;           // shown over the map when it cannot have values
     this.label = ""; this.unit = "";
 
     host.classList.add("mapview");
@@ -295,6 +296,21 @@ export class MapView {
       }
     }
     for (const o of this.overlays) o(ctx, this);
+    if (this.emptyText) {
+      // why this map has nothing to show, word-wrapped on a plain box
+      ctx.font = font(12); ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      const lines = [];
+      for (const w of this.emptyText.split(" ")) {
+        const l = lines.length ? lines[lines.length - 1] + " " + w : w;
+        if (lines.length && ctx.measureText(l).width <= P.w - 32) lines[lines.length - 1] = l; else lines.push(w);
+      }
+      const lh = 17, bw = Math.min(P.w - 12, Math.max(...lines.map(l => ctx.measureText(l).width)) + 24), bh = lines.length * lh + 14;
+      const cx = P.x + P.w / 2, cy = P.y + P.h / 2;
+      ctx.fillStyle = T.paper; ctx.fillRect(cx - bw / 2, cy - bh / 2, bw, bh);
+      ctx.strokeStyle = T.frame; ctx.strokeRect(cx - bw / 2 + 0.5, cy - bh / 2 + 0.5, bw - 1, bh - 1);
+      ctx.fillStyle = T.label;
+      lines.forEach((l, i) => ctx.fillText(l, cx, cy - (lines.length - 1) * lh / 2 + i * lh));
+    }
     ctx.restore();
 
     // axes
