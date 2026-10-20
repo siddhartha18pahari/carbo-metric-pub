@@ -10,7 +10,8 @@ import { SpectrumPlot, HistogramPlot, DensityPlot, PEAK_COLOURS } from "./plots.
 import { SplatView, sliceField } from "./splat3d.js";
 import { segment, outlineOverlay, PARTICLE_COLOURS } from "./particles.js";
 import { buildReport } from "./report.js";
-import { wilson, weightedQuantile, laCancado, robustScale, bestGmm, bootstrapShares, median, quantileSorted } from "./pf-analysis.js";
+import { wilson, weightedQuantile, laCancado, robustScale, bestGmm, bootstrapShares, median, quantileSorted,
+         heightCovariances, ratioVariance, heterogeneity, moranI, spearmanCI } from "./pf-analysis.js";
 import { T, font, setTheme, currentTheme } from "./theme.js";
 
 const QUANT = { intensity: "Intensity", width: "Width", area: "Area", position: "Position" };
@@ -107,6 +108,7 @@ const maps = [0, 1, 2, 3].map(i => new MapView($(`#map-${i}`), {
   onChange: () => { if (S.active === i) { renderHist(); renderVideo(); } },
   onView: (v, src) => { for (const m of maps) if (m !== src) m.setView(v ? { ...v } : null); renderVideo(); },
   onSmoothChange: rememberSmoothing,
+  onProfile: on => { for (const m of maps) m.setProfile(on); },      // all four maps, as Q-Carbon shows them
 }));
 maps.forEach((mv, i) => mv.host.addEventListener("mousedown", () => setActive(i)));
 
@@ -1483,6 +1485,7 @@ function showMetrics(r) {
 // =========================================================================
 const pmap = new MapView($("#map-p"), {
   onTitle: (mv, e) => specMenu(e, S.pspec, () => renderParticles()),
+  noProfile: true,
 });
 pmap.cmap = "Viridis";
 const stripHost = $("#pt-strip"), stripCanvas = el("canvas"); stripHost.append(stripCanvas);
@@ -1616,7 +1619,7 @@ function spearman(x, y) {
 }
 
 function pfInit() {
-  if (S.pfLaserFor !== S.ds.id) { S.pfLaserFor = S.ds.id; $("#pf-laser").value = S.ds.laser_nm ?? ""; S.pfa = null; }
+  if (S.pfLaserFor !== S.ds.id) { S.pfLaserFor = S.ds.id; S.pfa = null; }
   const sel = $("#pf-x");
   if (!sel.options.length) {
     for (const [k, [lab, unit]] of Object.entries(S.pointLabels || {})) sel.append(el("option", { value: k }, unit ? `${lab} (${unit})` : lab));
@@ -1680,11 +1683,12 @@ function drawScatter() {
   for (const t of xt) { ctx.fillStyle = T.grid; ctx.fillRect(PX(t), Tt, 1, H - Tt - B); ctx.fillStyle = T.ink; ctx.fillText(logx ? fmt(10 ** t, 3) : fmt(t, 3), PX(t), H - B + 4); }
   ctx.fillStyle = T.label; ctx.fillText(`${F.xlab}${F.xunit ? ` (${F.xunit})` : ""}${logx ? ", log scale" : ""}`, (L + W - Rr) / 2, H - 13);
   const cls = S.points.cls, cols = ["#3fe0ff", "#ff9f40", "#b18cff", "#7dff6a"];
-  const A = S.pfa, byPop = A && A.k && $("#pf-pop-map").checked;
+  const A = S.pfa, by = $("#pf-colour").value, byPop = A && A.k && by === "pop", byCoat = A && A.coat && by === "coat", CC = COAT_COLOURS();
   ctx.globalAlpha = Math.max(0.15, Math.min(0.8, 300 / idx.length));
   idx.forEach((p, i) => {
     if (ys[i] < ylo || ys[i] > yhi || xs[i] < xlo || xs[i] > xhi) return;
-    ctx.fillStyle = byPop ? (A.label[p] < 0 ? T.hatchLine : A.pops[A.label[p]].nd ? T.label : PARTICLE_COLOURS[A.label[p] % PARTICLE_COLOURS.length]) : cols[Math.max(0, cls[p]) % cols.length];
+    ctx.fillStyle = byCoat ? (A.coat.cat[p] < 0 ? T.hatchLine : CC[A.coat.cat[p]])
+      : byPop ? (A.label[p] < 0 ? T.hatchLine : A.pops[A.label[p]].nd ? T.label : PARTICLE_COLOURS[A.label[p] % PARTICLE_COLOURS.length]) : cols[Math.max(0, cls[p]) % cols.length];
     ctx.fillRect(PX(xs[i]) - 1.2, PY(ys[i]) - 1.2, 2.4, 2.4);
   });
   ctx.globalAlpha = 1;
@@ -1728,24 +1732,36 @@ function pfAnalysis() {
     bandSel.value = others.includes(keep) ? keep : (others.find(b => b.toLowerCase() === "d1") || others[0] || "");
   }
   const popBand = bandSel.value;
-  const key = [S.ds.id, f.seconds, f.names.join(), stableJSON(VIEW_KEYS.map(k => c[k])), kd, kq, mode, cuts.join(), lambda, popBand].join("|");
+  const coatSel = $("#pf-coat-band");
+  if ([...coatSel.options].map(o => o.value).join() !== others.join()) {
+    const keep = coatSel.value;
+    coatSel.replaceChildren(...others.map(b => el("option", { value: b }, `${b}/G`)));
+    coatSel.value = others.includes(keep) ? keep : (others.find(b => b.toLowerCase() === "d3") || others[0] || "");
+  }
+  const coatBand = coatSel.value;
+  const key = [S.ds.id, f.seconds, f.names.join(), stableJSON(VIEW_KEYS.map(k => c[k])), kd, kq, mode, cuts.join(), lambda, popBand, coatBand].join("|");
   if (S.pfa && S.pfa.key === key) return S.pfa;
   const band = name => f.names.findIndex(b => b.toLowerCase() === name);
   const jG = band("g") >= 0 ? band("g") : f.names.indexOf(c.ratio_den), jD = band("d1");
   const col = (q, j) => Float64Array.from({ length: n }, (_, p) => (j < 0 ? NaN : f[q][p * m + j]));
   const IG = col("intensity", jG), WG = col("width", jG), XG = col("position", jG), AG = col("area", jG);
   const ID = col("intensity", jD), AD = col("area", jD), se = f.std_error;
-  const gp = c.peaks.find(q => q.name === f.names[jG]);
+  const fc = f.config || c, gp = fc.peaks.find(q => q.name === f.names[jG]);
+  // the uncertainty of every band height, from each particle's own fit (once per fit)
+  const ckey = `${S.ds.id}|${f.seconds}|${f.names.join()}`;
+  if (!S.pfCov || S.pfCov.key !== ckey) S.pfCov = { key: ckey, cov: heightCovariances(f, fc, S.wn) };
+  const cov = S.pfCov.cov, zOf = (p, j) => (j < 0 ? NaN : f.intensity[p * m + j] / Math.sqrt(cov[p * m * m + j * m + j]));
+  const zG = new Float64Array(n).fill(NaN);
   const near = (v, b, span) => Math.abs(v - b) < 1e-3 * span;
   const snr = new Float64Array(n).fill(NaN), atBound = new Uint8Array(n), det = new Uint8Array(n), quant = new Uint8Array(n);
   let fitted = 0;
   for (let p = 0; p < n; p++) {
     if (!(se[p] > 0)) continue;
     fitted++;
-    snr[p] = IG[p] / se[p];
+    snr[p] = IG[p] / se[p]; zG[p] = zOf(p, jG);
     atBound[p] = gp && (near(XG[p], gp.pos_min, gp.pos_max - gp.pos_min) || near(XG[p], gp.pos_max, gp.pos_max - gp.pos_min)
       || near(WG[p], gp.width_min, gp.width_max - gp.width_min) || near(WG[p], gp.width_max, gp.width_max - gp.width_min)) ? 1 : 0;
-    det[p] = snr[p] >= kd && !atBound[p] ? 1 : 0;
+    det[p] = zG[p] >= kd && !atBound[p] ? 1 : 0;
     quant[p] = snr[p] >= kq && !atBound[p] && (!S.valid || S.valid[p]) ? 1 : 0;
   }
   const Q = []; for (let p = 0; p < n; p++) if (quant[p]) Q.push(p);
@@ -1753,7 +1769,7 @@ function pfAnalysis() {
   // below detection gives a ratio of noise (often exactly 0), not a population
   const jR = f.names.indexOf(popBand), IR = col("intensity", jR);
   const ratio = jR >= 0 ? Float64Array.from({ length: n }, (_, p) => (IG[p] > 0 ? IR[p] / IG[p] : NaN)) : null;
-  const rDet = new Uint8Array(n); for (const p of Q) rDet[p] = jR >= 0 && IR[p] / se[p] >= kd ? 1 : 0;
+  const rDet = new Uint8Array(n); for (const p of Q) rDet[p] = jR >= 0 && zOf(p, jR) >= kd ? 1 : 0;
   const Qd = Q.filter(p => rDet[p]), nNd = Q.length - Qd.length, rlab = `${popBand}/G`;
 
   // populations, then renamed A, B, ... by their median ratio, low to high
@@ -1789,7 +1805,7 @@ function pfAnalysis() {
   const la = new Float64Array(n).fill(NaN);
   let noD = 0;
   for (const p of Q) {
-    if (jD < 0 || !(ID[p] / se[p] >= kd)) { noD++; continue; }
+    if (jD < 0 || !(zOf(p, jD) >= kd)) { noD++; continue; }
     la[p] = laCancado(AD[p], AG[p], lambda);
   }
   const laQ = Q.map(p => la[p]).filter(Number.isFinite);
@@ -1818,19 +1834,54 @@ function pfAnalysis() {
   if (ratio) for (const p of Qd) { const w = vol[p] > 0 ? vol[p] : 0; sw += w; swr += w * ratio[p]; sr += ratio[p]; }
   const rho = ratio && Qd.length >= 3 ? spearman(Qd.map(p => pts.ecd[p]), Qd.map(p => ratio[p])) : NaN;
 
-  // mean spectrum of each population: baseline removed, scaled to its G height
+  // mean spectra of groups of particles: baseline removed, each scaled to its G height
   const [lo, hi] = f.range, ks = []; for (let q = 0; q < S.k; q++) if (S.wn[q] >= lo && S.wn[q] <= hi) ks.push(q);
-  const groups = cats || 1, sum = Array.from({ length: groups }, () => new Float64Array(ks.length)), sq = sum.map(() => new Float64Array(ks.length)), cnt = new Float64Array(groups);
-  for (const p of Q) {
-    const g = cats ? label[p] : 0; if (g < 0) continue;
-    const base = evalFit(p).baseline, o = p * S.k;
-    ks.forEach((q, i) => { const y = (S.cube[o + q] - base[q]) / IG[p]; sum[g][i] += y; sq[g][i] += y * y; });
-    cnt[g]++;
-  }
-  const spectra = { wn: ks.map(q => S.wn[q]), mean: sum.map((s, g) => Array.from(s, v => v / Math.max(1, cnt[g]))),
-                    sd: sq.map((s, g) => Array.from(s, (v, i) => Math.sqrt(Math.max(0, v / Math.max(1, cnt[g]) - (sum[g][i] / Math.max(1, cnt[g])) ** 2)))), n: Array.from(cnt) };
+  const K2 = ks.length, NS = new Float32Array(Q.length * K2);
+  Q.forEach((p, qi) => { const base = evalFit(p).baseline, o = p * S.k; ks.forEach((q, i) => { NS[qi * K2 + i] = (S.cube[o + q] - base[q]) / IG[p]; }); });
+  const groupSpectra = (groupOf, groups) => {
+    const sum = Array.from({ length: groups }, () => new Float64Array(K2)), sq = sum.map(() => new Float64Array(K2)), cnt = new Float64Array(groups);
+    Q.forEach((p, qi) => {
+      const g = groupOf(p); if (g < 0) return;
+      for (let i = 0; i < K2; i++) { const y = NS[qi * K2 + i]; sum[g][i] += y; sq[g][i] += y * y; }
+      cnt[g]++;
+    });
+    return { wn: ks.map(q => S.wn[q]), mean: sum.map((s, g) => Array.from(s, v => v / Math.max(1, cnt[g]))),
+             sd: sq.map((s, g) => Array.from(s, (v, i) => Math.sqrt(Math.max(0, v / Math.max(1, cnt[g]) - (sum[g][i] / Math.max(1, cnt[g])) ** 2)))), n: Array.from(cnt) };
+  };
+  const spectra = groupSpectra(p => (cats ? label[p] : 0), cats || 1);
 
-  return (S.pfa = { key, n, fitted, kd, kq, snr, atBound, det, quant, Q, Qd, label, k: cats, how, pops, la, laQ, noD, lambda, size, classes,
+  // Coating uniformity: is the coating band over G the same in every particle
+  // once each particle's own measurement error is allowed for? A slow change
+  // along the particle order is told apart first (a running median), since
+  // ParticleFinder measures the particles in that order and a drift of laser,
+  // focus or background would otherwise read as non-uniform coating.
+  let coat = null;
+  const jC = f.names.indexOf(coatBand);
+  if (jC >= 0 && jC !== jG && Q.length >= 10) {
+    const IC = col("intensity", jC);
+    const R = Q.map(p => IC[p] / IG[p]), sR = Q.map(p => Math.sqrt(Math.max(0, ratioVariance(cov, p * m * m, m, jC, jG, IC[p], IG[p]))));
+    const zc = Q.map(p => zOf(p, jC)), nC = zc.filter(z => z >= kd).length;
+    const rho = spearman(Q.map(p => p), R), rhoCI = spearmanCI(rho, Q.length);
+    const w = Math.max(21, Math.min(201, 2 * Math.floor(Q.length / 20) + 1)), hw = (w - 1) / 2;
+    const trend = R.map((_, i) => median(R.slice(Math.max(0, i - hw), Math.min(R.length, i + hw + 1))));
+    const mean = R.reduce((s, v) => s + v, 0) / R.length, tenth = Math.max(1, Math.floor(R.length / 10));
+    const drift = Number.isFinite(rho) && Math.abs(rho) >= 0.1 && (rhoCI[0] > 0 || rhoCI[1] < 0);
+    const use = drift ? R.map((v, i) => v - trend[i] + mean) : R;
+    const raw = heterogeneity(R, sR), H = drift ? heterogeneity(use, sR) : raw;
+    if (H) {
+      const zdev = use.map((v, i) => (v - H.mu) / sR[i]);
+      // 0 below, 1 within, 2 above the band the noise alone would allow (95 %)
+      const cat = new Int16Array(n).fill(-1), cnt = [0, 0, 0];
+      Q.forEach((p, i) => { const k2 = zdev[i] > 1.959964 ? 2 : zdev[i] < -1.959964 ? 0 : 1; cat[p] = k2; cnt[k2]++; });
+      const moran = moranI(use, Q.map(p => pts.x[p]), Q.map(p => pts.y[p]));
+      const rhoSize = spearman(Q.map(p => pts.ecd[p]), use);
+      coat = { band: coatBand, n: Q.length, Q, R, sR, use, trend, w, zc, nC, raw, H, drift, rho, rhoCI, zdev, cat, below: cnt[0], within: cnt[1], above: cnt[2],
+               spectra: groupSpectra(p => cat[p], 3),
+               ends: [median(trend.slice(0, tenth)), median(trend.slice(-tenth))], moran, rhoSize, rhoSizeCI: spearmanCI(rhoSize, Q.length) };
+    }
+  }
+
+  return (S.pfa = { key, n, fitted, kd, kq, snr, zG, atBound, det, quant, Q, Qd, label, k: cats, how, pops, la, laQ, noD, lambda, size, classes, coat,
                     vwRatio: sw > 0 ? swr / sw : NaN, nwRatio: Qd.length ? sr / Qd.length : NaN, rho, spectra, jD, ratio, rlab, nNd, popBand });
 }
 
@@ -1842,10 +1893,12 @@ function renderPfAnalysis() {
   const [dlo, dhi] = wilson(nDet, A.fitted);
   $("#pf-detect-cards").replaceChildren(
     card("Spectra", `${fmt(A.fitted)} of ${fmt(A.n)}`, A.n > A.fitted ? `${fmt(A.n - A.fitted)} without a spectrum (flat or missing)` : "every particle measured"),
-    card("Carbon detected", `${fmt(nDet)} of ${fmt(A.fitted)}`, `${pct(nDet / A.fitted)} (95 % CI ${pct(dlo)}–${pct(dhi)})`),
+    card("Carbon detected", `${fmt(nDet)} of ${fmt(A.fitted)}`, `${pct(nDet / A.fitted)} (95 % CI ${pct(dlo)}–${pct(dhi)}) · G ≥ ${A.kd} SE`),
     card("Quantified", fmt(nQ), `G ≥ ${A.kq} × noise, inside its bounds`),
     card("Low signal", fmt(nDet - A.Q.filter(p => A.det[p]).length), "detected, not quantified"),
     card("G on a fit bound", fmt(nBound), "fitting noise: left out"));
+
+  renderCoating(A, card);
 
   // populations
   $(".pf-cut").classList.toggle("hidden", $("#pf-pop-mode").value !== "cut");
@@ -1867,6 +1920,7 @@ function renderPfAnalysis() {
 
   // crystallite size
   const lam = A.lambda, fromFile = S.ds.laser_nm;
+  const laserNote = fromFile ? `the file records ${fromFile} nm` : "the file does not record it";
   const ls = Float64Array.from(A.laQ).sort();
   const below = A.laQ.filter(v => v < 2).length, above = A.laQ.filter(v => v > 500).length;
   $("#pf-la-cards").replaceChildren(
@@ -1874,7 +1928,7 @@ function renderPfAnalysis() {
       ls.length ? `IQR ${fmt(quantileSorted(ls, 0.25), 3)}–${fmt(quantileSorted(ls, 0.75), 3)} nm · n = ${fmt(ls.length)}` : "no particle with a D band"),
     card("No D band", fmt(A.noD), "D1 below detection: La larger than the method shows"),
     card("Outside the calibration", fmt(below + above), `${fmt(below)} below 2 nm · ${fmt(above)} above 500 nm`),
-    card("Laser", Number.isFinite(lam) ? `${fmt(lam, 5)} nm` : "–", fromFile ? (Math.abs(fromFile - lam) < 1e-6 ? "read from the file" : `the file says ${fromFile} nm`) : "not in the file: enter it"));
+    card("Laser", Number.isFinite(lam) ? `${fmt(lam, 5)} nm` : "–", `532 nm edge by default; ${laserNote}`));
   $("#pf-la-note").textContent = A.jD < 0 ? "The fit has no D1 band." :
     "La = 2.4 × 10⁻¹⁰ λ⁴ (A_D1 / A_G)⁻¹ nm, λ in nm, from the fitted band areas (Cançado et al., Appl. Phys. Lett. 88, 163106, 2006). Calibrated on nanographite with La of about 20 to 500 nm; below about 2 nm the relation inverts (Ferrari and Robertson, Phys. Rev. B 61, 14095, 2000), so smaller values describe amorphous carbon only qualitatively.";
 
@@ -1892,10 +1946,15 @@ function renderPfAnalysis() {
   $("#pf-size-note").textContent = `D10, D50, D90: every particle, by number and weighted by the ParticleFinder volume. Classes: quartiles of diameter among the quantified particles with ${A.popBand} detected.` +
     (Number.isFinite(A.vwRatio) ? ` ${lab}: ${fmt(A.nwRatio, 3)} mean by number, ${fmt(A.vwRatio, 3)} weighted by volume; Spearman ρ with diameter ${Number.isFinite(A.rho) ? A.rho.toFixed(3) : "–"}.` : "");
 
-  // the map: particles coloured by population
-  const byPop = $("#pf-pop-map").checked && A.k > 0;
-  pmap.setCategories(byPop ? { index: A.label, colours: A.pops.map((_, l) => popColour(l)), names: A.pops.map(pp => pp.name) } : null);
-  if (byPop) pmap.setTitle(`Populations on <u>${escHTML(lab)}</u>`);
+  // the map: particles coloured by coating, by population, or by the fitted value
+  const by = $("#pf-colour").value;
+  if (by === "coat" && A.coat) {
+    pmap.setCategories({ index: A.coat.cat, colours: COAT_COLOURS(), names: ["below", "within", "above"] });
+    pmap.setTitle(`Coating <u>${escHTML(A.coat.band)}/G</u> against the noise band`);
+  } else if (by === "pop" && A.k > 0) {
+    pmap.setCategories({ index: A.label, colours: A.pops.map((_, l) => popColour(l)), names: A.pops.map(pp => pp.name) });
+    pmap.setTitle(`Populations on <u>${escHTML(lab)}</u>`);
+  } else pmap.setCategories(null);
   drawPopSpectra(); drawPfDist();
 }
 
@@ -1920,13 +1979,17 @@ function pfAxes(host, xr, yr, { logx = false, xlabel = "", ylabel = "" } = {}) {
 
 function drawPopSpectra() {
   const A = S.pfa; if (!A) return;
-  const sp = A.spectra; if (!sp.wn.length) return;
+  const byCoat = $("#pf-colour").value === "coat" && A.coat;
+  $("#pf-spec-h").textContent = byCoat ? `Mean spectrum by coating group (${A.coat.band}/G against the noise band)` : "Mean spectrum by population";
+  const sp = byCoat ? A.coat.spectra : A.spectra; if (!sp.wn.length) return;
+  const colOf = g => (byCoat ? COAT_COLOURS()[g] : A.k ? (A.pops[g].nd ? T.label : PARTICLE_COLOURS[g % PARTICLE_COLOURS.length]) : T.strong);
+  const nameOf = g => (byCoat ? ["below", "within", "above"][g] : A.k ? A.pops[g].name : "All quantified");
   let ymax = 0; sp.mean.forEach((mm, g) => mm.forEach((v, i) => { if (sp.n[g]) ymax = Math.max(ymax, v + sp.sd[g][i]); }));
   const ax = pfAxes(pfSpecHost, [sp.wn[0], sp.wn[sp.wn.length - 1]], [-0.05, Math.min(3, ymax * 1.05) || 1.2], { xlabel: "Raman shift (cm⁻¹)", ylabel: "Intensity / G height" }); if (!ax) return;
   const { ctx, X, Y } = ax;
   sp.mean.forEach((mm, g) => {
     if (!sp.n[g]) return;
-    const col = A.k ? (A.pops[g].nd ? T.label : PARTICLE_COLOURS[g % PARTICLE_COLOURS.length]) : T.strong;
+    const col = colOf(g);
     ctx.globalAlpha = 0.16; ctx.fillStyle = col; ctx.beginPath();
     sp.wn.forEach((w, i) => (i ? ctx.lineTo(X(w), Y(mm[i] + sp.sd[g][i])) : ctx.moveTo(X(w), Y(mm[i] + sp.sd[g][i]))));
     for (let i = sp.wn.length - 1; i >= 0; i--) ctx.lineTo(X(sp.wn[i]), Y(mm[i] - sp.sd[g][i]));
@@ -1938,14 +2001,15 @@ function drawPopSpectra() {
   ctx.font = font(11, "bold"); ctx.textAlign = "left"; ctx.textBaseline = "top";
   sp.mean.forEach((_, g) => {
     if (!sp.n[g]) return;
-    ctx.fillStyle = A.k ? (A.pops[g].nd ? T.label : PARTICLE_COLOURS[g % PARTICLE_COLOURS.length]) : T.strong;
-    ctx.fillText(`${A.k ? A.pops[g].name : "All quantified"} · n = ${fmt(sp.n[g])}`, ax.L + 8, ax.Tp + 4 + g * 15);
+    ctx.fillStyle = colOf(g);
+    ctx.fillText(`${nameOf(g)} · n = ${fmt(sp.n[g])}`, ax.L + 8, ax.Tp + 4 + g * 15);
   });
 }
 
 function drawPfDist() {
   const A = S.pfa; if (!A) return;
   const kind = $("#pf-dist").value;
+  if (kind === "funnel" || kind === "order" || kind === "dev") { drawCoatPlot(A, kind); return; }
   if (kind === "la") {
     const v = A.laQ; $("#pf-dist-note").textContent = v.length ? "quantified particles with a D band, log scale" : "";
     if (!v.length) { const ax = pfAxes(pfDistHost, [0, 3], [0, 1], { logx: true, xlabel: "La (nm)" }); if (ax) { ax.ctx.fillStyle = T.label; ax.ctx.textAlign = "center"; ax.ctx.fillText(Number.isFinite(A.lambda) ? "No particle with a D band" : "Enter the laser wavelength", ax.W / 2, ax.H / 2 - 10); } return; }
@@ -1992,20 +2056,129 @@ function drawPfDist() {
   if (tv > 0) { ctx.fillStyle = PARTICLE_COLOURS[1]; ctx.fillText(`By volume · D50 ${fmt(A.size.vol[1], 3)} µm`, ax.L + 8, ax.Tp + 19); }
 }
 
-for (const id of ["#pf-kd", "#pf-kq", "#pf-pop-ratio", "#pf-pop-mode", "#pf-cut1", "#pf-cut2", "#pf-laser", "#pf-pop-map"]) $(id).addEventListener("change", () => { if (S.points && S.fit) renderPF(); });
+// below / within / above the noise band
+const COAT_COLOURS = () => [PARTICLE_COLOURS[2], PARTICLE_COLOURS[0], PARTICLE_COLOURS[1]];
+const pFmt = p => (!Number.isFinite(p) ? "–" : p < 0.001 ? "< 0.001" : `= ${p.toFixed(3)}`);
+
+function renderCoating(A, card) {
+  const C = A.coat, box = $("#pf-verdict");
+  if (!C) {
+    box.className = "verdict"; box.textContent = "";
+    $("#pf-coat-cards").replaceChildren();
+    $("#pf-coat-note").textContent = A.Q.length < 10 ? "Too few quantified particles to judge the coating." : "Choose a coating band other than G.";
+    return;
+  }
+  const H = C.H, b = C.band, cv = H.tau / H.mu, [wl, wh] = wilson(C.nC, C.n);
+  let level, head;
+  if (H.p >= 0.05) { level = "good"; head = "Uniform within the measurement"; }
+  else if (H.I2 < 0.25) { level = "good"; head = "Nearly uniform"; }
+  else if (H.I2 < 0.75) { level = "warn"; head = "Moderately non-uniform"; }
+  else { level = "bad"; head = "Strongly non-uniform"; }
+  const body = H.p >= 0.05
+    ? `The particle-to-particle spread of ${b}/G is what the measurement noise alone gives. Any real variation between particles is below a CV of ${pct(H.tauHi / H.mu)} (upper 95 % limit).`
+    : `${pct(H.I2)} of the particle-to-particle spread of ${b}/G is real (I², p ${pFmt(H.p)}); the rest is measurement noise. Between particles the coating index varies with a CV of ${pct(cv)} (95 % CI ${pct(H.tauLo / H.mu)}–${pct(H.tauHi / H.mu)}) around ${fmt(H.mu, 3)}.`;
+  const more = [`${b} is detected in ${pct(C.nC / C.n)} of the quantified particles (${fmt(C.nC)} of ${fmt(C.n)}).`];
+  if (C.nC / C.n < 0.2) more.push(`That is few: these numbers rest mostly on noise, and a longer acquisition per particle would tell more.`);
+  if (C.drift) more.push(`${b}/G also drifts along the particle order (ρ = ${C.rho.toFixed(2)}, from ${fmt(C.ends[0], 3)} to ${fmt(C.ends[1], 3)}). The drift is removed before the numbers above (without removing it: CV ${pct(C.raw.tau / C.raw.mu)}, I² ${pct(C.raw.I2)}). Check the instrument (laser power, focus, background) before reading it as a property of the sample.`);
+  if (C.moran && C.moran.p < 0.05 && C.moran.I > 0.05) more.push(`Neighbouring particles are ${C.moran.I < 0.2 ? "slightly " : ""}more alike than chance (Moran's I ${C.moran.I.toFixed(2)}): ${C.moran.I < 0.2 ? "a small" : "a"} part of the variation is across the sample rather than from particle to particle.`);
+  if (Number.isFinite(C.rhoSize) && (C.rhoSizeCI[0] > 0 || C.rhoSizeCI[1] < 0)) more.push(`${b}/G ${C.rhoSize > 0 ? "rises" : "falls"} with particle size (ρ = ${C.rhoSize.toFixed(2)}).`);
+  box.className = `verdict ${level}`;
+  box.replaceChildren(el("b", {}, head), el("div", {}, body), ...more.map(t => el("p", {}, t)));
+
+  $("#pf-coat-cards").replaceChildren(
+    card(`Mean ${b}/G`, fmt(H.mu, 3), `median ${fmt(median(C.use), 3)} · n = ${fmt(C.n)}`),
+    card("Particle-to-particle CV", pct(cv), `95 % CI ${pct(H.tauLo / H.mu)}–${pct(H.tauHi / H.mu)} · noise taken out`),
+    card("Real share of the spread", pct(H.I2), `I² · p ${pFmt(H.p)}`),
+    card("Spread seen vs noise", `${pct(H.sd / H.mean)} vs ${pct(H.noise / H.mean)}`, "CV of the values · what noise alone gives"),
+    card(`${b} detected`, `${fmt(C.nC)} of ${fmt(C.n)}`, `${pct(C.nC / C.n)} (95 % CI ${pct(wl)}–${pct(wh)})`),
+    card("Outside the noise band", `${pct(C.above / C.n)} above · ${pct(C.below / C.n)} below`, "2.5 % each if uniform"),
+    card("Drift along the particle order", Number.isFinite(C.rho) ? `ρ = ${C.rho.toFixed(2)}` : "–", C.drift ? `${fmt(C.ends[0], 3)} → ${fmt(C.ends[1], 3)}, removed` : "none found"),
+    card("Spatial clustering", C.moran ? `Moran's I ${C.moran.I.toFixed(2)}` : "–", C.moran ? `p ${pFmt(C.moran.p)} · ${C.moran.k} nearest neighbours` : ""),
+    card("With particle size", Number.isFinite(C.rhoSize) ? `ρ = ${C.rhoSize.toFixed(2)}` : "–", Number.isFinite(C.rhoSizeCI[0]) ? `95 % CI ${C.rhoSizeCI[0].toFixed(2)} to ${C.rhoSizeCI[1].toFixed(2)}` : ""));
+
+  $("#pf-coat-note").textContent =
+    `How: ${b}/G is each particle's coating index, with its standard error from the particle's own fit (the delta method on the fitted heights). ` +
+    `If the coating were the same on every particle, the values would scatter only by those errors; Cochran's Q tests that, I² is the share of the spread beyond them, ` +
+    `and the CV is the SD of the true values between particles (Paule-Mandel, with its Q-profile 95 % interval) over their mean. ` +
+    (C.drift ? `A drift along the particle order is removed first (running median of ${C.w} particles). ` : "") +
+    `Limits: ParticleFinder records one spot per particle, so this compares particles; coverage within one particle needs a map of it. ` +
+    `${b}/G rises with the amount of amorphous carbon in the probed volume but not in proportion to its thickness, so compare samples measured the same way.`;
+}
+
+function drawCoatPlot(A, kind) {
+  const C = A.coat;
+  if (!C) { const ax = pfAxes(pfDistHost, [0, 1], [0, 1], {}); if (ax) { ax.ctx.fillStyle = T.label; ax.ctx.textAlign = "center"; ax.ctx.fillText("No coating band to analyse", ax.W / 2, ax.H / 2 - 10); } return; }
+  const H = C.H, CC = COAT_COLOURS(), b = C.band, alpha = Math.max(0.2, Math.min(0.8, 400 / C.n));
+  const qs = a => Float64Array.from(a).filter(Number.isFinite).sort();
+  if (kind === "funnel") {
+    $("#pf-dist-note").textContent = `inside the funnel: what one uniform coating would give${C.drift ? " · drift removed" : ""}`;
+    const sx = qs(C.sR), sy = qs(C.use), xmax = quantileSorted(sx, 0.995) * 1.05 || 1;
+    const ylo = Math.min(quantileSorted(sy, 0.005), H.mu - 1.96 * xmax), yhi = Math.max(quantileSorted(sy, 0.995), H.mu + 1.96 * xmax);
+    const ax = pfAxes(pfDistHost, [0, xmax], [ylo, yhi], { xlabel: `Standard error of ${b}/G`, ylabel: `${b}/G` }); if (!ax) return;
+    const { ctx, X, Y } = ax;
+    ctx.save(); ctx.beginPath(); ctx.rect(ax.L, ax.Tp, ax.W - ax.L - ax.R, ax.H - ax.Tp - ax.B); ctx.clip();
+    ctx.globalAlpha = alpha;
+    C.Q.forEach((p, i) => { ctx.fillStyle = CC[C.cat[p]]; ctx.fillRect(X(C.sR[i]) - 1.3, Y(C.use[i]) - 1.3, 2.6, 2.6); });
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = T.strong; ctx.lineWidth = 1.6; ctx.beginPath();
+    ctx.moveTo(X(0), Y(H.mu)); ctx.lineTo(X(xmax), Y(H.mu + 1.96 * xmax)); ctx.moveTo(X(0), Y(H.mu)); ctx.lineTo(X(xmax), Y(H.mu - 1.96 * xmax)); ctx.stroke();
+    ctx.setLineDash([5, 4]); ctx.strokeStyle = T.label; ctx.beginPath();
+    for (const s of [1, -1]) for (let i = 0; i <= 40; i++) { const x = xmax * i / 40, y = H.mu + s * 1.96 * Math.sqrt(x * x + H.tau * H.tau); if (i) ctx.lineTo(X(x), Y(y)); else ctx.moveTo(X(x), Y(y)); }
+    ctx.stroke(); ctx.setLineDash([]);
+    ctx.restore();
+    ctx.font = font(11, "bold"); ctx.textAlign = "left"; ctx.textBaseline = "top";
+    [[`above · ${pct(C.above / C.n)}`, CC[2]], [`within · ${pct(C.within / C.n)}`, CC[1]], [`below · ${pct(C.below / C.n)}`, CC[0]]].forEach(([t, col], i) => { ctx.fillStyle = col; ctx.fillText(t, ax.L + 8, ax.Tp + 4 + i * 15); });
+    ctx.fillStyle = T.label; ctx.font = font(10); ctx.fillText("solid: noise only · dashed: with the real spread", ax.L + 8, ax.Tp + 50);
+    return;
+  }
+  if (kind === "order") {
+    $("#pf-dist-note").textContent = `measured values, running median of ${C.w}${C.drift ? ": a drift" : ""}`;
+    const sy = qs(C.R), ylo = quantileSorted(sy, 0.005), yhi = quantileSorted(sy, 0.995);
+    const ax = pfAxes(pfDistHost, [1, S.nx], [ylo, yhi], { xlabel: "Particle number (the order measured)", ylabel: `${b}/G` }); if (!ax) return;
+    const { ctx, X, Y } = ax;
+    ctx.save(); ctx.beginPath(); ctx.rect(ax.L, ax.Tp, ax.W - ax.L - ax.R, ax.H - ax.Tp - ax.B); ctx.clip();
+    ctx.globalAlpha = alpha;
+    C.Q.forEach((p, i) => { ctx.fillStyle = CC[C.cat[p]]; ctx.fillRect(X(p + 1) - 1.2, Y(C.R[i]) - 1.2, 2.4, 2.4); });
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = T.strong; ctx.lineWidth = 2.2; ctx.beginPath();
+    C.Q.forEach((p, i) => (i ? ctx.lineTo(X(p + 1), Y(C.trend[i])) : ctx.moveTo(X(p + 1), Y(C.trend[i]))));
+    ctx.stroke(); ctx.restore();
+    return;
+  }
+  // deviations from the mean in units of each particle's own error: N(0, 1) if uniform
+  const lim = 6, nb = 48, h = new Float64Array(nb);
+  let ss = 0; for (const z of C.zdev) { ss += z * z; const k = Math.floor((z + lim) / (2 * lim) * nb); if (k >= 0 && k < nb) h[k]++; }
+  const sdz = Math.sqrt(ss / C.zdev.length), bw = 2 * lim / nb, dens = Array.from(h, c => c / (C.zdev.length * bw));
+  $("#pf-dist-note").textContent = `SD ${sdz.toFixed(2)}: 1 if the coating were uniform`;
+  const ymax = Math.max(0.42, ...dens) * 1.1;
+  const ax = pfAxes(pfDistHost, [-lim, lim], [0, ymax], { xlabel: `(${b}/G − mean) / its standard error`, ylabel: "Density" }); if (!ax) return;
+  const { ctx, X, Y } = ax;
+  ctx.fillStyle = PARTICLE_COLOURS[0]; ctx.globalAlpha = 0.45;
+  dens.forEach((d, k) => { const x0 = -lim + k * bw; ctx.fillRect(X(x0) + 0.5, Y(d), Math.max(1, X(x0 + bw) - X(x0) - 1), Y(0) - Y(d)); });
+  ctx.globalAlpha = 1; ctx.strokeStyle = T.strong; ctx.lineWidth = 2; ctx.beginPath();
+  for (let i = 0; i <= 120; i++) { const z = -lim + 2 * lim * i / 120, y = Math.exp(-z * z / 2) / Math.sqrt(2 * Math.PI); if (i) ctx.lineTo(X(z), Y(y)); else ctx.moveTo(X(z), Y(y)); }
+  ctx.stroke();
+  ctx.font = font(11, "bold"); ctx.textAlign = "left"; ctx.textBaseline = "top"; ctx.fillStyle = T.strong;
+  ctx.fillText("curve: one uniform coating", ax.L + 8, ax.Tp + 4);
+}
+
+for (const id of ["#pf-kd", "#pf-kq", "#pf-coat-band", "#pf-colour", "#pf-pop-ratio", "#pf-pop-mode", "#pf-cut1", "#pf-cut2", "#pf-laser"]) $(id).addEventListener("change", () => { if (S.points && S.fit) renderPF(); });
 $("#pf-dist").onchange = () => drawPfDist();
 $("#pf-csv").onclick = () => {
   if (!S.points || !S.fit) return;
   const A = pfAnalysis(), pts = S.points, ratio = A.ratio;
   const jG = S.fit.names.findIndex(b => b.toLowerCase() === "g"), m = S.fit.m;
   const num = v => (Number.isFinite(v) ? String(+(+v).toPrecision(6)) : "");
-  const rows = [["Particle", "X (um)", "Y (um)", "Diameter (um)", "Volume (um3)", "G signal/noise", "G on a bound", "Carbon detected", "Quantified",
-    "Population", `${A.rlab} intensity`, "G width (cm-1)", "G position (cm-1)", "A_D1/A_G", "La (nm)"]];
+  const C = A.coat, ci = C ? new Map(C.Q.map((p, i) => [p, i])) : new Map(), cb = C ? C.band : "coating";
+  const rows = [["Particle", "X (um)", "Y (um)", "Diameter (um)", "Volume (um3)", "G signal/noise", "G height/SE", "G on a bound", "Carbon detected", "Quantified",
+    "Population", `${A.rlab} intensity`, "G width (cm-1)", "G position (cm-1)", "A_D1/A_G", "La (nm)",
+    `${cb}/G`, `${cb}/G SE`, `${cb} height/SE`, `${cb}/G against the noise band`]];
   for (let p = 0; p < S.nx; p++) {
     const aD = A.jD >= 0 ? S.fit.area[p * m + A.jD] : NaN, aG = jG >= 0 ? S.fit.area[p * m + jG] : NaN;
-    rows.push([String(p + 1), num(pts.x[p]), num(pts.y[p]), num(pts.ecd[p]), num(pts.volume[p]), num(A.snr[p]), A.atBound[p] ? "yes" : "no",
+    rows.push([String(p + 1), num(pts.x[p]), num(pts.y[p]), num(pts.ecd[p]), num(pts.volume[p]), num(A.snr[p]), num(A.zG[p]), A.atBound[p] ? "yes" : "no",
       A.det[p] ? "yes" : "no", A.quant[p] ? "yes" : "no", A.label[p] >= 0 && A.k ? A.pops[A.label[p]].name : "",
-      ratio ? num(ratio[p]) : "", jG >= 0 ? num(S.fit.width[p * m + jG]) : "", jG >= 0 ? num(S.fit.position[p * m + jG]) : "", num(aD / aG), num(A.la[p])]);
+      ratio ? num(ratio[p]) : "", jG >= 0 ? num(S.fit.width[p * m + jG]) : "", jG >= 0 ? num(S.fit.position[p * m + jG]) : "", num(aD / aG), num(A.la[p]),
+      ...(ci.has(p) ? [num(C.R[ci.get(p)]), num(C.sR[ci.get(p)]), num(C.zc[ci.get(p)]), ["below", "within", "above"][C.cat[p]]] : ["", "", "", ""])]);
   }
   download(`${S.ds.name}_particles.csv`, rows.map(r => r.join(",")).join("\n") + "\n", "text/csv");
 };

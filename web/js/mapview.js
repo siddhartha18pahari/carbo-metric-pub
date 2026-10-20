@@ -40,6 +40,7 @@ export class MapView {
     this.overlays = [];
     this.emptyText = null;           // shown over the map when it cannot have values
     this.categories = null;          // particles coloured by group: { index, colours, names }
+    this.profile = false;            // a particle list drawn as Q-Carbon does: value against particle number
     this.label = ""; this.unit = "";
 
     host.classList.add("mapview");
@@ -58,7 +59,8 @@ export class MapView {
       el("button", { class: "icon", title: "Display options", onclick: e => this.menu(e) }, "⚙"),
       el("button", { class: "icon", title: "Save as PNG", onclick: () => this.save() }, "⤓"),
       el("button", { class: "icon", title: "Enlarge", onclick: () => this.toggleMax() }, "⤢"));
-    this.head = el("div", { class: "map-head" }, this.titleEl, this.smoothBtn, this.readout);
+    this.viewBtn = el("button", { class: "map-chip", onclick: () => (opts.onProfile ? opts.onProfile(!this.profile) : this.setProfile(!this.profile)) });
+    this.head = el("div", { class: "map-head" }, this.titleEl, this.smoothBtn, this.viewBtn, this.readout);
     this._chip();
     this.canvas = el("canvas", { class: "map-canvas" });
     this.body = el("div", { class: "map-body" }, this.canvas, tools);     // tools float over the map
@@ -122,7 +124,7 @@ export class MapView {
   }
 
   _wheel(e) {
-    if (!this.plot || !this.ext) return;
+    if (!this.plot || !this.ext || this.profile) return;
     const r = this.canvas.getBoundingClientRect();
     const xu = this.x0 + (e.clientX - r.left - this.plot.x) / this.k, yu = this.y0 + (e.clientY - r.top - this.plot.y) / this.k;
     const f = Math.exp(Math.max(-1, Math.min(1, e.deltaY * 0.0015)));
@@ -131,7 +133,7 @@ export class MapView {
 
   _pan(e) {
     const d = this._drag;
-    if (!d || !(e.buttons & 1) || !this.zoomed()) return false;
+    if (!d || !(e.buttons & 1) || !this.zoomed() || this.profile) return false;
     const dx = e.clientX - d.x, dy = e.clientY - d.y;
     if (!this._dragged && Math.hypot(dx, dy) < 4) return false;
     this._dragged = true;
@@ -156,6 +158,40 @@ export class MapView {
     this.smoothBtn.classList.toggle("hidden", !!this.points);     // particles are drawn one by one
     this.smoothBtn.title = on ? "Smoothed for display (statistics, histograms and exports use the raw pixels). Click for raw pixels."
                               : "Raw pixels. Click to smooth the display (3 × 3 filter, interpolated pixels).";
+    this.viewBtn.textContent = this.profile ? "By particle" : "Stage view";
+    this.viewBtn.classList.toggle("on", this.profile);
+    this.viewBtn.classList.toggle("hidden", !this.points || !!this.opts.noProfile);
+    this.viewBtn.title = this.profile ? "Each particle's value against its number, as Q-Carbon shows a particle list. Click for the particles on the stage."
+                                      : "The particles at their stage positions. Click for each value against its particle number, as in Q-Carbon.";
+  }
+  setProfile(on) { this.profile = on; this._chip(); this.render(); }
+
+  // Q-Carbon's view of a particle list: each particle's value against its number
+  _renderProfile(ctx, W, H) {
+    const n = this.points.x.length, v = this.values, valid = this.valid;
+    const P = { x: 52, y: 8, w: Math.max(10, W - 52 - 12), h: Math.max(10, H - 8 - 32) };
+    this.plot = P;
+    ctx.fillStyle = T.bg; ctx.fillRect(P.x, P.y, P.w, P.h);
+    if (!v) return;
+    const lo = this.vmin, hi = this.vmax, X = i => P.x + (n > 1 ? i / (n - 1) : 0.5) * P.w, Y = y => P.y + (1 - (y - lo) / ((hi - lo) || 1)) * P.h;
+    ctx.font = font(11); ctx.textBaseline = "middle"; ctx.textAlign = "right";
+    for (const t of niceTicks(lo, hi, 5)) { ctx.fillStyle = T.grid; ctx.fillRect(P.x, Y(t), P.w, 1); ctx.fillStyle = T.ink; ctx.fillText(fmt(t, 3), P.x - 5, Y(t)); }
+    ctx.textAlign = "center"; ctx.textBaseline = "top";
+    for (const t of niceTicks(1, n, 6)) { if (t < 1 || t > n) continue; ctx.fillStyle = T.grid; ctx.fillRect(X(t - 1), P.y, 1, P.h); ctx.fillStyle = T.ink; ctx.fillText(fmt(t), X(t - 1), P.y + P.h + 4); }
+    ctx.fillStyle = T.label; ctx.fillText("Particle", P.x + P.w / 2, P.y + P.h + 17);
+    if (this.label) { ctx.save(); ctx.translate(13, P.y + P.h / 2); ctx.rotate(-Math.PI / 2); ctx.textBaseline = "middle"; ctx.fillText(this.label + (this.unit ? ` (${this.unit})` : ""), 0, 0); ctx.restore(); }
+    ctx.save(); ctx.beginPath(); ctx.rect(P.x, P.y, P.w, P.h); ctx.clip();
+    ctx.strokeStyle = T.fit; ctx.lineWidth = 1; ctx.beginPath();
+    let pen = false;
+    for (let i = 0; i < n; i++) {
+      const y = v[i];
+      if (!Number.isFinite(y) || (valid && !valid[i])) { pen = false; continue; }
+      if (pen) ctx.lineTo(X(i), Y(y)); else { ctx.moveTo(X(i), Y(y)); pen = true; }
+    }
+    ctx.stroke();
+    for (const [p, col] of [[this.cursor, T.hover], [this.pinned, T.pin]]) if (p != null) { ctx.strokeStyle = col; ctx.beginPath(); ctx.moveTo(X(p) + 0.5, P.y); ctx.lineTo(X(p) + 0.5, P.y + P.h); ctx.stroke(); }
+    ctx.restore();
+    ctx.strokeStyle = T.frame; ctx.strokeRect(P.x - 0.5, P.y - 0.5, P.w + 1, P.h + 1);
   }
 
   setGeometry({ nx, ny, x, y, points = null }) {
@@ -311,6 +347,7 @@ export class MapView {
     if (W < 20 || H < 20) return;
     const ctx = hidpi(this.canvas, W, H);
     this.ctx = ctx;
+    if (this.points && this.profile) { this._renderProfile(ctx, W, H); return; }
     const { l: padL, b: padB, t: padT, cb: cbW, cbPad } = PAD;
     const aw = W - padL - cbW - cbPad - 8, ah = H - padB - padT;
     const wu = this.x1 - this.x0, hu = this.y1 - this.y0;
@@ -460,6 +497,10 @@ export class MapView {
   _pick(e) {
     if (!this.plot) return null;
     const r = this.canvas.getBoundingClientRect();
+    if (this.points && this.profile) {
+      const P = this.plot, n = this.points.x.length, f = (e.clientX - r.left - P.x) / P.w;
+      return f < -0.01 || f > 1.01 ? null : Math.max(0, Math.min(n - 1, Math.round(f * (n - 1))));
+    }
     const xu = this.x0 + (e.clientX - r.left - this.plot.x) / this.k;
     const yu = this.y0 + (e.clientY - r.top - this.plot.y) / this.k;
     if (xu < this.x0 || xu > this.x1 || yu < this.y0 || yu > this.y1) return null;

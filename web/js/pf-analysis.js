@@ -3,6 +3,8 @@
 // quantiles and the crystallite size La. Pure functions (no DOM), so they run
 // under Node for the tests.
 
+import { pinvSym, erf } from "./engine/core.js";
+
 // a seeded generator, so a bootstrap or a mixture fit gives the same answer twice
 export function rng(seed = 1) {
   let a = seed >>> 0;
@@ -199,4 +201,146 @@ export function bootstrapShares(labels, weights, k, { B = 500, seed = 7, conf = 
   }
   const a = (1 - conf) / 2;
   return draws.map((d, c) => { d.sort(); return [point[c] / tot, quantileSorted(d, a), quantileSorted(d, 1 - a)]; });
+}
+
+// --------------------------------------------------------------------------
+// Uncertainty of each particle's fitted bands, and whether a coating is uniform
+// --------------------------------------------------------------------------
+
+// Covariance of the fitted band heights of every spectrum, from the model
+// linearised at its solution: Cov = σ² (JᵀJ)⁺ over the parameters the fit
+// moves (the baseline coefficients, every height, and the position and width
+// of each band neither held nor on a bound); σ is the spectrum's residual
+// (its std error). A broad band's height is then judged against everything
+// under it, not against the noise of one channel. Returns P m x m blocks,
+// row-major, NaN for spectra without a fit.
+export function heightCovariances(fit, cfg, wn) {
+  const [lo, hi] = fit.range, nu = Float64Array.from(wn).filter(v => v >= lo && v <= hi);
+  const N = nu.length, m = fit.m, P = fit.std_error.length;
+  const nb = cfg.fit_separately ? 0 : cfg.baseline_order + 1, mid = 0.5 * (lo + hi), half = 0.5 * (hi - lo);
+  const held = new Set(fit.held || []);
+  const shapeFree = cfg.peaks.map(p => p.fit !== false && !cfg.skip_fitting && !held.has(p.name));
+  const lorentz = fit.shapes.map(s => s === "Lorentz"), G4 = 2.772588722239781;
+  const out = new Float64Array(P * m * m).fill(NaN);
+  const maxQ = nb + 3 * m, J = new Float64Array(N * maxQ), JtJ = new Float64Array(maxQ * maxQ);
+  const onBound = (v, a, b) => Math.abs(v - a) <= 1e-6 * (b - a) || Math.abs(v - b) <= 1e-6 * (b - a);
+  for (let p = 0; p < P; p++) {
+    const sigma = fit.std_error[p];
+    if (!(sigma > 0)) continue;
+    // the columns of J, in order: baseline, then per band its height and any free shape
+    const cols = [], hcol = new Int32Array(m);
+    for (let k = 0; k < nb; k++) cols.push(n => ((nu[n] - mid) / half) ** k);
+    for (let j = 0; j < m; j++) {
+      const A = fit.intensity[p * m + j], c = fit.position[p * m + j], w = fit.width[p * m + j], pk = cfg.peaks[j];
+      const L = lorentz[j];
+      hcol[j] = cols.length;
+      cols.push(n => { if (L) { const u = 2 * (nu[n] - c) / w; return 1 / (1 + u * u); } const v = (nu[n] - c) / w; return Math.exp(-G4 * v * v); });
+      if (!shapeFree[j]) continue;
+      if (!onBound(c, pk.pos_min, pk.pos_max)) cols.push(n => {
+        if (L) { const u = 2 * (nu[n] - c) / w, d = 1 + u * u; return A * (-2 * u / (d * d)) * (-2 / w); }
+        const v = (nu[n] - c) / w, e = Math.exp(-G4 * v * v); return A * (-2 * G4 * v * e) * (-1 / w);
+      });
+      if (!onBound(w, pk.width_min, pk.width_max)) cols.push(n => {
+        if (L) { const u = 2 * (nu[n] - c) / w, d = 1 + u * u; return A * (-2 * u / (d * d)) * (-u / w); }
+        const v = (nu[n] - c) / w, e = Math.exp(-G4 * v * v); return A * (-2 * G4 * v * e) * (-v / w);
+      });
+    }
+    const q = cols.length;
+    for (let a = 0; a < q; a++) for (let n = 0; n < N; n++) J[n * q + a] = cols[a](n);
+    JtJ.fill(0, 0, q * q);
+    for (let n = 0; n < N; n++) for (let a = 0; a < q; a++) {
+      const ja = J[n * q + a]; if (ja === 0) continue;
+      for (let b = a; b < q; b++) JtJ[a * q + b] += ja * J[n * q + b];
+    }
+    for (let a = 0; a < q; a++) for (let b = 0; b < a; b++) JtJ[a * q + b] = JtJ[b * q + a];
+    const inv = pinvSym(JtJ.subarray(0, q * q), q), s2 = sigma * sigma, o = p * m * m;
+    for (let a = 0; a < m; a++) for (let b = 0; b < m; b++) out[o + a * m + b] = s2 * inv[hcol[a] * q + hcol[b]];
+  }
+  return out;
+}
+
+// variance of the ratio of two heights A_n / A_d by the delta method, valid at A_n = 0
+export function ratioVariance(cov, o, m, jn, jd, An, Ad) {
+  const R = An / Ad, vnn = cov[o + jn * m + jn], vdd = cov[o + jd * m + jd], vnd = cov[o + jn * m + jd];
+  return (vnn - 2 * R * vnd + R * R * vdd) / (Ad * Ad);
+}
+
+const normCdf = z => 0.5 * (1 + erf(z / Math.SQRT2));
+// chi-square: upper tail and quantile by the Wilson-Hilferty cube-root normal
+// approximation (good to a few per cent of p for df >= 3, better as df grows)
+export function chi2Upper(x, df) {
+  if (!(df > 0)) return NaN;
+  const h = 2 / (9 * df);
+  return 1 - normCdf((Math.cbrt(x / df) - (1 - h)) / Math.sqrt(h));
+}
+export function chi2Quantile(z, df) { const h = 2 / (9 * df); return df * Math.max(0, 1 - h + z * Math.sqrt(h)) ** 3; }
+
+// Are many measurements of one quantity, each with its own standard error,
+// consistent with a single true value? Cochran's Q, I² (Higgins and Thompson,
+// Stat. Med. 21, 1539, 2002), and the SD tau of the true values between items:
+// the Paule-Mandel estimate (Q(tau²) = n - 1) with its Q-profile 95 % interval
+// (Viechtbauer, Stat. Med. 26, 37, 2007), which agree by construction; the
+// DerSimonian-Laird moment estimate can fall outside that interval when the
+// errors differ widely between items.
+export function heterogeneity(y, se) {
+  const idx = []; for (let i = 0; i < y.length; i++) if (Number.isFinite(y[i]) && se[i] > 0) idx.push(i);
+  const n = idx.length, df = n - 1;
+  if (n < 3) return null;
+  const Qat = t2 => {
+    let sw = 0, swy = 0; for (const i of idx) { const w = 1 / (se[i] ** 2 + t2); sw += w; swy += w * y[i]; }
+    const mu = swy / sw; let Q = 0; for (const i of idx) Q += (y[i] - mu) ** 2 / (se[i] ** 2 + t2);
+    return { Q, mu, seMu: Math.sqrt(1 / sw) };
+  };
+  const { Q, mu: mu0 } = Qat(0);
+  const solve = c => {                              // tau² with Q(tau²) = c (Q falls as tau² grows)
+    if (Qat(0).Q <= c) return 0;
+    let a = 0, b = 1;
+    let vy = 0; for (const i of idx) vy += (y[i] - mu0) ** 2; b = Math.max(1e-30, 10 * vy / n);
+    while (Qat(b).Q > c) b *= 4;
+    for (let it = 0; it < 100; it++) { const h = 0.5 * (a + b); if (Qat(h).Q > c) a = h; else b = h; }
+    return 0.5 * (a + b);
+  };
+  const tau2 = solve(df), lo = solve(chi2Quantile(1.959964, df)), hi = solve(chi2Quantile(-1.959964, df));
+  const re = Qat(tau2);
+  // the plain spread, and the part of it that the standard errors account for
+  let s = 0, s2 = 0, ms = 0; for (const i of idx) { s += y[i]; s2 += y[i] ** 2; ms += se[i] ** 2; }
+  const mean = s / n, sd = Math.sqrt(Math.max(0, (s2 - n * mean * mean) / (n - 1))), noise = Math.sqrt(ms / n);
+  return { n, df, Q, p: chi2Upper(Q, df), I2: Q > df ? (Q - df) / Q : 0, tau: Math.sqrt(tau2), tauLo: Math.sqrt(lo), tauHi: Math.sqrt(hi),
+           mu: re.mu, seMu: re.seMu, muFixed: mu0, mean, sd, noise };
+}
+
+// Moran's I of values at scattered positions, with each point's k nearest
+// neighbours weighted equally (row-standardised), and a one-sided permutation
+// p for clustering (like next to like). Near -1/(n-1) when values are placed at random.
+export function moranI(v, x, y, { k = 6, perms = 199, seed = 3 } = {}) {
+  const idx = []; for (let i = 0; i < v.length; i++) if (Number.isFinite(v[i]) && Number.isFinite(x[i]) && Number.isFinite(y[i])) idx.push(i);
+  const n = idx.length; if (n < k + 2) return null;
+  const nbr = new Int32Array(n * k), bd = new Float64Array(k);
+  for (let a = 0; a < n; a++) {
+    bd.fill(Infinity); const ia = idx[a];
+    for (let b = 0; b < n; b++) {
+      if (b === a) continue;
+      const d = (x[idx[b]] - x[ia]) ** 2 + (y[idx[b]] - y[ia]) ** 2;
+      if (d >= bd[k - 1]) continue;
+      let s = k - 1; while (s > 0 && bd[s - 1] > d) { bd[s] = bd[s - 1]; nbr[a * k + s] = nbr[a * k + s - 1]; s--; }
+      bd[s] = d; nbr[a * k + s] = b;
+    }
+  }
+  const z = new Float64Array(n); let m = 0; for (let a = 0; a < n; a++) m += v[idx[a]]; m /= n;
+  let ss = 0; for (let a = 0; a < n; a++) { z[a] = v[idx[a]] - m; ss += z[a] * z[a]; }
+  const stat = zz => { let s = 0; for (let a = 0; a < n; a++) { let t = 0; for (let j = 0; j < k; j++) t += zz[nbr[a * k + j]]; s += zz[a] * t / k; } return s / ss; };
+  const I = stat(z), R = rng(seed), perm = Float64Array.from(z);
+  let ge = 0;
+  for (let t = 0; t < perms; t++) {
+    for (let i = n - 1; i > 0; i--) { const j = Math.floor(R() * (i + 1)); const tmp = perm[i]; perm[i] = perm[j]; perm[j] = tmp; }
+    if (stat(perm) >= I) ge++;
+  }
+  return { I, expected: -1 / (n - 1), p: (ge + 1) / (perms + 1), n, k };
+}
+
+// Spearman's rho with a 95 % interval from Fisher's z (SE 1.03 / sqrt(n - 3), Fieller et al. 1957)
+export function spearmanCI(rho, n) {
+  if (!Number.isFinite(rho) || n < 5) return [NaN, NaN];
+  const z = Math.atanh(Math.max(-0.999999, Math.min(0.999999, rho))), h = 1.959964 * 1.03 / Math.sqrt(n - 3);
+  return [Math.tanh(z - h), Math.tanh(z + h)];
 }
