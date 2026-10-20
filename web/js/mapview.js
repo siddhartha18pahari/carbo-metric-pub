@@ -45,12 +45,20 @@ export class MapView {
     this.titleEl = el("button", { class: "map-title", title: "Choose what this map shows" });
     this.titleEl.addEventListener("click", e => opts.onTitle && opts.onTitle(this, e));
     this.readout = el("span", { class: "map-readout" });
+    // one click between smoothed and raw pixels (display only)
+    this.smoothBtn = el("button", { class: "map-chip", onclick: () => {
+      this.setSmoothing(this.smoothed() ? { filter: "none", smooth: false } : { filter: "gauss3", smooth: true });
+      this.render();
+      opts.onSmoothChange && opts.onSmoothChange(this);
+      opts.onChange && opts.onChange(this);
+    } });
     const tools = el("div", { class: "map-tools" },
       this.resetBtn = el("button", { class: "icon hidden", title: "Show the whole map (or double-click the map)", onclick: () => this.setView(null, true) }, "⟲"),
       el("button", { class: "icon", title: "Display options", onclick: e => this.menu(e) }, "⚙"),
       el("button", { class: "icon", title: "Save as PNG", onclick: () => this.save() }, "⤓"),
       el("button", { class: "icon", title: "Enlarge", onclick: () => this.toggleMax() }, "⤢"));
-    this.head = el("div", { class: "map-head" }, this.titleEl, this.readout);
+    this.head = el("div", { class: "map-head" }, this.titleEl, this.smoothBtn, this.readout);
+    this._chip();
     this.canvas = el("canvas", { class: "map-canvas" });
     this.body = el("div", { class: "map-body" }, this.canvas, tools);     // tools float over the map
     host.append(this.head, this.body);
@@ -130,9 +138,25 @@ export class MapView {
     return true;
   }
 
+  // display smoothing: a filter over valid neighbours and/or interpolated pixels
+  smoothed() { return this.filter !== "none" || this.smooth; }
+  setSmoothing({ filter, smooth }) {
+    if (filter !== this.filter) { this.filter = filter; this._shownCache = null; if (this.values) this._range(); this._dirty = true; }
+    this.smooth = smooth;
+    this._chip();
+  }
+  _chip() {
+    const on = this.smoothed();
+    this.smoothBtn.textContent = on ? "Smooth" : "Raw";
+    this.smoothBtn.classList.toggle("on", on);
+    this.smoothBtn.classList.toggle("hidden", !!this.points);     // particles are drawn one by one
+    this.smoothBtn.title = on ? "Smoothed for display (statistics, histograms and exports use the raw pixels). Click for raw pixels."
+                              : "Raw pixels. Click to smooth the display (3 × 3 filter, interpolated pixels).";
+  }
+
   setGeometry({ nx, ny, x, y, points = null }) {
     this.nx = nx; this.ny = ny; this.x = x; this.y = y;
-    this.points = points; this._ptsCache = null;
+    this.points = points; this._ptsCache = null; this._chip();
     this._dirty = true;
     if (points) {
       // extent of all particles plus a margin; "pixel" size = median diameter
@@ -461,11 +485,16 @@ export class MapView {
       lo.value = +this.vmin.toPrecision(4); hi.value = +this.vmax.toPrecision(4);
     };
     mode.onchange = apply; lo.onchange = () => { mode.value = "manual"; apply(); }; hi.onchange = lo.onchange;
-    const smooth = el("input", { type: "checkbox", checked: this.smooth, onchange: () => { this.smooth = smooth.checked; this.render(); } });
+    const smooth = el("input", { type: "checkbox", checked: this.smooth, onchange: () => {
+      this.smooth = smooth.checked; this._chip(); this.render(); this.opts.onSmoothChange && this.opts.onSmoothChange(this);
+    } });
     const filter = el("select", { title: "Filter the map over its valid neighbours. Display and PNG only: statistics, histograms and exports use the raw pixels." },
       ...[["none", "None"], ["gauss3", "Gaussian 3 × 3"], ["gauss5", "Gaussian 5 × 5"], ["median3", "Median 3 × 3"], ["median5", "Median 5 × 5"]]
         .map(([v, t]) => el("option", { value: v, selected: v === this.filter }, t)));
-    filter.onchange = () => { this.filter = filter.value; this._range(); this._dirty = true; this.render(); this.opts.onChange && this.opts.onChange(this); };
+    filter.onchange = () => {
+      this.filter = filter.value; this._range(); this._dirty = true; this._chip(); this.render();
+      this.opts.onSmoothChange && this.opts.onSmoothChange(this); this.opts.onChange && this.opts.onChange(this);
+    };
     const pop = el("div", { class: "popover", onclick: ev => ev.stopPropagation() },
       el("div", { class: "pop-h" }, "Colour map"), sel,
       el("div", { class: "pop-h" }, "Scale"), mode, el("div", { class: "row2" }, lo, hi),

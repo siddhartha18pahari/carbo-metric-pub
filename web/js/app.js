@@ -105,6 +105,7 @@ const maps = [0, 1, 2, 3].map(i => new MapView($(`#map-${i}`), {
   onPick: p => { setPinned(p); setActive(i); },
   onChange: () => { if (S.active === i) { renderHist(); renderVideo(); } },
   onView: (v, src) => { for (const m of maps) if (m !== src) m.setView(v ? { ...v } : null); renderVideo(); },
+  onSmoothChange: rememberSmoothing,
 }));
 maps.forEach((mv, i) => mv.host.addEventListener("mousedown", () => setActive(i)));
 
@@ -117,8 +118,22 @@ function zoomToPoint(p) {
 }
 maps[3].cmap = "Inferno";
 
+// D1-D4 are weak bands, noisy pixel to pixel: drawn with a light 3 x 3 filter
+// and interpolated pixels by default (display only); G, ratios and the error
+// as measured. A map's Smooth/Raw chip or its display menu overrides this,
+// remembered per map and band.
+const WEAK_BAND = /^D\d/i;
+S.smoothPick = {};
+function applySmoothing(mv, key, band) {
+  mv.smoothKey = key;
+  mv.setSmoothing(S.smoothPick[key] || (band && WEAK_BAND.test(band) ? { filter: "gauss3", smooth: true } : { filter: "none", smooth: false }));
+}
+function rememberSmoothing(mv) { if (mv.smoothKey) S.smoothPick[mv.smoothKey] = { filter: mv.filter, smooth: mv.smooth }; }
+
 function renderMap(i) {
-  const mv = maps[i], r = resolve(S.specs[i]);
+  const mv = maps[i], r = resolve(S.specs[i]), spec = S.specs[i];
+  const band = ["num", "den", "peak"].includes(spec.kind) ? peakOf(spec) : null;
+  applySmoothing(mv, `${i}:${band || spec.kind}`, band);
   mv.setTitle(r.title);
   mv.emptyText = S.fit && S.fit.resultsOnly && S.specs[i].kind === "error"
     ? "Not in this file: Q-Carbon's export has no error. Fit the map (.l6m) to get it." : null;
@@ -692,7 +707,7 @@ async function loadDataset(info) {
   $("#spec-name").textContent = S.points ? `${fmt(info.nx)} particles · ${info.k} ch`
     : `${info.nx} × ${info.ny} · ${info.k} ch${info.missing ? ` · ${info.missing} not measured` : ""}`;
   document.title = `${info.name} · Carbo Metrics`;
-  $("#welcome").classList.add("hidden");
+  $("#welcome").classList.add("hidden"); document.body.classList.remove("no-data");
   setStatus("Loading spectra…", "busy");
   S.cube = new Float32Array(await api(`/api/ds/${info.id}/cube`));
   S.video = null;
@@ -818,7 +833,7 @@ async function loadResults(grid) {
   $("#file-name").textContent = info.name;
   $("#spec-name").textContent = `${info.nx} × ${info.ny} · fitted values, no spectra`;
   document.title = `${info.name} · Carbo Metrics`;
-  $("#welcome").classList.add("hidden");
+  $("#welcome").classList.add("hidden"); document.body.classList.remove("no-data");
   S.video = null;
   if (r.video) {
     const img = new Image();
@@ -1194,6 +1209,7 @@ async function openMany(groups, tables) {
 // the same map of up to four files, side by side
 const cmpMaps = [0, 1, 2, 3].map(i => new MapView($(`#cmp-${i}`), {
   onTitle: mv => { const f = fileOf(mv.fileId); if (f) openFile(f); },
+  onSmoothChange: mv => { rememberSmoothing(mv); renderCompare(); },    // compared maps look alike
 }));
 cmpMaps.forEach(mv => { mv.titleEl.title = "Open this file on the Carbon fit tab"; });
 function fillCmpQ() {
@@ -1232,6 +1248,8 @@ function renderCompare() {
       mv.fileId = f.id;
     }
     mv.setTitle(escHTML(f.name));
+    const band = q === "num-i" ? S.cfg.ratio_num : q === "den-i" ? S.cfg.ratio_den : null;
+    applySmoothing(mv, `cmp:${band || q}`, band);
     mv.emptyText = v ? null : `This fit has no ${S.cfg.ratio_num} or ${S.cfg.ratio_den} band`;
     if (v) mv.setData(v.values, { valid: v.valid, label, unit, fixedRange: range });
     else mv.render();
