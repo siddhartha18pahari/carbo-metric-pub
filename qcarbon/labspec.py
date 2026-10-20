@@ -25,6 +25,7 @@ overlay on the optical image it is not.
 from __future__ import annotations
 
 import bisect
+import math
 import os
 import struct
 from dataclasses import dataclass, field
@@ -256,13 +257,58 @@ def read_l6m(path: str) -> RamanMap:
 # instrument (a 4575-particle project: seven rows of LabSpec's own Results table, matched on
 # their "Red cursor" value, agree on all four morphology columns at the same
 # index, so record k describes spectrum k):
-PF_FIELDS = {"x": 0, "y": 1, "area": 2, "ecd": 3, "min_diam": 11, "convexity": 15,
+PF_FIELDS = {"x": 0, "y": 1, "area": 2, "ecd": 3, "feret_max": 10, "min_diam": 11, "convexity": 15,
              "elongation": 16, "volume": 18, "xmin": 19, "ymin": 20, "xmax": 21, "ymax": 22,
              "cls": 23}
 PF_LABELS = {"ecd": ("Diameter (circle equiv.)", "µm"), "area": ("Area", "µm²"),
              "min_diam": ("Min diameter", "µm"), "convexity": ("Convexity", ""),
              "elongation": ("Elongation", "%"), "volume": ("Volume", "µm³")}
 _PF_REC = 24          # floats per particle record
+
+
+def _pf_angles(pts: dict, video: "VideoImage | None") -> np.ndarray:
+    r"""The tilt of each particle's long axis, in radians from +X towards +Y
+    (stage coordinates). The table has no angle, but it has the Feret length
+    and width and the bounding box: an ellipse of those axes at tilt t has a
+    box of half sides sqrt(a² cos² t + b² sin² t) and sqrt(a² sin² t + b² cos² t),
+    which gives |t|. Which way it leans (/ or \) comes from the mosaic: the sign
+    of the covariance of x and y over the box's pixels, each weighted by how far
+    it is from the background around the box. The sums are integers, so both
+    readers agree exactly. Round particles (length under 1.05 x width) get 0."""
+    P = pts["x"].size
+    out = np.zeros(P)
+    if video is not None:
+        H, W = video.rgb.shape[:2]
+        x0, y0 = float(video.x[0]), float(video.y[0])
+        dx, dy = float(video.x[1]) - x0, float(video.y[1]) - y0
+        col = lambda v: min(W - 1, max(0, math.floor((v - x0) / dx + 0.5)))
+        row = lambda v: min(H - 1, max(0, math.floor((v - y0) / dy + 0.5)))
+    for p in range(P):
+        L, D = float(pts["feret_max"][p]), float(pts["min_diam"][p])
+        if not (D > 0 and L > 1.05 * D):
+            continue
+        a2, b2 = L * L / 4, D * D / 4
+        hw, hh = (pts["xmax"][p] - pts["xmin"][p]) / 2, (pts["ymax"][p] - pts["ymin"][p]) / 2
+        c2 = min(1.0, max(0.0, ((hw * hw - b2) / (a2 - b2) + 1 - (hh * hh - b2) / (a2 - b2)) / 2))
+        t = math.acos(math.sqrt(c2))
+        if video is not None:
+            qa, qb, ra, rb = col(pts["xmin"][p]), col(pts["xmax"][p]), row(pts["ymin"][p]), row(pts["ymax"][p])
+            q0, q1 = max(0, min(qa, qb) - 1), min(W - 1, max(qa, qb) + 1)
+            r0, r1 = max(0, min(ra, rb) - 1), min(H - 1, max(ra, rb) + 1)
+            R0, R1, Q0, Q1 = max(0, r0 - 2), min(H - 1, r1 + 2), max(0, q0 - 2), min(W - 1, q1 + 2)
+            outer = np.ones((R1 - R0 + 1, Q1 - Q0 + 1), bool)          # the background: two pixels around the box
+            outer[r0 - R0:r1 - R0 + 1, q0 - Q0:q1 - Q0 + 1] = False
+            I = video.rgb[R0:R1 + 1, Q0:Q1 + 1].astype(np.int64).sum(axis=2)
+            ring = np.sort(I[outer])
+            if ring.size:
+                bg = int(ring[(ring.size - 1) // 2])
+                w = np.abs(I[r0 - R0:r1 - R0 + 1, q0 - Q0:q1 - Q0 + 1] - bg)
+                v, u = np.mgrid[0:r1 - r0 + 1, 0:q1 - q0 + 1]
+                sw, sq, sr, sqr = int(w.sum()), int((w * u).sum()), int((w * v).sum()), int((w * u * v).sum())
+                c = sw * sqr - sq * sr                # sw² x the covariance, in pixel steps
+                t = -t if (c < 0) != (dx * dy < 0) else t
+        out[p] = t
+    return out
 
 
 def _pf_table(raw: bytes, P: int, lo: int, hi: int) -> int | None:
@@ -356,6 +402,7 @@ def read_l6pf(path: str) -> tuple[RamanMap, VideoImage | None]:
               & (pts["y"] >= pts["ymin"] - 1e-3) & (pts["y"] <= pts["ymax"] + 1e-3))
     if inside.mean() < 0.95:
         raise ValueError(f"{name}: particle table found but positions fall outside their boxes")
+    pts["angle"] = _pf_angles(pts, video)
 
     wn = np.asarray(wn, np.float64)
     cube = np.ascontiguousarray(spectra[None].astype(np.float32))

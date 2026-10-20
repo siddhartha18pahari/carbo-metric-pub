@@ -403,6 +403,22 @@ def test_spectra_list_takes_positions_from_its_project():
     np.testing.assert_array_equal(m.meta["points"]["x"], pm.meta["points"]["x"])
 
 
+def test_particlefinder_feret_max_is_a_caliper_length():
+    """Field 10 sits where LabSpec lists Feret max (just before Feret min, field 11).
+    A caliper length can never be shorter than the bounding box's longer side or
+    longer than its diagonal: within one mosaic pixel, on every particle."""
+    from qcarbon.labspec import read_l6pf
+    m, video = read_l6pf(vendor("pf_project"))
+    pts, px = m.meta["points"], abs(video.x[1] - video.x[0])
+    w, h = pts["xmax"] - pts["xmin"], pts["ymax"] - pts["ymin"]
+    assert (pts["feret_max"] >= np.maximum(w, h) - px).all()
+    assert (pts["feret_max"] <= np.hypot(w, h) + px).all()
+    assert (pts["min_diam"] <= pts["feret_max"]).all()
+    # the tilt comes back inside -90..90 degrees, 0 for round particles
+    assert (np.abs(pts["angle"]) <= np.pi / 2 + 1e-9).all()
+    assert (pts["angle"][pts["feret_max"] <= 1.05 * pts["min_diam"]] == 0).all()
+
+
 def test_small_project_mosaic_axes():
     from qcarbon.labspec import read_l6pf
     m, video = read_l6pf(vendor("pf_small_project"))

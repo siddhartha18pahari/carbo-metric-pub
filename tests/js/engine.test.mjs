@@ -136,3 +136,35 @@ test("spatial averaging keeps a flat map flat at the edges", () => {
   const out = smoothSpectra(cube, ny, nx, K, { smooth_window: 0, spatial_kernel: 5 });
   for (const v of out) close(v, 4.5, 1e-12);
 });
+
+import { pfAngles } from "../../web/js/engine/readers.js";
+const near = (v, w, tol, msg) => assert.ok(Math.abs(v - w) <= tol, `${msg ?? ""} ${v} vs ${w}`);
+
+test("ParticleFinder tilt: size from the box and the Feret axes, the way it leans from the mosaic", () => {
+  // a 60 x 50 mosaic, X ascending and Y descending as LabSpec saves it, with four bright
+  // particles on a dark ground: leaning +30 deg and -30 deg (from +X towards +Y), along X, and round
+  const W = 60, H = 50, x = Float32Array.from({ length: W }, (_, q) => q), y = Float32Array.from({ length: H }, (_, r) => H - 1 - r);
+  const parts = [[15, 12, 7, 3, Math.PI / 6], [45, 12, 7, 3, -Math.PI / 6], [15, 37, 7, 3, 0], [45, 37, 4, 4, 0]];
+  const raw = new Uint8Array(W * H * 3).fill(20);
+  for (let r = 0; r < H; r++) for (let q = 0; q < W; q++) for (const [cx, cy, a, b, t] of parts) {
+    const ex = x[q] - cx, ey = y[r] - cy, u = (ex * Math.cos(t) + ey * Math.sin(t)) / a, v = (ey * Math.cos(t) - ex * Math.sin(t)) / b;
+    if (u * u + v * v <= 1) raw.fill(200, (r * W + q) * 3, (r * W + q) * 3 + 3);
+  }
+  const pts = { x: [], y: [], feret_max: [], min_diam: [], xmin: [], xmax: [], ymin: [], ymax: [] };
+  for (const [cx, cy, a, b, t] of parts) {
+    const hw = Math.hypot(a * Math.cos(t), b * Math.sin(t)), hh = Math.hypot(a * Math.sin(t), b * Math.cos(t));
+    Object.entries({ x: cx, y: cy, feret_max: 2 * a, min_diam: 2 * b, xmin: cx - hw, xmax: cx + hw, ymin: cy - hh, ymax: cy + hh }).forEach(([k, v]) => pts[k].push(v));
+  }
+  const ang = pfAngles(pts, { raw, off: 0, W, H, x, y });
+  near(ang[0], Math.PI / 6, 1e-6, "leaning +30");
+  near(ang[1], -Math.PI / 6, 1e-6, "leaning -30");
+  near(ang[2], 0, 1e-6, "along X");
+  assert.equal(ang[3], 0);                                 // round: no tilt
+  // the same image upside down (Y ascending) still leans the same way on the stage
+  const flip = new Uint8Array(raw.length);
+  for (let r = 0; r < H; r++) flip.set(raw.subarray((H - 1 - r) * W * 3, (H - r) * W * 3), r * W * 3);
+  const up = pfAngles(pts, { raw: flip, off: 0, W, H, x, y: Float32Array.from({ length: H }, (_, r) => r) });
+  near(up[0], Math.PI / 6, 1e-6); near(up[1], -Math.PI / 6, 1e-6);
+  // without a mosaic only the size of the tilt is known
+  near(pfAngles(pts, null)[1], Math.PI / 6, 1e-6);
+});

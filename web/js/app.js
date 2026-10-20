@@ -391,7 +391,9 @@ function drawVideo(canvas, W, H, mv) {
   if ($("#vid-overlay").checked && mv.values) {
     ctx.globalAlpha = +$("#vid-alpha").value; ctx.imageSmoothingEnabled = mv.smooth;
     const E = mv.ext;
-    ctx.drawImage(mv.off, sx(E.x0), sy(E.y0), (E.x1 - E.x0) * k, (E.y1 - E.y0) * k);
+    // particles drawn as their shapes once the map's cached image would be enlarged (and blurred)
+    if (mv.points && k > mv.off.width / (E.x1 - E.x0)) mv._paintPoints(ctx, k, ox, oy, 1.5, { x0: rx0, y0: ry0 }, false, [rx0, ry0, rx1, ry1]);
+    else ctx.drawImage(mv.off, sx(E.x0), sy(E.y0), (E.x1 - E.x0) * k, (E.y1 - E.y0) * k);
     ctx.globalAlpha = 1;
   }
   ctx.setLineDash([5, 4]); ctx.strokeStyle = "#3fe0ff"; ctx.lineWidth = 1.2;

@@ -196,13 +196,14 @@ export class MapView {
 
   setGeometry({ nx, ny, x, y, points = null }) {
     this.nx = nx; this.ny = ny; this.x = x; this.y = y;
-    this.points = points; this._ptsCache = null; this._chip();
+    this.points = points; this._ptsCache = null; this._shp = null; this._chip();
     this._dirty = true;
     if (points) {
       // extent of all particles plus a margin; "pixel" size = median diameter
       let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+      const sh = this._shapes();
       for (let p = 0; p < points.x.length; p++) {
-        const r = points.ecd[p] / 2;
+        const r = sh.a[p];
         x0 = Math.min(x0, points.x[p] - r); x1 = Math.max(x1, points.x[p] + r);
         y0 = Math.min(y0, points.y[p] - r); y1 = Math.max(y1, points.y[p] + r);
       }
@@ -275,31 +276,54 @@ export class MapView {
     if (!(this.vmax > this.vmin)) this.vmax = this.vmin + (Math.abs(this.vmin) || 1) * 1e-3;
   }
 
-  // particles as filled circles: invalid ones as faint rings underneath, valid
-  // ones in increasing value so the high values sit on top
-  _paintPoints(g, k, ox, oy, minR, origin = this, labels = false) {
+  // Each particle's outline: an ellipse with the particle's own area, the
+  // aspect of its Feret width over its Feret length, tilted as the reader found
+  // (pfAngles); a circle of its diameter where a file carries no shape. Semi
+  // axes a >= b in um, and the tilt t with its cosine and sine.
+  _shapes() {
+    const pt = this.points;
+    if (this._shp && this._shp.pt === pt) return this._shp;
+    const n = pt.x.length, a = new Float32Array(n), b = new Float32Array(n), t = pt.angle || new Float32Array(n), c = new Float32Array(n), s = new Float32Array(n);
+    for (let p = 0; p < n; p++) {
+      const r = pt.ecd[p] / 2, L = pt.feret_max ? pt.feret_max[p] : 0, D = pt.min_diam ? pt.min_diam[p] : 0;
+      const q = L > 0 && D > 0 ? Math.sqrt(Math.min(1, Math.max(0.05, D / L))) : 1;
+      a[p] = r / q; b[p] = r * q;
+      c[p] = Math.cos(t[p]); s[p] = Math.sin(t[p]);
+    }
+    return (this._shp = { pt, a, b, t, c, s });
+  }
+
+  // particles as filled shapes: invalid ones as faint outlines underneath, valid
+  // ones in increasing value so the high values sit on top. clip: [x0, y0, x1, y1]
+  // in um, to leave out particles that cannot show
+  _paintPoints(g, k, ox, oy, minR, origin = this, labels = false, clip = null) {
     const { points: pt, valid } = this, v = this.shown(), L = lut(this.cmap), span = this.vmax - this.vmin;
     const X = p => ox + (pt.x[p] - origin.x0) * k, Y = p => oy + (pt.y[p] - origin.y0) * k;
+    const sh = this._shapes(), A = p => Math.max(minR, sh.a[p] * k), B = p => Math.max(minR, sh.b[p] * k);
+    const outline = p => { g.beginPath(); g.ellipse(X(p), Y(p), A(p), B(p), sh.t[p], 0, 2 * Math.PI); };
+    const shows = p => !clip || (pt.x[p] + sh.a[p] >= clip[0] && pt.x[p] - sh.a[p] <= clip[2] && pt.y[p] + sh.a[p] >= clip[1] && pt.y[p] - sh.a[p] <= clip[3]);
     const order = [];
-    for (let p = 0; p < pt.x.length; p++) if (!valid || valid[p]) order.push(p);
+    for (let p = 0; p < pt.x.length; p++) if ((!valid || valid[p]) && shows(p)) order.push(p);
     order.sort((a, b) => v[a] - v[b]);
     g.lineWidth = 1; g.strokeStyle = T.hatchLine;
     if (valid) for (let p = 0; p < pt.x.length; p++) {
-      if (valid[p]) continue;
-      g.beginPath(); g.arc(X(p), Y(p), Math.max(minR, pt.ecd[p] / 2 * k), 0, 7); g.stroke();
+      if (valid[p] || !shows(p)) continue;
+      outline(p); g.stroke();
     }
     const C = this.categories;
     for (const p of order) {
       if (C) {
         const c = C.index[p];
-        if (c < 0) { g.beginPath(); g.arc(X(p), Y(p), Math.max(minR, pt.ecd[p] / 2 * k), 0, 7); g.stroke(); continue; }
+        if (c < 0) { g.lineWidth = 1; g.strokeStyle = T.hatchLine; outline(p); g.stroke(); continue; }
         g.fillStyle = C.colours[c % C.colours.length];
       } else {
         if (!Number.isFinite(v[p])) continue;
         const t = Math.max(0, Math.min(255, Math.round((v[p] - this.vmin) / span * 255))) * 3;
         g.fillStyle = `rgb(${L[t]},${L[t + 1]},${L[t + 2]})`;
       }
-      g.beginPath(); g.arc(X(p), Y(p), Math.max(minR, pt.ecd[p] / 2 * k), 0, 7); g.fill();
+      outline(p); g.fill();
+      // a darker rim once the shape is big enough to read, so touching particles stay apart
+      if (B(p) >= 2.5) { g.lineWidth = Math.min(1.5, 0.25 * B(p)); g.strokeStyle = "rgba(0,0,0,.32)"; g.stroke(); }
     }
     if (!labels) return;
     // particle numbers once few enough are in view to read them
@@ -309,7 +333,8 @@ export class MapView {
     g.font = font(11, "bold"); g.textAlign = "left"; g.textBaseline = "middle";
     g.lineWidth = 3; g.strokeStyle = T.paper; g.fillStyle = T.strong;
     for (const p of inView) {
-      const rr = Math.max(minR, pt.ecd[p] / 2 * k), tx = X(p) + rr + 2, ty = Y(p);
+      // just past the shape's right-hand edge
+      const ex = Math.hypot(A(p) * sh.c[p], B(p) * sh.s[p]), tx = X(p) + ex + 2, ty = Y(p);
       g.strokeText(String(p + 1), tx, ty); g.fillText(String(p + 1), tx, ty);
     }
   }
@@ -490,8 +515,12 @@ export class MapView {
         ctx.beginPath(); ctx.moveTo(P.x, Y + .5); ctx.lineTo(P.x + P.w, Y + .5);
         ctx.moveTo(X + .5, P.y); ctx.lineTo(X + .5, P.y + P.h); ctx.stroke();
       }
-      const rad = this.points ? Math.max(5, this.k * this.points.ecd[p] * 0.6) : Math.max(3, this.k * this.dx * 0.6);
-      ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(X, Y, rad, 0, 7); ctx.stroke();
+      ctx.lineWidth = 1.5; ctx.beginPath();
+      if (this.points) {                             // a ring just outside the particle's own shape
+        const sh = this._shapes();
+        ctx.ellipse(X, Y, Math.max(5, this.k * sh.a[p] + 3), Math.max(5, this.k * sh.b[p] + 3), sh.t[p], 0, 2 * Math.PI);
+      } else ctx.arc(X, Y, Math.max(3, this.k * this.dx * 0.6), 0, 7);
+      ctx.stroke();
       ctx.restore();
     };
     mark(this.pinned, "#7dff6a", true);
@@ -514,15 +543,18 @@ export class MapView {
     const yu = this.y0 + (e.clientY - r.top - this.plot.y) / this.k;
     if (xu < this.x0 || xu > this.x1 || yu < this.y0 || yu > this.y1) return null;
     if (this.points) {
-      // nearest particle, if the pointer is on it or within a few screen pixels
-      const pt = this.points;
-      let best = -1, bd = Infinity;
+      // the smallest particle whose shape the pointer is on, else the nearest
+      // centre within a few screen pixels
+      const pt = this.points, sh = this._shapes();
+      let best = -1, bd = Infinity, hit = -1, ha = Infinity;
       for (let p = 0; p < pt.x.length; p++) {
-        const d = (pt.x[p] - xu) ** 2 + (pt.y[p] - yu) ** 2;
+        const ex = xu - pt.x[p], ey = yu - pt.y[p], d = ex * ex + ey * ey;
         if (d < bd) { bd = d; best = p; }
+        const u = (ex * sh.c[p] + ey * sh.s[p]) / sh.a[p], w = (ey * sh.c[p] - ex * sh.s[p]) / sh.b[p];
+        if (u * u + w * w <= 1 && sh.a[p] * sh.b[p] < ha) { ha = sh.a[p] * sh.b[p]; hit = p; }
       }
-      const reach = Math.max(pt.ecd[best] / 2, 8 / this.k);
-      return best >= 0 && Math.sqrt(bd) <= reach ? best : null;
+      if (hit >= 0) return hit;
+      return best >= 0 && Math.sqrt(bd) <= 8 / this.k ? best : null;
     }
     let j = Math.floor((xu - this.ext.x0) / this.dx), i = Math.floor((yu - this.ext.y0) / this.dy);
     j = Math.max(0, Math.min(this.nx - 1, this.xAsc ? j : this.nx - 1 - j));

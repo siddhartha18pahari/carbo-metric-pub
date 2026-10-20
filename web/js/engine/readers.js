@@ -197,7 +197,7 @@ export function readL6v(buf, name) {
 // a table of 24 float32 per particle (see qcarbon/labspec.py, where the field
 // meanings were pinned against the instrument's own Results table).
 // --------------------------------------------------------------------------
-export const PF_FIELDS = { x: 0, y: 1, area: 2, ecd: 3, min_diam: 11, convexity: 15, elongation: 16, volume: 18,
+export const PF_FIELDS = { x: 0, y: 1, area: 2, ecd: 3, feret_max: 10, min_diam: 11, convexity: 15, elongation: 16, volume: 18,
                            xmin: 19, ymin: 20, xmax: 21, ymax: 22, cls: 23 };
 export const PF_LABELS = { ecd: ["Diameter (circle equiv.)", "µm"], area: ["Area", "µm²"], min_diam: ["Min diameter", "µm"],
                            convexity: ["Convexity", ""], elongation: ["Elongation", "%"], volume: ["Volume", "µm³"] };
@@ -223,6 +223,50 @@ function pfTable(raw, P, lo) {
   return -1;
 }
 
+// The tilt of each particle's long axis, in radians from +X towards +Y (stage
+// coordinates). The table has no angle, but it has the Feret length and width
+// and the bounding box: an ellipse of those axes at tilt t has a box of half
+// sides sqrt(a² cos² t + b² sin² t) and sqrt(a² sin² t + b² cos² t), which
+// gives |t|. Which way it leans (/ or \) comes from the mosaic: the sign of
+// the covariance of x and y over the box's pixels, each weighted by how far it
+// is from the background around the box. The sums are integers, so both
+// readers agree exactly. Round particles (length under 1.05 x width) get 0.
+export function pfAngles(pts, img) {
+  const P = pts.x.length, out = new Float32Array(P);
+  for (let p = 0; p < P; p++) {
+    const L = pts.feret_max[p], D = pts.min_diam[p];
+    if (!(D > 0 && L > 1.05 * D)) continue;
+    const a2 = L * L / 4, b2 = D * D / 4, hw = (pts.xmax[p] - pts.xmin[p]) / 2, hh = (pts.ymax[p] - pts.ymin[p]) / 2;
+    const c2 = Math.min(1, Math.max(0, ((hw * hw - b2) / (a2 - b2) + 1 - (hh * hh - b2) / (a2 - b2)) / 2));
+    const t = Math.acos(Math.sqrt(c2));
+    out[p] = img ? pfLean(img, pts, p) * t : t;
+  }
+  return out;
+}
+
+function pfLean({ raw, off, W, H, x, y }, pts, p) {
+  const dx = x[1] - x[0], dy = y[1] - y[0];
+  const col = v => Math.min(W - 1, Math.max(0, Math.floor((v - x[0]) / dx + 0.5)));
+  const row = v => Math.min(H - 1, Math.max(0, Math.floor((v - y[0]) / dy + 0.5)));
+  const qa = col(pts.xmin[p]), qb = col(pts.xmax[p]), ra = row(pts.ymin[p]), rb = row(pts.ymax[p]);
+  const q0 = Math.max(0, Math.min(qa, qb) - 1), q1 = Math.min(W - 1, Math.max(qa, qb) + 1);
+  const r0 = Math.max(0, Math.min(ra, rb) - 1), r1 = Math.min(H - 1, Math.max(ra, rb) + 1);
+  const I = (r, q) => { const o = off + (r * W + q) * 3; return raw[o] + raw[o + 1] + raw[o + 2]; };
+  const ring = [];                                   // the background: two pixels around the box
+  for (let r = Math.max(0, r0 - 2); r <= Math.min(H - 1, r1 + 2); r++)
+    for (let q = Math.max(0, q0 - 2); q <= Math.min(W - 1, q1 + 2); q++) if (r < r0 || r > r1 || q < q0 || q > q1) ring.push(I(r, q));
+  if (!ring.length) return 1;
+  ring.sort((u, v) => u - v);
+  const bg = ring[(ring.length - 1) >> 1];
+  let sw = 0, sq = 0, sr = 0, sqr = 0;
+  for (let r = r0; r <= r1; r++) for (let q = q0; q <= q1; q++) {
+    const w = Math.abs(I(r, q) - bg), u = q - q0, v = r - r0;
+    sw += w; sq += w * u; sr += w * v; sqr += w * u * v;
+  }
+  const c = BigInt(sw) * BigInt(sqr) - BigInt(sq) * BigInt(sr);      // sw² x the covariance, in pixel steps
+  return (c < 0n) !== (dx * dy < 0) ? -1 : 1;
+}
+
 export function readL6pf(buf, name) {
   const raw = new Uint8Array(buf);
   magic(raw, name);
@@ -245,7 +289,7 @@ export function readL6pf(buf, name) {
 
   // mosaic: two evenly stepped stage axes W, H and W*H*3 bytes of RGB, reduced
   // to at most ~4000 px across for the page
-  let video = null, imageEnd = 0;
+  let video = null, imageEnd = 0, full = null;
   const stage = axes.filter(([o, a]) => o !== found.wo && a.length > 16 && isStageAxis(a, 0.02) && !isIndex(a));
   for (let i = 0; i + 1 < stage.length && !video; i++) {
     const [xo, xa] = stage[i], [, ya] = stage[i + 1], W = xa.length, H = ya.length, need = W * H * 3;
@@ -255,9 +299,11 @@ export function readL6pf(buf, name) {
       let best = null;
       for (let st = Math.max(0, rec - need - 1024); st <= rec - need; st++) {
         let sm = 0, cnt = 0;
+        // pixels 16 apart, as the Python reader does: neighbouring pixels cannot tell a
+        // start one or two pixels early (every row then begins with the end of the last)
         for (let r = 0; r < H; r += 16) for (let q = 0; q + 16 < W; q += 16) {
           const o = st + (r * W + q) * 3;
-          for (let ch = 0; ch < 3; ch++) sm += Math.abs(raw[o + ch] - raw[o + 3 + ch]);
+          for (let ch = 0; ch < 3; ch++) sm += Math.abs(raw[o + ch] - raw[o + 48 + ch]);
           cnt++;
         }
         sm /= cnt || 1;
@@ -274,6 +320,7 @@ export function readL6pf(buf, name) {
     }
     const xs = Float64Array.from({ length: w }, (_, q) => xa[q * f]), ys = Float64Array.from({ length: h }, (_, r) => ya[r * f]);
     video = { rgb, w, h, x: xs, y: ys };
+    full = { raw, off, W, H, x: xa, y: ya };            // the particle tilts use every pixel
     imageEnd = off + need;
   }
 
@@ -289,6 +336,7 @@ export function readL6pf(buf, name) {
   for (let p = 0; p < P; p++) if (points.x[p] >= points.xmin[p] - 1e-3 && points.x[p] <= points.xmax[p] + 1e-3
     && points.y[p] >= points.ymin[p] - 1e-3 && points.y[p] <= points.ymax[p] + 1e-3) inside++;
   if (inside < 0.95 * P) throw new Error(`${name}: particle table found but positions fall outside their boxes`);
+  points.angle = pfAngles(points, full);
 
   const wnOut = Float64Array.from(found.wn);
   if (wnOut[0] > wnOut[K - 1]) {
