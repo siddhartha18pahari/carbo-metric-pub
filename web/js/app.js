@@ -10,6 +10,7 @@ import { SpectrumPlot, HistogramPlot, DensityPlot, PEAK_COLOURS } from "./plots.
 import { SplatView, sliceField } from "./splat3d.js";
 import { segment, outlineOverlay, PARTICLE_COLOURS } from "./particles.js";
 import { buildReport } from "./report.js";
+import { wilson, weightedQuantile, laCancado, robustScale, bestGmm, bootstrapShares, median, quantileSorted } from "./pf-analysis.js";
 import { T, font, setTheme, currentTheme } from "./theme.js";
 
 const QUANT = { intensity: "Intensity", width: "Width", area: "Area", position: "Position" };
@@ -1544,6 +1545,7 @@ function renderParticles() {
   if (!S.fit) return;
   if (S.points) { renderPF(); return; }
   $("#pt-cards-h").textContent = "Pixels vs particles"; $("#pt-strip-h").textContent = "Ratio by particle";
+  pmap.categories = null;
   const r = resolve(S.pspec);
   pmap.setTitle(r.title);
   pmap.overlays = [outlineOverlay(S.seg)];
@@ -1614,6 +1616,7 @@ function spearman(x, y) {
 }
 
 function pfInit() {
+  if (S.pfLaserFor !== S.ds.id) { S.pfLaserFor = S.ds.id; $("#pf-laser").value = S.ds.laser_nm ?? ""; S.pfa = null; }
   const sel = $("#pf-x");
   if (!sel.options.length) {
     for (const [k, [lab, unit]] of Object.entries(S.pointLabels || {})) sel.append(el("option", { value: k }, unit ? `${lab} (${unit})` : lab));
@@ -1629,6 +1632,7 @@ function renderPF() {
   pmap.overlays = [];
   if (r.values) pmap.setData(r.values, { valid: r.useValid ? S.valid : null, label: r.label, unit: r.unit });
   pmap.setCursor(null, S.pinned);
+  renderPfAnalysis();
   const xk = $("#pf-x").value || "ecd", X = S.points[xk], [xlab, xunit] = S.pointLabels[xk];
   const idx = [];
   for (let p = 0; p < S.nx; p++) if ((!r.useValid || !S.valid || S.valid[p]) && Number.isFinite(r.values[p]) && Number.isFinite(X[p])) idx.push(p);
@@ -1644,7 +1648,8 @@ function renderPF() {
     card(r.name, `${fmt(st.mean)} ± ${fmt(st.sd, 3)}`, `median ${fmt(st.median)} · n = ${fmt(st.n)} particles`),
     card(`Rank correlation with ${xlab.toLowerCase()}`, Number.isFinite(rho) ? rho.toFixed(3) : "–", "Spearman ρ over valid particles"));
   const t = $("#pt-table"); t.textContent = "";
-  t.append(el("tr", {}, ...["#", "X, Y (µm)", "⌀ µm", "Convexity", "Elong. %", r.name].map(h => el("th", {}, h))));
+  t.append(el("tr", {}, ...["#", "X, Y (µm)", "⌀ µm", "Convexity", "Elong. %", "Pop.", r.name].map(h => el("th", {}, h))));
+  const popOf = p => (S.pfa && S.pfa.k && S.pfa.label[p] >= 0 ? S.pfa.pops[S.pfa.label[p]].name : "–");
   const top = [...idx].sort((a, b) => r.values[b] - r.values[a]).slice(0, 150);
   for (const p of top) t.append(el("tr", { class: "click" + (p === S.pinned ? " on" : ""), title: "Show this particle's spectrum and zoom onto it",
     onclick: () => { setPinned(p); pmap.zoomTo(S.points.x[p], S.points.y[p], Math.max(8 * S.points.ecd[p], 15)); renderPF(); } },
@@ -1652,8 +1657,8 @@ function renderPF() {
       onclick: e => { e.stopPropagation(); switchTab("qc"); setTimeout(() => zoomToPoint(p), 40); } }, `#${p + 1}`)),
     el("td", { class: "sub" }, `${fmt(S.points.x[p], 4)}, ${fmt(S.points.y[p], 4)}`),
     el("td", {}, fmt(S.points.ecd[p], 3)), el("td", {}, fmt(S.points.convexity[p], 3)), el("td", {}, fmt(S.points.elongation[p], 3)),
-    el("td", {}, fmt(r.values[p]))));
-  if (idx.length > top.length) t.append(el("tr", {}, el("td", { colspan: 6, class: "sub" }, `${fmt(top.length)} highest of ${fmt(idx.length)} shown; Export all (CSV) has every particle`)));
+    el("td", {}, popOf(p)), el("td", {}, fmt(r.values[p]))));
+  if (idx.length > top.length) t.append(el("tr", {}, el("td", { colspan: 7, class: "sub" }, `${fmt(top.length)} highest of ${fmt(idx.length)} shown; Export particle analysis (CSV) has every particle`)));
   drawScatter();
 }
 
@@ -1675,10 +1680,11 @@ function drawScatter() {
   for (const t of xt) { ctx.fillStyle = T.grid; ctx.fillRect(PX(t), Tt, 1, H - Tt - B); ctx.fillStyle = T.ink; ctx.fillText(logx ? fmt(10 ** t, 3) : fmt(t, 3), PX(t), H - B + 4); }
   ctx.fillStyle = T.label; ctx.fillText(`${F.xlab}${F.xunit ? ` (${F.xunit})` : ""}${logx ? ", log scale" : ""}`, (L + W - Rr) / 2, H - 13);
   const cls = S.points.cls, cols = ["#3fe0ff", "#ff9f40", "#b18cff", "#7dff6a"];
+  const A = S.pfa, byPop = A && A.k && $("#pf-pop-map").checked;
   ctx.globalAlpha = Math.max(0.15, Math.min(0.8, 300 / idx.length));
   idx.forEach((p, i) => {
     if (ys[i] < ylo || ys[i] > yhi || xs[i] < xlo || xs[i] > xhi) return;
-    ctx.fillStyle = cols[Math.max(0, cls[p]) % cols.length];
+    ctx.fillStyle = byPop ? (A.label[p] < 0 ? T.hatchLine : A.pops[A.label[p]].nd ? T.label : PARTICLE_COLOURS[A.label[p] % PARTICLE_COLOURS.length]) : cols[Math.max(0, cls[p]) % cols.length];
     ctx.fillRect(PX(xs[i]) - 1.2, PY(ys[i]) - 1.2, 2.4, 2.4);
   });
   ctx.globalAlpha = 1;
@@ -1699,6 +1705,310 @@ function drawScatter() {
     ctx.strokeStyle = "#7dff6a"; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(PX(xs[i]), PY(ys[i]), 5, 0, 7); ctx.stroke();
   }
 }
+
+// =========================================================================
+// ParticleFinder: semi-quantitative analysis
+// =========================================================================
+// Detection and quality from each particle's own fit, populations (a Gaussian
+// mixture, or cut-offs) with shares by number and by volume and their 95 %
+// intervals, the crystallite size La, and size-weighted results.
+const POP_NAMES = ["A", "B", "C", "D"];
+const pct = v => (Number.isFinite(v) ? `${(100 * v).toFixed(v < 0.1 ? 1 : 0)} %` : "–");
+
+function pfAnalysis() {
+  const f = S.fit, c = S.cfg, pts = S.points, n = S.nx, m = f.m;
+  const kd = Math.max(0.5, +$("#pf-kd").value || 3), kq = Math.max(kd, +$("#pf-kq").value || 10);
+  const mode = $("#pf-pop-mode").value, cuts = [parseFloat($("#pf-cut1").value), parseFloat($("#pf-cut2").value)].filter(Number.isFinite).sort((a, b) => a - b);
+  const lambda = parseFloat($("#pf-laser").value);
+  // the band the populations are found on, over G (D1 unless chosen otherwise)
+  const bandSel = $("#pf-pop-ratio"), others = f.names.filter(b => b.toLowerCase() !== "g");
+  if ([...bandSel.options].map(o => o.value).join() !== others.join()) {
+    const keep = bandSel.value;
+    bandSel.replaceChildren(...others.map(b => el("option", { value: b }, `${b}/G`)));
+    bandSel.value = others.includes(keep) ? keep : (others.find(b => b.toLowerCase() === "d1") || others[0] || "");
+  }
+  const popBand = bandSel.value;
+  const key = [S.ds.id, f.seconds, f.names.join(), stableJSON(VIEW_KEYS.map(k => c[k])), kd, kq, mode, cuts.join(), lambda, popBand].join("|");
+  if (S.pfa && S.pfa.key === key) return S.pfa;
+  const band = name => f.names.findIndex(b => b.toLowerCase() === name);
+  const jG = band("g") >= 0 ? band("g") : f.names.indexOf(c.ratio_den), jD = band("d1");
+  const col = (q, j) => Float64Array.from({ length: n }, (_, p) => (j < 0 ? NaN : f[q][p * m + j]));
+  const IG = col("intensity", jG), WG = col("width", jG), XG = col("position", jG), AG = col("area", jG);
+  const ID = col("intensity", jD), AD = col("area", jD), se = f.std_error;
+  const gp = c.peaks.find(q => q.name === f.names[jG]);
+  const near = (v, b, span) => Math.abs(v - b) < 1e-3 * span;
+  const snr = new Float64Array(n).fill(NaN), atBound = new Uint8Array(n), det = new Uint8Array(n), quant = new Uint8Array(n);
+  let fitted = 0;
+  for (let p = 0; p < n; p++) {
+    if (!(se[p] > 0)) continue;
+    fitted++;
+    snr[p] = IG[p] / se[p];
+    atBound[p] = gp && (near(XG[p], gp.pos_min, gp.pos_max - gp.pos_min) || near(XG[p], gp.pos_max, gp.pos_max - gp.pos_min)
+      || near(WG[p], gp.width_min, gp.width_max - gp.width_min) || near(WG[p], gp.width_max, gp.width_max - gp.width_min)) ? 1 : 0;
+    det[p] = snr[p] >= kd && !atBound[p] ? 1 : 0;
+    quant[p] = snr[p] >= kq && !atBound[p] && (!S.valid || S.valid[p]) ? 1 : 0;
+  }
+  const Q = []; for (let p = 0; p < n; p++) if (quant[p]) Q.push(p);
+  // the grouping ratio, and whether its band is detected in each particle: a band
+  // below detection gives a ratio of noise (often exactly 0), not a population
+  const jR = f.names.indexOf(popBand), IR = col("intensity", jR);
+  const ratio = jR >= 0 ? Float64Array.from({ length: n }, (_, p) => (IG[p] > 0 ? IR[p] / IG[p] : NaN)) : null;
+  const rDet = new Uint8Array(n); for (const p of Q) rDet[p] = jR >= 0 && IR[p] / se[p] >= kd ? 1 : 0;
+  const Qd = Q.filter(p => rDet[p]), nNd = Q.length - Qd.length, rlab = `${popBand}/G`;
+
+  // populations, then renamed A, B, ... by their median ratio, low to high
+  let label = new Int16Array(n).fill(-1), k = 0, how = "";
+  if (ratio && Qd.length && mode === "auto") {
+    if (Qd.length >= 20) {
+      const feats = robustScale([Qd.map(p => Math.log10(ratio[p])), Qd.map(p => WG[p]), Qd.map(p => XG[p])]);
+      const g = bestGmm(feats, 4, 1);
+      Qd.forEach((p, i) => { label[p] = g.labels[i]; });
+      k = g.k;
+      how = `Gaussian mixture on log ${rlab}, G width and G position (each scaled by its median and MAD): ${g.components} component${g.components > 1 ? "s" : ""} (the lowest ICL from 1 to ${g.tried.length}), ` +
+        (g.components > k ? `merged where their density has no dip between them (ridge ratio above 0.2; Hennig 2010) into ${k} population${k > 1 ? "s" : ""}.` : `${k > 1 ? "each" : "a"} separate population.`) +
+        (k === 1 ? " One continuous population: use cut-offs to split it into classes." : "");
+    } else { Qd.forEach(p => { label[p] = 0; }); k = 1; how = `Fewer than 20 particles with ${popBand} detected: one population.`; }
+  } else if (ratio && Qd.length && mode === "cut") {
+    Qd.forEach(p => { let l = 0; while (l < cuts.length && ratio[p] >= cuts[l]) l++; label[p] = l; });
+    k = cuts.length + 1;
+    how = cuts.length ? `Cut-offs on ${rlab} at ${cuts.map(v => fmt(v)).join(" and ")}.` : "Enter a cut-off to split the particles.";
+  }
+  if (k) {
+    const med = Array.from({ length: k }, (_, l) => median(Qd.filter(p => label[p] === l).map(p => ratio[p])));
+    const order = med.map((v, l) => [Number.isFinite(v) ? v : Infinity, l]).sort((a, b) => a[0] - b[0]).map(x => x[1]);
+    const rename = new Int16Array(k); order.forEach((l, i) => { rename[l] = i; });
+    label = label.map(l => (l < 0 ? -1 : rename[l]));
+    // a cut-off range holding no particle is not a population
+    const used = new Set(Qd.map(p => label[p])); if (used.size < k) { const keep = [...used].sort(); label = label.map(l => (l < 0 ? -1 : keep.indexOf(l))); k = keep.length; }
+  }
+  // the quantified particles whose band is below detection: a category of their own
+  const ND = k; if (k && nNd) for (const p of Q) if (!rDet[p]) label[p] = ND;
+  const cats = k + (k && nNd ? 1 : 0);
+
+  // La per quantified particle with a detected D band (Cancado et al. 2006)
+  const la = new Float64Array(n).fill(NaN);
+  let noD = 0;
+  for (const p of Q) {
+    if (jD < 0 || !(ID[p] / se[p] >= kd)) { noD++; continue; }
+    la[p] = laCancado(AD[p], AG[p], lambda);
+  }
+  const laQ = Q.map(p => la[p]).filter(Number.isFinite);
+
+  // shares by number (Wilson) and by volume (bootstrap over particles)
+  const vol = pts.volume, nQ = Q.length;
+  const boot = cats ? bootstrapShares(Int16Array.from(Q, p => label[p]), Float64Array.from(Q, p => (vol[p] > 0 ? vol[p] : 0)), cats) : null;
+  const pops = Array.from({ length: cats }, (_, l) => {
+    const idx = Q.filter(p => label[p] === l);
+    return { name: l === ND ? `${popBand} n.d.` : POP_NAMES[l] || String(l + 1), nd: l === ND, n: idx.length, share: idx.length / nQ, ci: wilson(idx.length, nQ), vol: boot ? boot[l] : null,
+             ratio: median(idx.map(p => ratio[p])), gw: median(idx.map(p => WG[p])), gx: median(idx.map(p => XG[p])),
+             la: median(idx.map(p => la[p])), ecd: median(idx.map(p => pts.ecd[p])) };
+  });
+
+  // size: every particle (morphology does not need a spectrum)
+  const ecd = Array.from(pts.ecd), vw = Array.from(vol, v => (v > 0 ? v : 0)), es = Float64Array.from(ecd).filter(Number.isFinite).sort();
+  const size = { num: [0.1, 0.5, 0.9].map(q => quantileSorted(es, q)), vol: [0.1, 0.5, 0.9].map(q => weightedQuantile(ecd, vw, q)) };
+  // the ratio by size class: quartiles of diameter among the quantified particles
+  const eq = Float64Array.from(Qd.map(p => pts.ecd[p])).sort(), edges = [0, 0.25, 0.5, 0.75, 1].map(q => quantileSorted(eq, q));
+  const classes = ratio && Qd.length >= 8 ? [0, 1, 2, 3].map(i => {
+    const idx = Qd.filter(p => pts.ecd[p] >= edges[i] && (i === 3 ? pts.ecd[p] <= edges[4] : pts.ecd[p] < edges[i + 1]));
+    const r = Float64Array.from(idx.map(p => ratio[p])).sort();
+    return { lo: edges[i], hi: edges[i + 1], n: idx.length, ratio: quantileSorted(r, 0.5), q1: quantileSorted(r, 0.25), q3: quantileSorted(r, 0.75), la: median(idx.map(p => la[p])) };
+  }) : [];
+  let sw = 0, swr = 0, sr = 0;
+  if (ratio) for (const p of Qd) { const w = vol[p] > 0 ? vol[p] : 0; sw += w; swr += w * ratio[p]; sr += ratio[p]; }
+  const rho = ratio && Qd.length >= 3 ? spearman(Qd.map(p => pts.ecd[p]), Qd.map(p => ratio[p])) : NaN;
+
+  // mean spectrum of each population: baseline removed, scaled to its G height
+  const [lo, hi] = f.range, ks = []; for (let q = 0; q < S.k; q++) if (S.wn[q] >= lo && S.wn[q] <= hi) ks.push(q);
+  const groups = cats || 1, sum = Array.from({ length: groups }, () => new Float64Array(ks.length)), sq = sum.map(() => new Float64Array(ks.length)), cnt = new Float64Array(groups);
+  for (const p of Q) {
+    const g = cats ? label[p] : 0; if (g < 0) continue;
+    const base = evalFit(p).baseline, o = p * S.k;
+    ks.forEach((q, i) => { const y = (S.cube[o + q] - base[q]) / IG[p]; sum[g][i] += y; sq[g][i] += y * y; });
+    cnt[g]++;
+  }
+  const spectra = { wn: ks.map(q => S.wn[q]), mean: sum.map((s, g) => Array.from(s, v => v / Math.max(1, cnt[g]))),
+                    sd: sq.map((s, g) => Array.from(s, (v, i) => Math.sqrt(Math.max(0, v / Math.max(1, cnt[g]) - (sum[g][i] / Math.max(1, cnt[g])) ** 2)))), n: Array.from(cnt) };
+
+  return (S.pfa = { key, n, fitted, kd, kq, snr, atBound, det, quant, Q, Qd, label, k: cats, how, pops, la, laQ, noD, lambda, size, classes,
+                    vwRatio: sw > 0 ? swr / sw : NaN, nwRatio: Qd.length ? sr / Qd.length : NaN, rho, spectra, jD, ratio, rlab, nNd, popBand });
+}
+
+function renderPfAnalysis() {
+  const A = pfAnalysis(), lab = A.rlab;
+  const popColour = l => (A.pops[l] && A.pops[l].nd ? T.label : PARTICLE_COLOURS[l % PARTICLE_COLOURS.length]);
+  const card = (k, v, s) => el("div", { class: "card" }, el("div", { class: "k" }, k), el("div", { class: "v" }, v), el("div", { class: "s" }, s));
+  const nDet = A.det.reduce((s, v) => s + v, 0), nQ = A.Q.length, nBound = A.atBound.reduce((s, v) => s + v, 0);
+  const [dlo, dhi] = wilson(nDet, A.fitted);
+  $("#pf-detect-cards").replaceChildren(
+    card("Spectra", `${fmt(A.fitted)} of ${fmt(A.n)}`, A.n > A.fitted ? `${fmt(A.n - A.fitted)} without a spectrum (flat or missing)` : "every particle measured"),
+    card("Carbon detected", `${fmt(nDet)} of ${fmt(A.fitted)}`, `${pct(nDet / A.fitted)} (95 % CI ${pct(dlo)}–${pct(dhi)})`),
+    card("Quantified", fmt(nQ), `G ≥ ${A.kq} × noise, inside its bounds`),
+    card("Low signal", fmt(nDet - A.Q.filter(p => A.det[p]).length), "detected, not quantified"),
+    card("G on a fit bound", fmt(nBound), "fitting noise: left out"));
+
+  // populations
+  $(".pf-cut").classList.toggle("hidden", $("#pf-pop-mode").value !== "cut");
+  $("#pf-cut-label").textContent = `${lab} cut-offs`;
+  const t = $("#pf-pop-table"); t.textContent = "";
+  if (A.k) {
+    t.append(el("tr", {}, ...["Population", "n", "By number", "By volume", `${lab} median`, "G width", "La (nm)"].map(h => el("th", {}, h))));
+    const ci = (v, lo, hi) => [el("div", {}, pct(v)), el("div", { class: "sub" }, `${pct(lo)}–${pct(hi)}`)];
+    A.pops.forEach((pp, l) => t.append(el("tr", {},
+      el("td", {}, el("span", { class: "sw", style: `background:${popColour(l)}` }), el("b", {}, pp.name)),
+      el("td", {}, fmt(pp.n)), el("td", {}, ...ci(pp.share, pp.ci[0], pp.ci[1])),
+      el("td", {}, ...(pp.vol ? ci(pp.vol[0], pp.vol[1], pp.vol[2]) : ["–"])),
+      el("td", { class: pp.nd ? "sub" : "" }, pp.nd ? "below detection" : fmt(pp.ratio, 3)), el("td", {}, fmt(pp.gw, 3)), el("td", {}, fmt(pp.la, 3)))));
+  }
+  const ndNote = A.nNd ? ` ${A.popBand} n.d.: quantified particles whose ${A.popBand} is below ${A.kd} × noise (${pct(A.nNd / nQ)}); their ${lab} is noise, so they are counted apart.` : "";
+  $("#pf-pop-note").textContent = !A.ratio ? `The fit has no ${A.popBand} band.` : !nQ ? "No quantified particles." : A.k
+    ? `${A.how}${ndNote} Shares of the quantified particles by number: Wilson 95 % intervals. By volume: the ParticleFinder volume of each particle, with a bootstrap 95 % interval over particles (500 resamples, populations held fixed); a mass share only if every population has the same density.`
+    : $("#pf-pop-mode").value === "none" ? "" : A.how;
+
+  // crystallite size
+  const lam = A.lambda, fromFile = S.ds.laser_nm;
+  const ls = Float64Array.from(A.laQ).sort();
+  const below = A.laQ.filter(v => v < 2).length, above = A.laQ.filter(v => v > 500).length;
+  $("#pf-la-cards").replaceChildren(
+    card("Median La", Number.isFinite(lam) && ls.length ? `${fmt(quantileSorted(ls, 0.5), 3)} nm` : "–",
+      ls.length ? `IQR ${fmt(quantileSorted(ls, 0.25), 3)}–${fmt(quantileSorted(ls, 0.75), 3)} nm · n = ${fmt(ls.length)}` : "no particle with a D band"),
+    card("No D band", fmt(A.noD), "D1 below detection: La larger than the method shows"),
+    card("Outside the calibration", fmt(below + above), `${fmt(below)} below 2 nm · ${fmt(above)} above 500 nm`),
+    card("Laser", Number.isFinite(lam) ? `${fmt(lam, 5)} nm` : "–", fromFile ? (Math.abs(fromFile - lam) < 1e-6 ? "read from the file" : `the file says ${fromFile} nm`) : "not in the file: enter it"));
+  $("#pf-la-note").textContent = A.jD < 0 ? "The fit has no D1 band." :
+    "La = 2.4 × 10⁻¹⁰ λ⁴ (A_D1 / A_G)⁻¹ nm, λ in nm, from the fitted band areas (Cançado et al., Appl. Phys. Lett. 88, 163106, 2006). Calibrated on nanographite with La of about 20 to 500 nm; below about 2 nm the relation inverts (Ferrari and Robertson, Phys. Rev. B 61, 14095, 2000), so smaller values describe amorphous carbon only qualitatively.";
+
+  // size
+  const st = $("#pf-size-table"); st.textContent = "";
+  st.append(el("tr", {}, ...["Diameter (µm)", "D10", "D50", "D90"].map(h => el("th", {}, h))),
+    el("tr", {}, el("td", {}, "By number"), ...A.size.num.map(v => el("td", {}, fmt(v, 3)))),
+    el("tr", {}, el("td", {}, "By volume"), ...A.size.vol.map(v => el("td", {}, fmt(v, 3)))));
+  const ct = $("#pf-sizeclass-table"); ct.textContent = "";
+  if (A.classes.length) {
+    ct.append(el("tr", {}, ...["Diameter class (µm)", "n", `${lab} median`, "IQR", "La (nm)"].map(h => el("th", {}, h))));
+    for (const cl of A.classes) ct.append(el("tr", {}, el("td", {}, `${fmt(cl.lo, 3)}–${fmt(cl.hi, 3)}`), el("td", {}, fmt(cl.n)),
+      el("td", {}, fmt(cl.ratio, 3)), el("td", { class: "sub" }, `${fmt(cl.q1, 3)}–${fmt(cl.q3, 3)}`), el("td", {}, fmt(cl.la, 3))));
+  }
+  $("#pf-size-note").textContent = `D10, D50, D90: every particle, by number and weighted by the ParticleFinder volume. Classes: quartiles of diameter among the quantified particles with ${A.popBand} detected.` +
+    (Number.isFinite(A.vwRatio) ? ` ${lab}: ${fmt(A.nwRatio, 3)} mean by number, ${fmt(A.vwRatio, 3)} weighted by volume; Spearman ρ with diameter ${Number.isFinite(A.rho) ? A.rho.toFixed(3) : "–"}.` : "");
+
+  // the map: particles coloured by population
+  const byPop = $("#pf-pop-map").checked && A.k > 0;
+  pmap.setCategories(byPop ? { index: A.label, colours: A.pops.map((_, l) => popColour(l)), names: A.pops.map(pp => pp.name) } : null);
+  if (byPop) pmap.setTitle(`Populations on <u>${escHTML(lab)}</u>`);
+  drawPopSpectra(); drawPfDist();
+}
+
+const pfSpecHost = $("#pf-spec"), pfDistHost = $("#pf-dist-plot");
+new ResizeObserver(() => { if (S.pfa) drawPopSpectra(); }).observe(pfSpecHost);
+new ResizeObserver(() => { if (S.pfa) drawPfDist(); }).observe(pfDistHost);
+
+// small axes for the two plots under the map
+function pfAxes(host, xr, yr, { logx = false, xlabel = "", ylabel = "" } = {}) {
+  const W = host.clientWidth, H = host.clientHeight; if (W < 40 || H < 40) return null;
+  const ctx = hidpi(host.querySelector("canvas"), W, H);
+  const L = 44, R = 10, Tp = 10, B = 34, X = v => L + ((logx ? Math.log10(v) : v) - xr[0]) / (xr[1] - xr[0]) * (W - L - R), Y = v => Tp + (1 - (v - yr[0]) / (yr[1] - yr[0])) * (H - Tp - B);
+  ctx.font = font(11); ctx.textBaseline = "middle"; ctx.textAlign = "right";
+  for (const t of niceTicks(yr[0], yr[1], 4)) { ctx.fillStyle = T.grid; ctx.fillRect(L, Y(t), W - L - R, 1); ctx.fillStyle = T.ink; ctx.fillText(fmt(t, 3), L - 4, Y(t)); }
+  ctx.textAlign = "center"; ctx.textBaseline = "top";
+  const xt = logx ? [0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000].filter(v => Math.log10(v) >= xr[0] && Math.log10(v) <= xr[1]) : niceTicks(xr[0], xr[1], 6);
+  for (const t of xt) { ctx.fillStyle = T.grid; ctx.fillRect(X(t), Tp, 1, H - Tp - B); ctx.fillStyle = T.ink; ctx.fillText(fmt(t, 3), X(t), H - B + 4); }
+  ctx.fillStyle = T.label; ctx.fillText(xlabel, (L + W - R) / 2, H - 15);
+  if (ylabel) { ctx.save(); ctx.translate(12, (Tp + H - B) / 2); ctx.rotate(-Math.PI / 2); ctx.textBaseline = "middle"; ctx.fillText(ylabel, 0, 0); ctx.restore(); }
+  return { ctx, X, Y, W, H, L, R, Tp, B };
+}
+
+function drawPopSpectra() {
+  const A = S.pfa; if (!A) return;
+  const sp = A.spectra; if (!sp.wn.length) return;
+  let ymax = 0; sp.mean.forEach((mm, g) => mm.forEach((v, i) => { if (sp.n[g]) ymax = Math.max(ymax, v + sp.sd[g][i]); }));
+  const ax = pfAxes(pfSpecHost, [sp.wn[0], sp.wn[sp.wn.length - 1]], [-0.05, Math.min(3, ymax * 1.05) || 1.2], { xlabel: "Raman shift (cm⁻¹)", ylabel: "Intensity / G height" }); if (!ax) return;
+  const { ctx, X, Y } = ax;
+  sp.mean.forEach((mm, g) => {
+    if (!sp.n[g]) return;
+    const col = A.k ? (A.pops[g].nd ? T.label : PARTICLE_COLOURS[g % PARTICLE_COLOURS.length]) : T.strong;
+    ctx.globalAlpha = 0.16; ctx.fillStyle = col; ctx.beginPath();
+    sp.wn.forEach((w, i) => (i ? ctx.lineTo(X(w), Y(mm[i] + sp.sd[g][i])) : ctx.moveTo(X(w), Y(mm[i] + sp.sd[g][i]))));
+    for (let i = sp.wn.length - 1; i >= 0; i--) ctx.lineTo(X(sp.wn[i]), Y(mm[i] - sp.sd[g][i]));
+    ctx.fill(); ctx.globalAlpha = 1;
+    ctx.strokeStyle = col; ctx.lineWidth = 1.8; ctx.beginPath();
+    sp.wn.forEach((w, i) => (i ? ctx.lineTo(X(w), Y(mm[i])) : ctx.moveTo(X(w), Y(mm[i]))));
+    ctx.stroke();
+  });
+  ctx.font = font(11, "bold"); ctx.textAlign = "left"; ctx.textBaseline = "top";
+  sp.mean.forEach((_, g) => {
+    if (!sp.n[g]) return;
+    ctx.fillStyle = A.k ? (A.pops[g].nd ? T.label : PARTICLE_COLOURS[g % PARTICLE_COLOURS.length]) : T.strong;
+    ctx.fillText(`${A.k ? A.pops[g].name : "All quantified"} · n = ${fmt(sp.n[g])}`, ax.L + 8, ax.Tp + 4 + g * 15);
+  });
+}
+
+function drawPfDist() {
+  const A = S.pfa; if (!A) return;
+  const kind = $("#pf-dist").value;
+  if (kind === "la") {
+    const v = A.laQ; $("#pf-dist-note").textContent = v.length ? "quantified particles with a D band, log scale" : "";
+    if (!v.length) { const ax = pfAxes(pfDistHost, [0, 3], [0, 1], { logx: true, xlabel: "La (nm)" }); if (ax) { ax.ctx.fillStyle = T.label; ax.ctx.textAlign = "center"; ax.ctx.fillText(Number.isFinite(A.lambda) ? "No particle with a D band" : "Enter the laser wavelength", ax.W / 2, ax.H / 2 - 10); } return; }
+    const lv = v.map(x => Math.log10(x)), s = Float64Array.from(lv).sort(), x0 = Math.min(Math.log10(1), quantileSorted(s, 0.005)), x1 = Math.max(Math.log10(600), quantileSorted(s, 0.995));
+    const nb = 40, groups = A.k || 1, H = Array.from({ length: groups }, () => new Float64Array(nb));
+    A.Q.forEach(p => { const x = A.la[p]; if (!Number.isFinite(x)) return; const b = Math.floor((Math.log10(x) - x0) / (x1 - x0) * nb); if (b >= 0 && b < nb) H[A.k ? A.label[p] : 0][b]++; });
+    let mx = 0; H.forEach(h => h.forEach(c => { mx = Math.max(mx, c); }));
+    const ax = pfAxes(pfDistHost, [x0, x1], [0, mx * 1.1 || 1], { logx: true, xlabel: "La (nm)", ylabel: "Particles" }); if (!ax) return;
+    const { ctx, X, Y } = ax;
+    // the calibrated range
+    ctx.setLineDash([4, 3]); ctx.strokeStyle = T.label;
+    for (const lim of [2, 500]) if (Math.log10(lim) > x0 && Math.log10(lim) < x1) { ctx.beginPath(); ctx.moveTo(X(lim), ax.Tp); ctx.lineTo(X(lim), ax.H - ax.B); ctx.stroke(); }
+    ctx.setLineDash([]);
+    H.forEach((h, g) => {
+      ctx.strokeStyle = A.k ? (A.pops[g].nd ? T.label : PARTICLE_COLOURS[g % PARTICLE_COLOURS.length]) : T.strong; ctx.lineWidth = 1.8; ctx.beginPath();
+      for (let b = 0; b < nb; b++) {
+        const xa = 10 ** (x0 + b / nb * (x1 - x0)), xb = 10 ** (x0 + (b + 1) / nb * (x1 - x0));
+        if (b) ctx.lineTo(X(xa), Y(h[b])); else ctx.moveTo(X(xa), Y(h[b]));
+        ctx.lineTo(X(xb), Y(h[b]));
+      }
+      ctx.stroke();
+    });
+    return;
+  }
+  // diameter: cumulative share by number and by volume
+  $("#pf-dist-note").textContent = "cumulative, every particle";
+  const pts = S.points, idx = []; for (let p = 0; p < S.nx; p++) if (pts.ecd[p] > 0) idx.push(p);
+  if (!idx.length) return;
+  idx.sort((a, b) => pts.ecd[a] - pts.ecd[b]);
+  const x0 = Math.log10(pts.ecd[idx[0]]), x1 = Math.log10(pts.ecd[idx[idx.length - 1]]) + 1e-9;
+  const ax = pfAxes(pfDistHost, [x0, x1], [0, 100], { logx: true, xlabel: "Diameter, circle equivalent (µm)", ylabel: "Cumulative %" }); if (!ax) return;
+  const { ctx, X, Y } = ax;
+  let tv = 0; for (const p of idx) tv += pts.volume[p] > 0 ? pts.volume[p] : 0;
+  const line = (col, val) => {
+    ctx.strokeStyle = col; ctx.lineWidth = 2; ctx.beginPath();
+    let cum = 0;
+    idx.forEach((p, i) => { cum += val(p); const x = X(pts.ecd[p]), y = Y(100 * cum); if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y); });
+    ctx.stroke();
+  };
+  line(PARTICLE_COLOURS[0], () => 1 / idx.length);
+  if (tv > 0) line(PARTICLE_COLOURS[1], p => (pts.volume[p] > 0 ? pts.volume[p] : 0) / tv);
+  ctx.font = font(11, "bold"); ctx.textAlign = "left"; ctx.textBaseline = "top";
+  ctx.fillStyle = PARTICLE_COLOURS[0]; ctx.fillText(`By number · D50 ${fmt(A.size.num[1], 3)} µm`, ax.L + 8, ax.Tp + 4);
+  if (tv > 0) { ctx.fillStyle = PARTICLE_COLOURS[1]; ctx.fillText(`By volume · D50 ${fmt(A.size.vol[1], 3)} µm`, ax.L + 8, ax.Tp + 19); }
+}
+
+for (const id of ["#pf-kd", "#pf-kq", "#pf-pop-ratio", "#pf-pop-mode", "#pf-cut1", "#pf-cut2", "#pf-laser", "#pf-pop-map"]) $(id).addEventListener("change", () => { if (S.points && S.fit) renderPF(); });
+$("#pf-dist").onchange = () => drawPfDist();
+$("#pf-csv").onclick = () => {
+  if (!S.points || !S.fit) return;
+  const A = pfAnalysis(), pts = S.points, ratio = A.ratio;
+  const jG = S.fit.names.findIndex(b => b.toLowerCase() === "g"), m = S.fit.m;
+  const num = v => (Number.isFinite(v) ? String(+(+v).toPrecision(6)) : "");
+  const rows = [["Particle", "X (um)", "Y (um)", "Diameter (um)", "Volume (um3)", "G signal/noise", "G on a bound", "Carbon detected", "Quantified",
+    "Population", `${A.rlab} intensity`, "G width (cm-1)", "G position (cm-1)", "A_D1/A_G", "La (nm)"]];
+  for (let p = 0; p < S.nx; p++) {
+    const aD = A.jD >= 0 ? S.fit.area[p * m + A.jD] : NaN, aG = jG >= 0 ? S.fit.area[p * m + jG] : NaN;
+    rows.push([String(p + 1), num(pts.x[p]), num(pts.y[p]), num(pts.ecd[p]), num(pts.volume[p]), num(A.snr[p]), A.atBound[p] ? "yes" : "no",
+      A.det[p] ? "yes" : "no", A.quant[p] ? "yes" : "no", A.label[p] >= 0 && A.k ? A.pops[A.label[p]].name : "",
+      ratio ? num(ratio[p]) : "", jG >= 0 ? num(S.fit.width[p * m + jG]) : "", jG >= 0 ? num(S.fit.position[p * m + jG]) : "", num(aD / aG), num(A.la[p])]);
+  }
+  download(`${S.ds.name}_particles.csv`, rows.map(r => r.join(",")).join("\n") + "\n", "text/csv");
+};
 
 // =========================================================================
 // report

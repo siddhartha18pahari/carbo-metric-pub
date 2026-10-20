@@ -92,6 +92,25 @@ function magic(raw, name) {
   for (let i = 0; i < 8; i++) if (raw[i] !== m.charCodeAt(i)) throw new Error(`${name}: not a LabSpec 6 file`);
 }
 
+// The excitation wavelength saved with the acquisition, in nm: a "Laser"
+// record whose value is the double 8 bytes after its "pos" tag. Some projects
+// save only the laser's state ("Off", value 0): null then.
+export function laserNm(raw) {
+  const dv = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
+  for (let i = raw.length - 6; i >= 0; i--) {
+    if (raw[i] !== 76 || raw[i + 1] !== 97 || raw[i + 2] !== 115 || raw[i + 3] !== 101 || raw[i + 4] !== 114 || raw[i + 5] !== 0) continue;
+    for (let j = i; j < Math.min(i + 80, raw.length - 2); j++) {
+      if (raw[j] !== 112 || raw[j + 1] !== 111 || raw[j + 2] !== 115) continue;   // "pos"
+      if (j + 16 <= raw.length) {
+        const v = dv.getFloat64(j + 8, true);
+        if (v > 200 && v < 1200) return Math.round(v * 1000) / 1000;
+      }
+      break;
+    }
+  }
+  return null;
+}
+
 export function readL6m(buf, name) {
   const raw = new Uint8Array(buf);
   magic(raw, name);
@@ -156,7 +175,7 @@ export function readL6m(buf, name) {
     wnOut.reverse();
   }
   return { cube, wn: wnOut, x: Float64Array.from(best.x), y: Float64Array.from(best.y), nx: best.x.length, ny: best.y.length,
-           name: stem(name), format: "l6m" };
+           name: stem(name), format: "l6m", laser: laserNm(raw) };
 }
 
 // white-light camera frame: uint8 RGB (H, W, 3), X axis listed before Y
@@ -278,7 +297,7 @@ export function readL6pf(buf, name) {
     spectra = flipped; wnOut.reverse();
   }
   const map = { cube: spectra, wn: wnOut, x: Float64Array.from({ length: P }, (_, p) => p + 1), y: Float64Array.of(0),
-                nx: P, ny: 1, name: stem(name), format: "l6pf", kind: "particles", points };
+                nx: P, ny: 1, name: stem(name), format: "l6pf", kind: "particles", points, laser: laserNm(raw) };
   return { map, video };
 }
 

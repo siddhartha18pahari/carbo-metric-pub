@@ -675,3 +675,22 @@ table.files .st-run { color: var(--accent); } table.files .st-err { color: var(-
 body.particles-mode .pf-only { display: block; }
 body.particles-mode .seg-only { display: none; }
 #pt-table tr.click { cursor: pointer; }
+
+/* ParticleFinder analysis: plots under the map, compact controls */
+.pt-main { display: grid; grid-template-rows: minmax(0, 1fr); gap: 12px; min-height: 0; min-width: 0; }
+body.particles-mode .pt-main { grid-template-rows: minmax(0, 1.35fr) minmax(0, 1fr); }
+body.particles-mode .pf-plots { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; min-height: 0; }
+.kx { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; }
+.kx input { width: 72px; flex: none; }
+.panel-h select.inline { width: auto; height: 26px; padding: 0 6px; font-weight: 600; }
+table.pf-pops td:first-child, table.pf-sizes td:first-child { text-align: left; }
+table.pf-pops .sw { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: -1px; }
+table.pf-pops td, table.pf-pops th, table.pf-sizes td, table.pf-sizes th { padding: 4px 5px; }
+table.pf-pops .sub, table.pf-sizes .sub { font-size: 11.5px; }
+.pf-scroll { overflow-x: auto; }
+#pf-pop-note, #pf-la-note, #pf-size-note { margin-top: 6px; line-height: 1.45; }
+@media (max-width: 1280px) {
+  body.particles-mode .pt-main { grid-template-rows: auto auto; }
+  body.particles-mode .pf-plots { grid-template-columns: minmax(0, 1fr); }
+  .pf-plots .panel { height: 280px; }
+}

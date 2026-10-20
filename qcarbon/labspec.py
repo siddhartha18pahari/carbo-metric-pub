@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import bisect
 import os
+import struct
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -155,6 +156,23 @@ def _read(path: str) -> bytes:
     return raw
 
 
+def laser_nm(raw: bytes) -> float | None:
+    """The excitation wavelength saved with the acquisition, in nm: a "Laser"
+    record whose value is the double 8 bytes after its "pos" tag. Some projects
+    save only the laser's state ("Off", value 0): None then."""
+    end = len(raw)
+    while True:
+        i = raw.rfind(b"Laser\x00", 0, end)
+        if i < 0:
+            return None
+        j = raw.find(b"pos", i, i + 80)
+        if 0 <= j and j + 16 <= len(raw):
+            v = struct.unpack_from("<d", raw, j + 8)[0]
+            if 200.0 < v < 1200.0:
+                return round(float(v), 3)
+        end = i
+
+
 # --------------------------------------------------------------------------
 # maps
 # --------------------------------------------------------------------------
@@ -225,7 +243,8 @@ def read_l6m(path: str) -> RamanMap:
     y = np.asarray(y, np.float64)
     return RamanMap(cube=np.ascontiguousarray(cube), wn=wn, x=x, y=y,
                     name=os.path.splitext(os.path.basename(path))[0], source=path,
-                    meta={"format": "l6m", "version": int.from_bytes(raw[12:16], "little")})
+                    meta={"format": "l6m", "version": int.from_bytes(raw[12:16], "little"),
+                          "laser_nm": laser_nm(raw)})
 
 
 # --------------------------------------------------------------------------
@@ -344,7 +363,7 @@ def read_l6pf(path: str) -> tuple[RamanMap, VideoImage | None]:
         wn, cube = wn[::-1].copy(), np.ascontiguousarray(cube[..., ::-1])
     m = RamanMap(cube=cube, wn=wn, x=np.arange(1, P + 1, dtype=float), y=np.zeros(1),
                  name=os.path.splitext(name)[0], source=path,
-                 meta={"format": "l6pf", "kind": "particles", "points": pts})
+                 meta={"format": "l6pf", "kind": "particles", "points": pts, "laser_nm": laser_nm(raw)})
     return m, video
 
 

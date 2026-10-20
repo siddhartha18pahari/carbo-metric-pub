@@ -39,6 +39,7 @@ export class MapView {
     this.values = null; this.valid = null;
     this.overlays = [];
     this.emptyText = null;           // shown over the map when it cannot have values
+    this.categories = null;          // particles coloured by group: { index, colours, names }
     this.label = ""; this.unit = "";
 
     host.classList.add("mapview");
@@ -137,6 +138,9 @@ export class MapView {
     this.setView({ x0: d.v.x0 - dx / this.k, x1: d.v.x1 - dx / this.k, y0: d.v.y0 - dy / this.k, y1: d.v.y1 - dy / this.k }, true);
     return true;
   }
+
+  // particles coloured by group instead of by value (index -1: in no group)
+  setCategories(c) { this.categories = c; this._ptsCache = null; this._dirty = true; this.render(); }
 
   // display smoothing: a filter over valid neighbours and/or interpolated pixels
   smoothed() { return this.filter !== "none" || this.smooth; }
@@ -248,10 +252,17 @@ export class MapView {
       if (valid[p]) continue;
       g.beginPath(); g.arc(X(p), Y(p), Math.max(minR, pt.ecd[p] / 2 * k), 0, 7); g.stroke();
     }
+    const C = this.categories;
     for (const p of order) {
-      if (!Number.isFinite(v[p])) continue;
-      const t = Math.max(0, Math.min(255, Math.round((v[p] - this.vmin) / span * 255))) * 3;
-      g.fillStyle = `rgb(${L[t]},${L[t + 1]},${L[t + 2]})`;
+      if (C) {
+        const c = C.index[p];
+        if (c < 0) { g.beginPath(); g.arc(X(p), Y(p), Math.max(minR, pt.ecd[p] / 2 * k), 0, 7); g.stroke(); continue; }
+        g.fillStyle = C.colours[c % C.colours.length];
+      } else {
+        if (!Number.isFinite(v[p])) continue;
+        const t = Math.max(0, Math.min(255, Math.round((v[p] - this.vmin) / span * 255))) * 3;
+        g.fillStyle = `rgb(${L[t]},${L[t + 1]},${L[t + 2]})`;
+      }
       g.beginPath(); g.arc(X(p), Y(p), Math.max(minR, pt.ecd[p] / 2 * k), 0, 7); g.fill();
     }
     if (!labels) return;
@@ -380,25 +391,40 @@ export class MapView {
       ctx.fillText(`${len} µm`, bx + len * this.k / 2, by - 2);
     }
 
-    // colour bar
+    // colour bar, or the legend of the groups
     const cx = P.x + P.w + 12, cy = P.y, ch = P.h;
-    const grad = ctx.createLinearGradient(0, cy + ch, 0, cy);
-    const L = lut(this.cmap);
-    for (let s = 0; s <= 16; s++) { const q = Math.round(s / 16 * 255) * 3; grad.addColorStop(s / 16, `rgb(${L[q]},${L[q + 1]},${L[q + 2]})`); }
-    ctx.fillStyle = grad; ctx.fillRect(cx, cy, cbW, ch);
-    ctx.strokeStyle = T.frame; ctx.strokeRect(cx - .5, cy - .5, cbW + 1, ch + 1);
-    ctx.fillStyle = T.ink; ctx.font = font(11); ctx.textAlign = "left"; ctx.textBaseline = "middle";
-    for (const t of niceTicks(this.vmin, this.vmax, Math.max(2, Math.floor(ch / 40)))) {
-      const Y = cy + ch - (t - this.vmin) / (this.vmax - this.vmin) * ch;
-      ctx.fillRect(cx + cbW, Y, 3, 1); ctx.fillText(fmt(t, 3), cx + cbW + 5, Y);
-    }
-    if (this.label) {
-      ctx.save(); ctx.translate(W - 6, cy + ch / 2); ctx.rotate(-Math.PI / 2);
-      ctx.fillStyle = T.label; ctx.font = font(12); ctx.textAlign = "center";
-      ctx.fillText(this.label + (this.unit ? ` (${this.unit})` : ""), 0, 0); ctx.restore();
+    if (this.points && this.categories) this._legend(ctx, cx, cy);
+    else {
+      const grad = ctx.createLinearGradient(0, cy + ch, 0, cy);
+      const L = lut(this.cmap);
+      for (let s = 0; s <= 16; s++) { const q = Math.round(s / 16 * 255) * 3; grad.addColorStop(s / 16, `rgb(${L[q]},${L[q + 1]},${L[q + 2]})`); }
+      ctx.fillStyle = grad; ctx.fillRect(cx, cy, cbW, ch);
+      ctx.strokeStyle = T.frame; ctx.strokeRect(cx - .5, cy - .5, cbW + 1, ch + 1);
+      ctx.fillStyle = T.ink; ctx.font = font(11); ctx.textAlign = "left"; ctx.textBaseline = "middle";
+      for (const t of niceTicks(this.vmin, this.vmax, Math.max(2, Math.floor(ch / 40)))) {
+        const Y = cy + ch - (t - this.vmin) / (this.vmax - this.vmin) * ch;
+        ctx.fillRect(cx + cbW, Y, 3, 1); ctx.fillText(fmt(t, 3), cx + cbW + 5, Y);
+      }
+      if (this.label) {
+        ctx.save(); ctx.translate(W - 6, cy + ch / 2); ctx.rotate(-Math.PI / 2);
+        ctx.fillStyle = T.label; ctx.font = font(12); ctx.textAlign = "center";
+        ctx.fillText(this.label + (this.unit ? ` (${this.unit})` : ""), 0, 0); ctx.restore();
+      }
     }
     this._drawCursor();
     if (this.resetBtn) this.resetBtn.classList.toggle("hidden", !this.zoomed());
+  }
+
+  _legend(ctx, cx, cy) {
+    const C = this.categories, row = c => cy + 8 + c * 18;
+    ctx.font = font(11, "bold"); ctx.textAlign = "left"; ctx.textBaseline = "middle";
+    C.names.forEach((nm, c) => {
+      ctx.fillStyle = C.colours[c % C.colours.length]; ctx.beginPath(); ctx.arc(cx + 5, row(c), 5, 0, 7); ctx.fill();
+      ctx.fillStyle = T.ink; ctx.fillText(nm, cx + 14, row(c));
+    });
+    const n = C.names.length;
+    ctx.strokeStyle = T.hatchLine; ctx.lineWidth = 1; ctx.beginPath(); ctx.arc(cx + 5, row(n), 4.5, 0, 7); ctx.stroke();
+    ctx.fillStyle = T.label; ctx.font = font(10); ctx.fillText("none", cx + 14, row(n));
   }
 
   idxXY(p) {
@@ -462,7 +488,9 @@ export class MapView {
     const bad = this.valid && !this.valid[p];
     const filt = this.filter !== "none" && this.values ? ` (filtered ${fmt(this.shown()[p])})` : "";
     const who = this.points ? `#${p + 1} · ` : "";
-    this.readout.textContent = `${who}${fmt(xu, 3)}, ${fmt(yu, 3)} µm  →  ${bad ? "invalid" : fmt(v) + filt}`;
+    const C = this.points && this.categories;
+    const grp = C ? ` · ${C.index[p] < 0 ? "in no population" : `population ${C.names[C.index[p]]}`}` : "";
+    this.readout.textContent = `${who}${fmt(xu, 3)}, ${fmt(yu, 3)} µm  →  ${bad ? "invalid" : fmt(v) + filt}${grp}`;
     this.opts.onHover && this.opts.onHover(p);
   }
 

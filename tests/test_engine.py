@@ -12,6 +12,7 @@ from scipy.integrate import quad
 from qcarbon.config import Config, Peak
 from qcarbon.fitter import fit_spectra, shape_eval, windowed_area, baseline_basis
 from qcarbon.labspec import read_l6_image, read_l6m, read_l6v, read_map, read_text, find_video
+from qcarbon import labspec
 from qcarbon.results import export_table, safe_ratio, statistics, valid_mask
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -495,3 +496,27 @@ def test_spatial_smoothing_unchanged_on_complete_maps():
 def test_lab_map_stopped_early_opens():
     m = read_text(vendor("incomplete_map"))
     assert m.meta["missing"] == 3 and np.isfinite(m.cube).all(axis=-1).sum() == 118
+
+
+def _laser_record(nm):
+    """A "Laser" record as LabSpec 6 saves it: name, padding, a "pos" tag 40
+    bytes in, and the value as a double 8 bytes after the tag."""
+    import struct
+    rec = bytearray(b"Laser\x00" + bytes(34) + b"pos" + bytes(5) + struct.pack("<d", nm) + bytes(8))
+    return bytes(rec)
+
+
+def test_laser_wavelength_from_the_acquisition_record():
+    # the last record with a plausible value wins; a laser saved as "Off" (0) does not count
+    raw = b"LabSpec6" + bytes(100) + _laser_record(785.0) + bytes(50) + _laser_record(532.12) + bytes(20)
+    assert labspec.laser_nm(raw) == 532.12
+    assert labspec.laser_nm(b"LabSpec6" + _laser_record(0.0)) is None
+    assert labspec.laser_nm(b"LabSpec6" + bytes(200)) is None
+
+
+def test_laser_wavelength_on_lab_files():
+    pf, small, grid = vendor("pf_project", "pf_small_project", "g_band_map")
+    assert labspec.laser_nm(open(pf, "rb").read()) == 532.12
+    assert labspec.laser_nm(open(grid, "rb").read()) == 532.12
+    # this project saved only the laser's state
+    assert labspec.laser_nm(open(small, "rb").read()) is None

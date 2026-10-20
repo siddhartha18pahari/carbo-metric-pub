@@ -283,12 +283,63 @@
 
   <!-- ======================= Particles ======================= -->
   <section id="tab-particles" class="tab">
-    <div class="panel map big" id="map-p"></div>
+    <div class="pt-main">
+      <div class="panel map big" id="map-p"></div>
+      <div class="pf-plots pf-only">
+        <div class="panel col">
+          <div class="panel-h">Mean spectrum by population <span class="muted small">baseline removed, G = 1, band ± 1 SD</span></div>
+          <div class="plot" id="pf-spec"><canvas></canvas></div>
+        </div>
+        <div class="panel col">
+          <div class="panel-h"><select id="pf-dist" class="inline"><option value="la">Crystallite size La</option><option value="size">Particle diameter</option></select><span class="muted small" id="pf-dist-note"></span></div>
+          <div class="plot" id="pf-dist-plot"><canvas></canvas></div>
+        </div>
+      </div>
+    </div>
     <aside class="side">
       <div class="sec pf-only">
         <div class="sec-h">ParticleFinder particles</div>
         <div class="frow"><label>Plot against</label><select id="pf-x"></select></div>
         <div class="muted small">One spectrum per particle, placed at the particle's stage position and sized by its diameter. Positions and morphology are read from the project; each spectrum is fitted with the same configuration as a map.</div>
+      </div>
+      <div class="sec pf-only" data-sec="pf-detect">
+        <div class="sec-h toggle">Detection and quality</div>
+        <div class="sec-b">
+          <div class="frow"><label>Carbon detected</label><div class="kx"><span>G ≥</span><input type="number" id="pf-kd" value="3" min="0.5" step="0.5"><span>× noise</span></div></div>
+          <div class="frow"><label>Quantified</label><div class="kx"><span>G ≥</span><input type="number" id="pf-kq" value="10" min="1" step="1"><span>× noise</span></div></div>
+          <div class="cards" id="pf-detect-cards"></div>
+          <div class="muted small">Noise: the residual of each particle's own fit. Both levels also need G inside its fit bounds (a band stuck on a bound is fitting noise), and quantified particles must pass the Constraints of the Carbon fit tab. Everything below uses the quantified particles.</div>
+        </div>
+      </div>
+      <div class="sec pf-only" data-sec="pf-pop">
+        <div class="sec-h toggle">Populations</div>
+        <div class="sec-b">
+          <div class="frow"><label>Group on</label><select id="pf-pop-ratio" title="The band ratio the populations are found on (with the G width and position). D1/G by default: weak bands such as D3 are rarely detected in one particle's spectrum."></select></div>
+          <div class="frow"><label>Grouping</label><select id="pf-pop-mode"><option value="auto">Found automatically</option><option value="cut">Cut-offs on the ratio</option><option value="none">None</option></select></div>
+          <div class="frow pf-cut hidden"><label id="pf-cut-label">Cut-offs</label><div class="row2"><input type="number" id="pf-cut1" step="any" placeholder="first"><input type="number" id="pf-cut2" step="any" placeholder="second (optional)"></div></div>
+          <div class="frow"><label></label><label class="chk"><input type="checkbox" id="pf-pop-map" checked> Colour the particles by population</label></div>
+          <div class="pf-scroll"><table class="stats pf-pops" id="pf-pop-table"></table></div>
+          <div class="muted small" id="pf-pop-note"></div>
+        </div>
+      </div>
+      <div class="sec pf-only" data-sec="pf-la">
+        <div class="sec-h toggle">Crystallite size L<sub>a</sub></div>
+        <div class="sec-b">
+          <div class="frow"><label>Laser (nm)</label><input type="number" id="pf-laser" step="any" min="200" max="1200"></div>
+          <div class="cards" id="pf-la-cards"></div>
+          <div class="muted small" id="pf-la-note"></div>
+        </div>
+      </div>
+      <div class="sec pf-only" data-sec="pf-size">
+        <div class="sec-h toggle">Size</div>
+        <div class="sec-b">
+          <table class="stats" id="pf-size-table"></table>
+          <table class="stats pf-sizes" id="pf-sizeclass-table"></table>
+          <div class="muted small" id="pf-size-note"></div>
+        </div>
+      </div>
+      <div class="sec pf-only">
+        <button class="wide" id="pf-csv">Export particle analysis (CSV)</button>
       </div>
       <div class="sec seg-only">
         <div class="sec-h">Find particles</div>
