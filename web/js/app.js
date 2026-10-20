@@ -11,7 +11,9 @@ import { SplatView, sliceField } from "./splat3d.js";
 import { segment, outlineOverlay, distance, PARTICLE_COLOURS } from "./particles.js";
 import { buildReport } from "./report.js";
 import { wilson, weightedQuantile, laCancado, robustScale, bestGmm, bootstrapShares, median, quantileSorted,
-         heightCovariances, ratioVariance, heterogeneity, moranI, spearmanCI, coverage, pairRatio } from "./pf-analysis.js";
+         heightCovariances, ratioVariance, heterogeneity, moranI, spearmanCI, coverage, pairRatio,
+         binomLower, certifyCount, detectionPower, signalFloor, gini, noiseGini, logCV, lognormalPreferred,
+         gridMoran, effectiveN, variogram, fitVariogram, hotSpots, blockShuffle, floorWithReference } from "./pf-analysis.js";
 import { T, font, setTheme, currentTheme } from "./theme.js";
 
 const QUANT = { intensity: "Intensity", width: "Width", area: "Area", position: "Position" };
@@ -1574,6 +1576,7 @@ function renderParticles() {
     el("td", {}, fmt(p.gw, 3)), el("td", { class: "sub" }, `${fmt(p.cx, 3)}, ${fmt(p.cy, 3)}`)));
   drawStrip();
   renderSegCoating(card);
+  renderCoverage(card);
 }
 
 function drawStrip() {
@@ -1639,7 +1642,8 @@ function segCoating() {
   // and not on the rim, where the laser spot lies partly off the particle: depth is the
   // distance from the pixel's centre to the particle's edge
   const step = Math.min(S.nx > 1 ? Math.abs(S.x[1] - S.x[0]) : Infinity, S.ny > 1 ? Math.abs(S.y[1] - S.y[0]) : Infinity);
-  if (!S.segDepth || S.segDepth.seg !== seg) S.segDepth = { seg, d: distance(Uint8Array.from(seg.labels, l => (l ? 1 : 0)), S.nx, S.ny) };
+  // the map border is not a rim: where the map cuts a particle, the particle goes on beyond it
+  if (!S.segDepth || S.segDepth.seg !== seg) S.segDepth = { seg, d: distance(Uint8Array.from(seg.labels, l => (l ? 1 : 0)), S.nx, S.ny, true) };
   const depth = p => (S.segDepth.d[p] - 0.5) * step;
   const groups = quant.map(g => g.filter(p => depth(p) >= rim)), rimPx = quant.map(g => g.filter(p => depth(p) < rimRef));
   const used = groups.flat();
@@ -1683,12 +1687,44 @@ function segCoating() {
     }
     return r;
   });
+  // how far each particle runs off the map: the share of its outline on the map's border
+  for (const [k, pt] of seg.parts.entries()) {
+    let edge = 0, onBorder = 0;
+    for (const p of pt.pixels) {
+      const i = (p / S.nx) | 0, j = p - i * S.nx, l = seg.labels[p];
+      const border = i === 0 || j === 0 || i === S.ny - 1 || j === S.nx - 1;
+      if (border || seg.labels[p - 1] !== l || seg.labels[p + 1] !== l || seg.labels[p - S.nx] !== l || seg.labels[p + S.nx] !== l) { edge++; if (border) onBorder++; }
+    }
+    rows[k].cut = edge ? onBorder / edge : 0;
+  }
+  // beyond the CV, per particle with enough pixels: inequality against its own noise, the shape of the
+  // distribution, how many pixels are worth independent values, the variogram (its nugget is a check on
+  // the noise model that does not use it; its plateau the structured spread) and locally thin places
+  // against a null that keeps the spatial correlation (whole blocks moved)
+  for (const [k, g] of groups.entries()) {
+    const r = rows[k];
+    if (!r.h || g.length < 100) continue;
+    let i0 = Infinity, i1 = -1, j0 = Infinity, j1 = -1;
+    for (const p of g) { const i = (p / S.nx) | 0, j = p - i * S.nx; i0 = Math.min(i0, i); i1 = Math.max(i1, i); j0 = Math.min(j0, j); j1 = Math.max(j1, j); }
+    const w = j1 - j0 + 1, hh = i1 - i0 + 1, img = new Float64Array(w * hh), ok = new Uint8Array(w * hh);
+    const vals = [], ses = [];
+    for (const p of g) { const i = (p / S.nx) | 0, j = p - i * S.nx, q = (i - i0) * w + (j - j0); img[q] = y[p]; ok[q] = 1; vals.push(y[p]); ses.push(se[p]); }
+    const med = median(vals), noise2 = ses.reduce((t, v) => t + v * v, 0) / ses.length;
+    const hmax = Math.max(4, Math.min(15, Math.floor(Math.min(w, hh) / 3))), vg = variogram(img, ok, w, hh, hmax);
+    const fitC = fitVariogram(vg.lags, vg.classical, hmax), fitR = fitVariogram(vg.lags, vg.robust, hmax);
+    const moran = gridMoran(img, ok, w, hh), hs = hotSpots(img, ok, w, hh), sh = blockShuffle(img, ok, w, hh, 8);
+    const hsNull = sh ? hotSpots(sh.img, sh.ok, sh.nx, sh.ny) : null;
+    r.u = { n: g.length, gini: gini(vals), giniNoise: noiseGini(med, ses), logn: lognormalPreferred(vals), lcv: logCV(vals),
+            neff: effectiveN(g.length, moran), nugget: fitC ? fitC.nugget / noise2 : NaN,
+            structured: fitR && med > 0 ? Math.sqrt(Math.max(fitR.sill - fitR.nugget, 0)) / med : NaN, range: fitR ? fitR.range * step : NaN, ranged: fitR ? fitR.identified : false,
+            cold: hs.cold, coldNull: hsNull ? hsNull.cold : NaN };
+  }
   // pixel pairs against their errors: the nearest, about 1 µm and about 3 µm apart
   const lags = [...new Set([1, Math.round(1 / step), Math.round(3 / step)])].filter(L => L >= 1 && L < Math.max(S.nx, S.ny));
   const pairs = lags.map(L => ({ L, um: L * step, ...pairRatio(y, se, lab, S.nx, S.ny, L) })).filter(q => q.n >= 30);
   const nUsed = cnt[0] + cnt[1] + cnt[2], nDet = rows.reduce((s, r) => s + (r.h ? r.det : 0), 0);
   const nQuant = quant.reduce((s, g) => s + g.length, 0);
-  return (S.segCoat = { key, seg, band, C, rows, cat, below: cnt[0], within: cnt[1], above: cnt[2], n: nUsed, nDet, step, pairs, rim,
+  return (S.segCoat = { key, seg, band, C, rows, cat, px: { groups, y, se }, below: cnt[0], within: cnt[1], above: cnt[2], n: nUsed, nDet, step, pairs, rim,
                         rimCmp: rn ? { ratio: rs / rn, g: gs / rn, n: rn, width: rimRef } : null, rimLeft: nQuant - used.length,
                         left: seg.parts.reduce((s, pt) => s + pt.pixels.length, 0) - nQuant, small: rows.filter(r => !r.h).length });
 }
@@ -1702,7 +1738,7 @@ function renderSegCoating(card) {
   }
   if (!A || !A.C) {
     box.className = "verdict"; box.textContent = ""; t.textContent = "";
-    $("#seg-coat-cards").replaceChildren();
+    $("#seg-coat-cards").replaceChildren(); $("#seg-more-cards").replaceChildren(); $("#seg-more-cards-h").textContent = "";
     $("#seg-coat-note").textContent = A ? A.why : "";
     return;
   }
@@ -1741,8 +1777,34 @@ function renderSegCoating(card) {
     if (pFar.ratio > p1.ratio + 0.2) more.push(`The excess is organised in space: pixels ${fmt(p1.um, 2)} µm apart differ ${p1.ratio.toFixed(2)} × what their errors allow, pixels ${fmt(pFar.um, 2)} µm apart ${pFar.ratio.toFixed(2)} ×. These are patches of the coating index on the micrometre scale, not pixel noise.`);
     else if (p1.ratio > 1.3) more.push(`Neighbouring pixels differ by ${p1.ratio.toFixed(2)} × what their errors allow, and pixels ${fmt(pFar.um, 2)} µm apart hardly more (${pFar.ratio.toFixed(2)} ×), as noise would. The errors look too small, so the within-particle numbers overstate the patchiness.`);
   }
+  // particles the map cuts: their outline there is the map's edge, not theirs
+  const cut = A.rows.filter(r => r.cut > 0.02);
+  if (cut.length) {
+    const worst = cut.reduce((u, v) => (v.cut > u.cut ? v : u));
+    more.push(`${cut.length === A.rows.length ? (cut.length === 1 ? "The particle runs" : "Every particle runs") : `${cut.length} of ${A.rows.length} particles run`} off the edge of the map (${pct(worst.cut)} of particle ${worst.id}'s outline lies on the map's border): what lies beyond is unmeasured, and the cut is not a rim.`);
+  }
+  // beyond the CV, the median over the particles that have enough pixels
+  const U = A.rows.filter(r => r.u).map(r => r.u), mid = k => median(U.map(u => u[k]).filter(Number.isFinite));
+  if (U.length) {
+    const nug = mid("nugget"), cold = mid("cold"), coldNull = mid("coldNull"), nLog = U.filter(u => u.logn).length;
+    if (Number.isFinite(nug)) more.push(nug >= 0.5 && nug <= 2
+      ? `The variogram's nugget, which never uses the fits' noise model, agrees with it (${nug.toFixed(2)} × the predicted noise), an independent check on the noise correction above.`
+      : `The variogram's nugget is ${nug.toFixed(2)} × the noise the fits predict, outside a factor of 2: the noise model is off on this map, so the noise-corrected numbers above should not be relied on.`);
+    if (Number.isFinite(cold) && Number.isFinite(coldNull)) more.push(cold > coldNull + 0.02
+      ? `Gi* marks ${pct(cold)} of the pixels as locally thin; the same field with whole 8 × 8 pixel blocks moved about (which keeps any structure up to that size) gives ${pct(coldNull)}. The excess, ${pct(cold - coldNull)}, is thin regions larger than the blocks.`
+      : `Gi* marks ${pct(cold)} of the pixels as locally thin, no more than the same field with whole 8 × 8 pixel blocks moved about (${pct(coldNull)}): any thin places are no larger than the blocks, which this test cannot tell from ordinary correlation.`);
+    if (nLog > U.length / 2) more.push(`${b}/G is right-skewed inside the particles (a lognormal fits better than a normal on ${nLog} of ${U.length}), so a uniformity limit belongs on its logarithm or its quantiles, not as a band about the mean.`);
+  }
   box.className = `verdict ${["good", "good", "warn", "bad"][Math.max(gw, gb === 2 ? 2 : 0)]}`;
   box.replaceChildren(el("b", {}, head), el("div", {}, body), ...more.map(s => el("p", {}, s)));
+  $("#seg-more-cards-h").textContent = U.length ? `Beyond the CV, inside the particles${U.length > 1 ? ` (median of ${U.length})` : ""}` : "";
+  $("#seg-more-cards").replaceChildren(...(U.length ? [
+    card("Inequality (Gini)", fmt(mid("gini"), 3), `noise alone gives ${fmt(mid("giniNoise"), 3)} · excess ${fmt(mid("gini") - mid("giniNoise"), 2)}`),
+    card("Noise check (nugget)", `${fmt(mid("nugget"), 3)} ×`, "variogram nugget over the fits' noise · 0.5 to 2 agrees"),
+    card("Structured spread", pct(mid("structured")), `variogram plateau · range ${fmt(mid("range"), 2)} µm${U.every(u => u.ranged) ? "" : " or more"}`),
+    card("Thin places (Gi*)", pct(mid("cold")), `${pct(mid("coldNull"))} with 8 × 8 blocks moved · excess ${pct(Math.max(0, mid("cold") - mid("coldNull")))}`),
+    card("Distribution", U.filter(u => u.logn).length > U.length / 2 ? "right-skewed" : "symmetric", `log-scale CV ${pct(mid("lcv"))}`),
+    card("Independent pixels", fmt(mid("neff"), 3), `of ${fmt(mid("n"))} · ${fmt(mid("n") / mid("neff"), 2)} × fewer than the pixel count`)] : []));
 
   $("#seg-coat-cards").replaceChildren(
     card(`Mean ${b}/G`, fmt(mu, 3), `${B ? `${pm(mu, B.seMu)} · ` : ""}${C.particles} particle${C.particles === 1 ? "" : "s"} · ${fmt(W.n)} pixels`),
@@ -1758,14 +1820,15 @@ function renderSegCoating(card) {
     card("Rim vs the rest", RC ? `${RC.ratio.toFixed(2)} × ${b}/G` : "–", RC ? `outer ${fmt(RC.width, 3)} µm · G ${RC.g.toFixed(2)} × · ${A.rim ? "left out" : "included"}` : "no rim pixels"));
 
   t.textContent = "";
-  t.append(el("tr", {}, ...["#", "Pixels", `${b}/G`, "CV inside", "I²", `${b} detected`].map(h => el("th", {}, h))));
+  t.append(el("tr", {}, ...["#", "Pixels", `${b}/G`, "CV inside", "I²", `${b} detected`, "Cut"].map(h => el("th", {}, h))));
   for (const r of A.rows) t.append(el("tr", {},
     el("td", {}, el("b", { style: `color:${PARTICLE_COLOURS[(r.id - 1) % PARTICLE_COLOURS.length]}` }, `● ${r.id}`)),
     el("td", {}, fmt(r.used), el("div", { class: "sub" }, `of ${fmt(r.total)}`)),
     ...(r.h ? [el("td", {}, fmt(r.h.mu, 3), el("div", { class: "sub" }, pm(r.h.mu, r.h.seMu))),
                el("td", {}, pct(r.h.tau / r.h.mu), el("div", { class: "sub" }, low(r.h) ? `≤ ${pct(r.h.sd / r.h.mu)}` : `${pct(r.h.tauLo / r.h.mu)}–${pct(r.h.tauHi / r.h.mu)}`)),
                el("td", {}, pct(r.h.I2), el("div", { class: "sub" }, `p ${pFmt(r.h.p)}`)), el("td", {}, pct(r.det / r.used))]
-             : [el("td", { colspan: 4, class: "sub" }, "fewer than 3 pixels with a quantified G")])));
+             : [el("td", { colspan: 4, class: "sub" }, "fewer than 3 pixels with a quantified G")]),
+    el("td", { class: r.cut > 0.02 ? "" : "sub", title: "Share of the particle's outline on the map's border" }, r.cut > 0.02 ? pct(r.cut) : "–")));
 
   const spot = A.step < 1 ? `The step here is ${fmt(A.step, 2)} µm and a 532 nm laser spot is about 1 µm across, so one spot covers about ${fmt(Math.PI * (0.5 / A.step) ** 2, 2)} pixels and neighbouring spectra share most of what they probe. ` : `The step here (${fmt(A.step, 2)} µm) is at least the size of a 532 nm laser spot (about 1 µm), so neighbouring spectra hardly overlap. `;
   $("#seg-coat-note").textContent =
@@ -1783,6 +1846,169 @@ function renderSegCoating(card) {
 $("#seg-coat-band").onchange = () => { if (S.seg) renderParticles(); };
 $("#seg-colour").onchange = () => { if (S.seg) renderParticles(); };
 $("#seg-rim").onchange = () => { if (S.seg) renderParticles(); };
+
+// =========================================================================
+// Coverage: the share of particles (or of a particle's area) that carries the coating
+// =========================================================================
+// A spectrum is judged only above a signal floor: the G height at which a coating of the
+// thinnest functional index rc is found against the threshold tau with the chosen power,
+// P = 1 - Phi[(tau - rc) / sigma_R(g)], sigma_R(g) = sqrt(sigmaD² + rc² sigmaG²) / g, from the
+// noise of the band heights. Below it a spectrum cannot tell coated from uncoated, and
+// counting it would measure the signal instead of the coating. tau comes out of sample, from
+// an uncoated reference measured in the same session: the 99th percentile of its coating
+// index, so 1 % of uncoated spectra pass it (the false-detection rate).
+const COV_FPR = 0.01;
+
+// an uncoated reference open in this window: the G height and coating index of its quantified
+// spectra (G at least 10 x noise and inside its bounds; ParticleFinder particles measured and off
+// the seams). Its threshold is the 99th percentile of the index over those at least as bright as
+// the floor, since dim spectra scatter more (floorWithReference).
+function refSpectra(f, band) {
+  const r = f && f.result; if (!r) return null;
+  const m = r.m, jG = r.names.findIndex(b => b.toLowerCase() === "g"), jC = r.names.indexOf(band);
+  if (jG < 0 || jC < 0) return null;
+  const I = f32(r.intensity), X = f32(r.position), Wd = f32(r.width), se = f32(r.std_error);
+  const gp = ((r.config && r.config.peaks) || []).find(q => q.name === r.names[jG]);
+  const pts = f.info.points, st = pts && pts.cls ? f32(pts.cls) : null, sm = pts && pts.seam ? f32(pts.seam) : null;
+  const near = (v, b, span) => Math.abs(v - b) < 1e-3 * span, vals = [];
+  for (let p = 0; p < se.length; p++) {
+    const g = I[p * m + jG];
+    if (!(se[p] > 0) || !(g >= 10 * se[p]) || (st && st[p] !== 1) || (sm && sm[p])) continue;
+    if (gp) {
+      const x = X[p * m + jG], w = Wd[p * m + jG], sx = gp.pos_max - gp.pos_min, sw = gp.width_max - gp.width_min;
+      if (near(x, gp.pos_min, sx) || near(x, gp.pos_max, sx) || near(w, gp.width_min, sw) || near(w, gp.width_max, sw)) continue;
+    }
+    vals.push([g, I[p * m + jC] / g]);
+  }
+  return vals.length ? { g: vals.map(v => v[0]), r: vals.map(v => v[1]), n: vals.length, name: f.name, median: median(vals.map(v => v[1])) } : null;
+}
+
+function covSettings(band) {
+  // the reference: any other open file that has been fitted
+  const sel = $("#cov-ref"), others = F.files.filter(f => f.result && (!S.ds || f.id !== S.ds.id)), ids = others.map(f => f.id).join("|");
+  if (sel.dataset.ids !== ids) {
+    const keep = sel.value;
+    sel.replaceChildren(el("option", { value: "" }, others.length ? "none: enter τ" : "none open: enter τ"), ...others.map(f => el("option", { value: f.id }, f.name)));
+    sel.dataset.ids = ids; sel.value = others.some(f => f.id === keep) ? keep : "";
+  }
+  const ref = sel.value ? refSpectra(fileOf(sel.value), band) : null, tauIn = $("#cov-tau");
+  tauIn.disabled = !!ref;
+  const rcIn = parseFloat($("#cov-rc").value);
+  return { tau: ref ? NaN : parseFloat(tauIn.value), rcIn: Number.isFinite(rcIn) ? rcIn : NaN, ref,
+           power: Math.min(0.9999, Math.max(0.5, +$("#cov-power").value || 0.95)), spec: Math.min(0.9999, Math.max(0.5, +$("#cov-spec").value || 0.99)) };
+}
+
+// the floor, the threshold and the thinnest coating for the spectra judged: with a reference, the
+// floor and tau are found together (floorWithReference); entered by hand, tau is used as given. The
+// thinnest coating is the specification's value when entered, otherwise a stated default: halfway
+// between the uncoated reference's median and this sample's (2 x tau without a reference).
+function covFloor(cs, sD, sG, sampleMedian) {
+  const rc = Number.isFinite(cs.rcIn) ? cs.rcIn : cs.ref ? 0.5 * (cs.ref.median + sampleMedian) : 2 * cs.tau, rcDefault = !Number.isFinite(cs.rcIn);
+  if (!cs.ref) return { rc, rcDefault, tau: cs.tau, gmin: signalFloor(rc, cs.tau, sD, sG, cs.power), nRef: 0 };
+  const t = floorWithReference(cs.ref.g, cs.ref.r, rc, sD, sG, cs.power);
+  if (t) return { rc, rcDefault, tau: t.tau, gmin: t.g, nRef: t.n };
+  // why not: even the reference's brightest 100 spectra leave a threshold that needs a brighter floor than they reach
+  const top = cs.ref.g.map((g, i) => [g, cs.ref.r[i]]).sort((a, b) => b[0] - a[0]).slice(0, 100);
+  const tauTop = quantileSorted(Float64Array.from(top, v => v[1]).sort(), 0.99);
+  return { rc, rcDefault, tau: NaN, gmin: Infinity, nRef: 0, none: true, tauTop, gTop: top.length ? top[top.length - 1][0] : NaN, gNeed: signalFloor(rc, tauTop, sD, sG, cs.power) };
+}
+function showFloor(F, band) {
+  $("#cov-tau").value = Number.isFinite(F.tau) ? +F.tau.toPrecision(4) : "";
+  $("#cov-rc").placeholder = `${fmt(F.rc, 3)} (default)`;
+  $("#cov-tau-note").textContent = F.nRef ? `${band}/G · 99th percentile of the ${fmt(F.nRef)} reference spectra above the floor` : `${band}/G · uncoated above it: 1 %`;
+}
+
+// the noise of the two band heights: their median standard error over the spectra judged
+function heightNoise(cov, m, jC, jG, list) {
+  const sd = j => median(list.map(p => Math.sqrt(cov[p * m * m + j * m + j])).filter(Number.isFinite));
+  return [sd(jC), sd(jG)];
+}
+
+// ParticleFinder: particle-level coverage with its exact lower bound, and the count that certifies
+function pfCoverage(A, cs, band) {
+  const f = S.fit, m = f.m, cov = S.pfCov.cov, jG = f.names.findIndex(b => b.toLowerCase() === "g"), jC = f.names.indexOf(band);
+  if (jG < 0 || jC < 0) return null;
+  // the particles of the analysis (measured, in the run, off the seams), G inside its bounds, passing the Constraints
+  const pool = []; for (let p = 0; p < A.n; p++) if (Number.isFinite(A.snr[p]) && !A.atBound[p] && (!S.valid || S.valid[p])) pool.push(p);
+  if (pool.length < 3) return null;
+  const G = p => f.intensity[p * m + jG], R = p => f.intensity[p * m + jC] / G(p), [sD, sG] = heightNoise(cov, m, jC, jG, pool);
+  const F = covFloor(cs, sD, sG, median(pool.map(R))), { gmin, tau, rc } = F;
+  const meas = pool.filter(p => G(p) >= gmin), n = meas.length, x = meas.filter(p => R(p) > tau).length;
+  const piBar = n ? meas.reduce((t, p) => t + detectionPower(rc, tau, sD, sG, G(p)), 0) / n : NaN;
+  const lower = n ? binomLower(n, n - x) : NaN, need = cs.spec * piBar + (1 - cs.spec) * COV_FPR;
+  return { mode: "pf", band, F, pool: pool.length, n, x, c: n ? x / n : NaN, lower, gmin, sD, sG, piBar, pass: lower >= need,
+           certified: Math.max(0, Math.min(1, (lower - COV_FPR) / (piBar - COV_FPR))), needed: Number.isFinite(piBar) ? certifyCount(cs.spec, piBar, COV_FPR) : null };
+}
+
+// a map: the covered area of each particle above the floor, its lower bound counting the pixels
+// as the independent values they are worth (the effective sample size, from the lag-one correlation)
+function mapCoverage(A2, cs) {
+  const f = S.fit, m = f.m, cov = S.segCov.cov, jG = f.names.findIndex(b => b.toLowerCase() === "g"), jC = f.names.indexOf(A2.band);
+  const all = A2.px.groups.flat(); if (!all.length) return null;
+  const G = p => f.intensity[p * m + jG], [sD, sG] = heightNoise(cov, m, jC, jG, all);
+  const F = covFloor(cs, sD, sG, median(all.map(p => A2.px.y[p]))), { gmin, tau } = F, parts = [];
+  A2.px.groups.forEach((g, k) => {
+    const meas = g.filter(p => G(p) >= gmin), n = meas.length; if (n < 10) return;
+    const x = meas.filter(p => A2.px.y[p] > tau).length, u = A2.rows[k].u;
+    const neff = u ? Math.max(1, u.neff * n / u.n) : n, c = x / n;
+    parts.push({ id: A2.rows[k].id, n, total: g.length, c, neff, lower: binomLower(Math.max(1, Math.round(neff)), Math.round(neff * (1 - c))) });
+  });
+  const nMeas = parts.reduce((t, q) => t + q.n, 0);
+  return { mode: "map", band: A2.band, F, parts, gmin, sD, sG, share: nMeas / all.length,
+           mean: parts.length ? parts.reduce((t, q) => t + q.c, 0) / parts.length : NaN, lowest: parts.length ? Math.min(...parts.map(q => q.lower)) : NaN };
+}
+
+function renderCoverage(card) {
+  const box = $("#cov-verdict"), cards = $("#cov-cards"), note = $("#cov-note");
+  const clear = msg => { box.className = "verdict"; box.textContent = ""; cards.replaceChildren(); note.textContent = msg; };
+  const band = S.points ? $("#pf-coat-band").value : $("#seg-coat-band").value;
+  if (!S.fit || !band || S.fit.resultsOnly) return clear(S.fit && S.fit.resultsOnly ? "Coverage needs the spectra: open the map itself." : "");
+  const cs = covSettings(band);
+  if (!cs.ref && !Number.isFinite(cs.tau)) return clear(`Choose an uncoated reference measured in the same session (open it in this window and fit it), or enter its threshold τ: the ${band}/G that only 1 % of uncoated spectra exceed.`);
+  const R = S.points ? (S.pfa && S.pfCov ? pfCoverage(S.pfa, cs, band) : null) : (S.segCoat && S.segCoat.C && S.segCov ? mapCoverage(S.segCoat, cs) : null);
+  if (!R) return clear(S.points ? "Too few particles to judge coverage." : "Find the particles first.");
+  showFloor(R.F, band);
+  if (R.F.none) return clear(Number.isFinite(R.F.gNeed)
+    ? `No floor can be set. Finding a coating of ${band}/G ${fmt(R.F.rc, 3)} with ${pct(cs.power)} power at this sample's noise (${band} ${fmt(R.sD, 3)}, G ${fmt(R.sG, 3)} counts) needs G of at least ${fmt(R.F.gNeed, 3)} counts even against the reference's lowest threshold (${fmt(R.F.tauTop, 3)}, over its brightest 100 spectra), but those reach only ${fmt(R.F.gTop, 3)} counts, so the threshold at that brightness is unknown. Measure a brighter reference, enter a thicker thinnest coating, or acquire longer.`
+    : `A coating of ${band}/G ${fmt(R.F.rc, 3)} is not above the reference's threshold even over its brightest spectra (${fmt(R.F.tauTop, 3)}): enter a thicker thinnest coating.`);
+  if (!(R.F.rc > R.F.tau)) return clear(`The thinnest coating to be found (${fmt(R.F.rc, 3)}) must lie above τ (${fmt(R.F.tau, 3)}).`);
+  const b = band, f2 = v => fmt(v, 3), rcText = `${b}/G ${f2(R.F.rc)}${R.F.rcDefault ? " (a default: halfway between the uncoated median and this sample's; enter the specification's value)" : ""}`;
+  const how = `G at least ${f2(R.gmin)} counts, where a coating of ${rcText} is found against τ ${f2(R.F.tau)} with ${pct(cs.power)} power (noise of the band heights: ${b} ${f2(R.sD)}, G ${f2(R.sG)} counts)` +
+    (R.F.nRef ? `; τ is the 99th percentile of the ${fmt(R.F.nRef)} reference spectra at least that bright, since dimmer spectra scatter more` : "");
+  const handTau = cs.ref ? "" : " τ was entered by hand, so 1 % false detections is assumed.";
+  if (R.mode === "pf") {
+    const more = [];
+    if (R.pool > R.n) more.push(`${fmt(R.pool - R.n)} of ${fmt(R.pool)} particles (${pct(1 - R.n / R.pool)}) are below the floor and are not judged: a longer acquisition, or a sharper focus, would bring them in.`);
+    more.push(`That certifies at least ${pct(R.certified)} of particles coated (mean detection power ${pct(R.piBar)}, false detections ${pct(COV_FPR)}).${handTau}`);
+    more.push(R.needed ? `Certifying ${pct(cs.spec)} takes ${fmt(R.needed)} particles above the floor at this detection power, all of them found coated.` : `At this detection power, certifying ${pct(cs.spec)} would take more than 20 000 particles: raise the power (a longer acquisition, or a higher floor) first.`);
+    box.className = `verdict ${R.pass ? "good" : R.lower >= 0.9 ? "warn" : "bad"}`;
+    box.replaceChildren(el("b", {}, R.pass ? `Coverage certified: at least ${pct(cs.spec)} of particles coated` : `Coverage not certified at ${pct(cs.spec)}`),
+      el("div", {}, R.n ? `${fmt(R.x)} of ${fmt(R.n)} particles bright enough to judge carry the coating above τ (${pct(R.c)}; 95 % lower bound ${pct(R.lower)}). Bright enough: ${how}.` : `No particle is bright enough to judge: ${how}.`),
+      ...more.map(t => el("p", {}, t)));
+    cards.replaceChildren(
+      card("Threshold τ", f2(R.F.tau), cs.ref ? `99th percentile of ${cs.ref.name} above the floor` : "entered"),
+      card("Signal floor", `${f2(R.gmin)} counts`, `G for ${pct(cs.power)} power at ${b}/G ${f2(R.F.rc)}${R.F.rcDefault ? " (default)" : ""}`),
+      card("Judged", `${fmt(R.n)} of ${fmt(R.pool)}`, "particles above the floor"),
+      card("Coated", pct(R.c), `${fmt(R.x)} above τ · 95 % lower bound ${pct(R.lower)}`),
+      card("Certified", `≥ ${pct(R.certified)}`, `95 % confidence · power ${pct(R.piBar)}`),
+      card(`For ${pct(cs.spec)}`, R.needed ? fmt(R.needed) : "–", "particles needed, all found coated"));
+  } else {
+    const ok = R.parts.length;
+    box.className = `verdict ${!ok ? "warn" : R.lowest >= cs.spec ? "good" : R.mean >= cs.spec ? "warn" : "bad"}`;
+    box.replaceChildren(el("b", {}, ok ? `Covered area ${pct(R.mean)}${ok > 1 ? " (mean over particles)" : ""}` : "No particle has enough pixels above the floor"),
+      el("div", {}, `${pct(R.share)} of the particle pixels are bright enough to judge: ${how}.` + (ok ? ` Among them, ${R.parts.map(q => `particle ${q.id}: ${pct(q.c)} (95 % lower bound ${pct(q.lower)})`).join("; ")}.` : "")),
+      el("p", {}, `The lower bounds count the pixels as the independent values they are worth (the effective sample size from their correlation), not one per pixel.${handTau}`));
+    cards.replaceChildren(
+      card("Threshold τ", f2(R.F.tau), cs.ref ? `99th percentile of ${cs.ref.name} above the floor` : "entered"),
+      card("Signal floor", `${f2(R.gmin)} counts`, `G for ${pct(cs.power)} power at ${b}/G ${f2(R.F.rc)}${R.F.rcDefault ? " (default)" : ""}`),
+      card("Judged", pct(R.share), "of the particle pixels, above the floor"),
+      card("Covered area", ok ? pct(R.mean) : "–", ok ? `lowest particle's 95 % bound ${pct(R.lowest)}` : ""));
+  }
+  note.textContent = `How: only spectra above the signal floor are judged; below it a coated and an uncoated spectrum cannot be told apart, so counting them would measure the signal rather than the coating. ` +
+    `Coverage is the share above τ, with an exact (Clopper-Pearson) 95 % lower bound. A particle counts as found coated with the detection power when it is coated and with the false-detection rate when it is not, so a coverage p is certified when the lower bound reaches p × power + (1 − p) × false detections. ` +
+    `The particles needed are the count from which every larger count certifies, if all of them are found coated.`;
+}
+for (const id of ["#cov-ref", "#cov-tau", "#cov-rc", "#cov-power", "#cov-spec"]) $(id).addEventListener("change", () => { if (S.points && S.fit) renderPF(); else if (S.seg) renderParticles(); });
 
 // =========================================================================
 // ParticleFinder: one spectrum per particle, with the instrument's morphology
@@ -1927,7 +2153,12 @@ function pfAnalysis() {
     coatSel.value = others.includes(keep) ? keep : (others.find(b => b.toLowerCase() === "d3") || others[0] || "");
   }
   const coatBand = coatSel.value;
-  const key = [S.ds.id, f.seconds, f.names.join(), stableJSON(VIEW_KEYS.map(k => c[k])), kd, kq, mode, cuts.join(), lambda, popBand, coatBand].join("|");
+  // ParticleFinder's status of each particle (1 measured, 2 selected but not measured, 0 excluded by
+  // the run's own filter) and objects on the seams of a stitched mosaic: only measured particles off
+  // the seams count, as in LabSpec's results, unless the filter-excluded ones are asked for
+  const status = pts.cls, seam = pts.seam, inclExcl = $("#pf-incl-excl").checked;
+  const inRun = p => (!status || status[p] === 1 || (inclExcl && status[p] === 0)) && !(seam && seam[p]);
+  const key = [S.ds.id, f.seconds, f.names.join(), stableJSON(VIEW_KEYS.map(k => c[k])), kd, kq, mode, cuts.join(), lambda, popBand, coatBand, inclExcl].join("|");
   if (S.pfa && S.pfa.key === key) return S.pfa;
   const band = name => f.names.findIndex(b => b.toLowerCase() === name);
   const jG = band("g") >= 0 ? band("g") : f.names.indexOf(c.ratio_den), jD = band("d1");
@@ -1943,8 +2174,13 @@ function pfAnalysis() {
   const near = (v, b, span) => Math.abs(v - b) < 1e-3 * span;
   const snr = new Float64Array(n).fill(NaN), atBound = new Uint8Array(n), det = new Uint8Array(n), quant = new Uint8Array(n);
   let fitted = 0;
+  const gate = { notMeasured: 0, excluded: 0, seams: 0, measured: 0 };
   for (let p = 0; p < n; p++) {
-    if (!(se[p] > 0)) continue;
+    if (status) { if (status[p] === 2) gate.notMeasured++; else if (status[p] === 0) gate.excluded++; else gate.measured++; }
+    if (seam && seam[p]) gate.seams++;
+  }
+  for (let p = 0; p < n; p++) {
+    if (!(se[p] > 0) || !inRun(p)) continue;
     fitted++;
     snr[p] = IG[p] / se[p]; zG[p] = zOf(p, jG);
     atBound[p] = gp && (near(XG[p], gp.pos_min, gp.pos_max - gp.pos_min) || near(XG[p], gp.pos_max, gp.pos_max - gp.pos_min)
@@ -2069,7 +2305,7 @@ function pfAnalysis() {
     }
   }
 
-  return (S.pfa = { key, n, fitted, kd, kq, snr, zG, atBound, det, quant, Q, Qd, label, k: cats, how, pops, la, laQ, noD, lambda, size, classes, coat,
+  return (S.pfa = { key, n, fitted, gate, inclExcl, kd, kq, snr, zG, atBound, det, quant, Q, Qd, label, k: cats, how, pops, la, laQ, noD, lambda, size, classes, coat,
                     vwRatio: sw > 0 ? swr / sw : NaN, nwRatio: Qd.length ? sr / Qd.length : NaN, rho, spectra, jD, ratio, rlab, nNd, popBand });
 }
 
@@ -2080,13 +2316,17 @@ function renderPfAnalysis() {
   const nDet = A.det.reduce((s, v) => s + v, 0), nQ = A.Q.length, nBound = A.atBound.reduce((s, v) => s + v, 0);
   const [dlo, dhi] = wilson(nDet, A.fitted);
   $("#pf-detect-cards").replaceChildren(
-    card("Spectra", `${fmt(A.fitted)} of ${fmt(A.n)}`, A.n > A.fitted ? `${fmt(A.n - A.fitted)} without a spectrum (flat or missing)` : "every particle measured"),
+    card("Particles used", `${fmt(A.fitted)} of ${fmt(A.n)}`, [
+      A.gate.notMeasured ? `${fmt(A.gate.notMeasured)} not measured` : "",
+      A.gate.excluded ? `${fmt(A.gate.excluded)} excluded by the run's filter${A.inclExcl ? " (included)" : ""}` : "",
+      A.gate.seams ? `${fmt(A.gate.seams)} on tile seams` : ""].filter(Boolean).join(" · ") || (A.n > A.fitted ? `${fmt(A.n - A.fitted)} without a spectrum` : "every particle measured")),
     card("Carbon detected", `${fmt(nDet)} of ${fmt(A.fitted)}`, `${pct(nDet / A.fitted)} (95 % CI ${pct(dlo)}–${pct(dhi)}) · G ≥ ${A.kd} SE`),
     card("Quantified", fmt(nQ), `G ≥ ${A.kq} × noise, inside its bounds`),
     card("Low signal", fmt(nDet - A.Q.filter(p => A.det[p]).length), "detected, not quantified"),
     card("G on a fit bound", fmt(nBound), "fitting noise: left out"));
 
   renderCoating(A, card);
+  renderCoverage(card);
 
   // populations
   $(".pf-cut").classList.toggle("hidden", $("#pf-pop-mode").value !== "cut");
@@ -2252,7 +2492,7 @@ function renderCoating(A, card) {
   const C = A.coat, box = $("#pf-verdict");
   if (!C) {
     box.className = "verdict"; box.textContent = "";
-    $("#pf-coat-cards").replaceChildren();
+    $("#pf-coat-cards").replaceChildren(); $("#pf-more-cards").replaceChildren(); $("#pf-more-cards-h").textContent = "";
     $("#pf-coat-note").textContent = A.Q.length < 10 ? "Too few quantified particles to judge the coating." : "Choose a coating band other than G.";
     return;
   }
@@ -2283,6 +2523,14 @@ function renderCoating(A, card) {
     card("Drift along the particle order", Number.isFinite(C.rho) ? `ρ = ${C.rho.toFixed(2)}` : "–", C.drift ? `${fmt(C.ends[0], 3)} → ${fmt(C.ends[1], 3)}, removed` : "none found"),
     card("Spatial clustering", C.moran ? `Moran's I ${C.moran.I.toFixed(2)}` : "–", C.moran ? `p ${pFmt(C.moran.p)} · ${C.moran.k} nearest neighbours` : ""),
     card("With particle size", Number.isFinite(C.rhoSize) ? `ρ = ${C.rhoSize.toFixed(2)}` : "–", Number.isFinite(C.rhoSizeCI[0]) ? `95 % CI ${C.rhoSizeCI[0].toFixed(2)} to ${C.rhoSizeCI[1].toFixed(2)}` : ""));
+
+  // beyond the CV: how unequal the coating index is between particles, against what their noise alone gives
+  const gObs = gini(C.use), gNoise = noiseGini(H.mu, C.sR), logn = lognormalPreferred(C.use);
+  $("#pf-more-cards-h").textContent = "Beyond the CV, between particles";
+  $("#pf-more-cards").replaceChildren(
+    card("Inequality (Gini)", fmt(gObs, 3), `noise alone gives ${fmt(gNoise, 3)} · excess ${fmt(gObs - gNoise, 2)}`),
+    card("Distribution", logn == null ? "–" : logn ? "right-skewed" : "symmetric", `${logn == null ? "too few particles" : logn ? "lognormal fits better than normal" : "normal fits as well as lognormal"} · log-scale CV ${pct(logCV(C.use))}`));
+  if (logn) box.append(el("p", {}, `${b}/G is right-skewed between particles (a lognormal fits better than a normal), so a limit belongs on its logarithm or its quantiles, not as a band about the mean.`));
 
   $("#pf-coat-note").textContent =
     `How: ${b}/G is each particle's coating index, with its standard error from the particle's own fit (the delta method on the fitted heights). ` +
@@ -2350,7 +2598,7 @@ function drawCoatPlot(A, kind) {
   ctx.fillText("curve: one uniform coating", ax.L + 8, ax.Tp + 4);
 }
 
-for (const id of ["#pf-kd", "#pf-kq", "#pf-coat-band", "#pf-colour", "#pf-pop-ratio", "#pf-pop-mode", "#pf-cut1", "#pf-cut2", "#pf-laser"]) $(id).addEventListener("change", () => { if (S.points && S.fit) renderPF(); });
+for (const id of ["#pf-kd", "#pf-kq", "#pf-incl-excl", "#pf-coat-band", "#pf-colour", "#pf-pop-ratio", "#pf-pop-mode", "#pf-cut1", "#pf-cut2", "#pf-laser"]) $(id).addEventListener("change", () => { if (S.points && S.fit) renderPF(); });
 $("#pf-dist").onchange = () => drawPfDist();
 $("#pf-csv").onclick = () => {
   if (!S.points || !S.fit) return;

@@ -272,6 +272,58 @@ function pfLean({ raw, off, W, H, x, y }, pts, p) {
   return (c < 0n) !== (dx * dy < 0) ? -1 : 1;
 }
 
+// Objects lying on the seams of a stitched mosaic: the borders between camera tiles
+// show as dark lines that ParticleFinder can take for particles. A seam is a column
+// (or row) whose median brightness lies at least 10 grey levels (30 in R+G+B) below
+// the running median of the 41 lines around it, widened by one line. An object is on
+// a seam when its centre is within one pixel of one, or when it runs along one (within
+// 15 degrees of its direction, at least 2.5 times longer than wide) and the seam passes
+// within half its width. Integer medians, so both readers agree exactly.
+export function pfSeams(pts, img) {
+  const P = pts.x.length, out = new Uint8Array(P);
+  if (!img) return out;
+  const { raw, off, W, H, x, y } = img, dx = x[1] - x[0], dy = y[1] - y[0];
+  // the median of R+G+B along each column (axis 0) and each row (axis 1), from 766-bin
+  // histograms over every step-th pixel of the line (at most about 2000 of them)
+  const lineMedians = (n, len, at) => {
+    const out2 = new Float64Array(n), h = new Int32Array(766), step = Math.max(1, Math.ceil(len / 2000));
+    const m = Math.ceil(len / step);
+    for (let i = 0; i < n; i++) {
+      h.fill(0);
+      for (let k = 0; k < len; k += step) { const o = off + at(i, k) * 3; h[raw[o] + raw[o + 1] + raw[o + 2]]++; }
+      const lo = (m - 1) >> 1, hi = m >> 1;              // the two middle ranks (equal when m is odd)
+      let c = 0, a = -1, b = -1;
+      for (let v = 0; v < 766 && b < 0; v++) { c += h[v]; if (a < 0 && c > lo) a = v; if (c > hi) b = v; }
+      out2[i] = (a + b) / 2;
+    }
+    return out2;
+  };
+  const seamsOf = med => {
+    const n = med.length, flag = new Uint8Array(n), win = [];
+    for (let i = 0; i < n; i++) {
+      win.length = 0;
+      for (let j = i - 20; j <= i + 20; j++) win.push(med[j < 0 ? -j - 1 : j >= n ? 2 * n - j - 1 : j]);   // scipy's "reflect"
+      win.sort((u, v) => u - v);
+      flag[i] = med[i] < win[20] - 30 ? 1 : 0;
+    }
+    const wide = new Uint8Array(n);
+    for (let i = 0; i < n; i++) wide[i] = flag[i] || (i > 0 && flag[i - 1]) || (i + 1 < n && flag[i + 1]) ? 1 : 0;
+    return wide;
+  };
+  const cols = seamsOf(lineMedians(W, H, (q, r) => r * W + q)), rows = seamsOf(lineMedians(H, W, (r, q) => r * W + q));
+  const xs = [], ys = [];
+  cols.forEach((f, q) => { if (f) xs.push(x[0] + q * dx); });
+  rows.forEach((f, r) => { if (f) ys.push(y[0] + r * dy); });
+  if (!xs.length && !ys.length) return out;
+  const nearest = (list, v) => { let d = Infinity; for (const u of list) d = Math.min(d, Math.abs(u - v)); return d; };
+  for (let p = 0; p < P; p++) {
+    const L = pts.feret_max[p], D = pts.min_diam[p], deg = Math.abs(pts.angle[p]) * 180 / Math.PI;
+    const dv = nearest(xs, pts.x[p]), dh = nearest(ys, pts.y[p]), reach = D / 2 + Math.abs(dx), long = L >= 2.5 * D;
+    out[p] = dv <= Math.abs(dx) || dh <= Math.abs(dy) || (long && deg >= 75 && dv <= reach) || (long && deg <= 15 && dh <= reach) ? 1 : 0;
+  }
+  return out;
+}
+
 export function readL6pf(buf, name) {
   const raw = new Uint8Array(buf);
   magic(raw, name);
@@ -348,6 +400,7 @@ export function readL6pf(buf, name) {
     && points.y[p] >= points.ymin[p] - 1e-3 && points.y[p] <= points.ymax[p] + 1e-3) inside++;
   if (inside < 0.95 * P) throw new Error(`${name}: particle table found but positions fall outside their boxes`);
   points.angle = pfAngles(points, full);
+  points.seam = pfSeams(points, full);
 
   const wnOut = Float64Array.from(found.wn);
   if (wnOut[0] > wnOut[K - 1]) {

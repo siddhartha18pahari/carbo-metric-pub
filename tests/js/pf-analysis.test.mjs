@@ -297,3 +297,107 @@ test("band-height covariances for a subset of spectra match the full computation
   for (const p of [4, 17]) for (let k = 0; k < mm; k++) assert.equal(out[p * mm + k], all[p * mm + k]);
   assert.ok(Number.isNaN(out[5 * mm]));                           // the others are left alone
 });
+
+import { binomLower, certifyCount, detectionPower, signalFloor, normInv, gini, noiseGini, logCV, lognormalPreferred,
+         gridMoran, effectiveN, variogram, fitVariogram, hotSpots, blockShuffle } from "../../web/js/pf-analysis.js";
+
+test("exact binomial lower bounds and the particle counts that certify coverage", () => {
+  near(binomLower(100, 3), 0.924289, 1e-6); near(binomLower(50, 10), 0.684404, 1e-6);   // scipy beta.ppf
+  near(binomLower(143, 0), 0.05 ** (1 / 143), 1e-12);
+  assert.equal(binomLower(10, 10), 0);
+  // zero failures: 59 particles certify 95 %, 299 certify 99 %, 598 certify 99.5 %
+  assert.deepEqual([0.95, 0.99, 0.995].map(p => certifyCount(p)), [59, 299, 598]);
+  // at 99 % detection power and 1 % false detections a count first passes at 529 for 99 % but fails
+  // again until 660 (the rounded failures): every count from 661 passes, and 1 867 for 99.5 %
+  assert.deepEqual([0.95, 0.99, 0.995].map(p => certifyCount(p, 0.99, 0.01)), [79, 661, 1867]);
+  for (const n of [661, 700, 999]) assert.ok(binomLower(n, Math.round(0.01 * n)) >= 0.99 * 0.99 + 0.01 * 0.01, `n ${n}`);
+  assert.ok(binomLower(660, 7) < 0.99 * 0.99 + 0.01 * 0.01);         // the last count that fails
+  assert.ok(binomLower(529, 5) >= 0.99 * 0.99 + 0.01 * 0.01);        // the first that passes, before failures return
+  // certifiable with enough particles whenever the power beats the false detections; never when it does not
+  assert.equal(certifyCount(0.99, 0.01, 0.01), null);
+  assert.equal(certifyCount(0.99, 0.5, 0.01), null);                // possible, but beyond 20 000 particles
+});
+
+test("the signal floor gives exactly the detection power asked for, and more above it", () => {
+  near(normInv(0.95), 1.6448536, 1e-6); near(normInv(0.025), -1.959964, 1e-6);
+  const g = signalFloor(0.06, 0.02, 1.0, 2.0, 0.95);
+  near(detectionPower(0.06, 0.02, 1.0, 2.0, g), 0.95, 1e-6);
+  assert.ok(detectionPower(0.06, 0.02, 1.0, 2.0, 2 * g) > 0.99);
+  assert.equal(signalFloor(0.02, 0.03, 1, 1), Infinity);           // a coating below the threshold is never found
+});
+
+test("inequality and distribution shape: Gini, its noise-only value, lognormal against normal", () => {
+  near(gini([2, 2, 2, 2]), 0, 1e-12); near(gini([0, 0, 0, 1]), 0.75, 1e-12);
+  const R = rng(4), g = () => Math.sqrt(-2 * Math.log(R() + 1e-12)) * Math.cos(2 * Math.PI * R());
+  const se = Array.from({ length: 2000 }, () => 0.005), flat = se.map(s => 0.05 + s * g());
+  near(gini(flat), noiseGini(0.05, se), 0.005);                       // noise alone: no excess
+  const varied = flat.map(v => v * Math.exp(0.3 * g()));
+  assert.ok(gini(varied) - noiseGini(0.05, se) > 0.1);
+  assert.equal(lognormalPreferred(flat.map(v => Math.exp(10 * (v - 0.05) * 20))), true);
+  assert.equal(lognormalPreferred(flat), false);
+  near(logCV(Array.from({ length: 500 }, () => Math.exp(0.2 * g()))), Math.sqrt(Math.expm1(0.04)), 0.02);
+});
+
+// a smooth field (a few broad patches) plus white noise of known size, on a disc
+function patchField(noise = 0.004, seed = 9) {
+  const R = rng(seed), g = () => Math.sqrt(-2 * Math.log(R() + 1e-12)) * Math.cos(2 * Math.PI * R());
+  const nx = 70, ny = 60, img = new Float64Array(nx * ny), ok = new Uint8Array(nx * ny);
+  const bumps = Array.from({ length: 12 }, () => [R() * nx, R() * ny, 0.004 * g()]);
+  for (let i = 0; i < ny; i++) for (let j = 0; j < nx; j++) {
+    let s = 0.05; for (const [x, y, a] of bumps) s += a * Math.exp(-((j - x) ** 2 + (i - y) ** 2) / 60);
+    img[i * nx + j] = s + noise * g();
+    ok[i * nx + j] = (i - 30) ** 2 / 26 ** 2 + (j - 35) ** 2 / 30 ** 2 <= 1 ? 1 : 0;
+  }
+  return { img, ok, nx, ny };
+}
+
+test("the variogram nugget recovers the white noise, and Moran's I sees the patches", () => {
+  const { img, ok, nx, ny } = patchField(0.004);
+  const vg = variogram(img, ok, nx, ny, 15);
+  assert.ok(vg.classical[0] < vg.classical[vg.classical.length - 1]);   // the field varies more at a distance
+  const fit = fitVariogram(vg.lags, vg.classical, 15);
+  assert.ok(fit.nugget / 0.004 ** 2 > 0.5 && fit.nugget / 0.004 ** 2 < 2, `nugget ratio ${fit.nugget / 0.004 ** 2}`);
+  const white = patchField(0.004, 3); for (let p = 0; p < white.img.length; p++) white.img[p] = 0.05 + 0.004 * (rng(p + 1)() - 0.5) * 3.46;
+  assert.ok(Math.abs(gridMoran(white.img, white.ok, nx, ny)) < 0.05);
+  assert.ok(gridMoran(img, ok, nx, ny) > 0.2);
+  near(effectiveN(100, 0), 100, 1e-12); near(effectiveN(100, 0.5), 100 / 3, 1e-9);
+});
+
+test("locally thin places: a planted thin patch is found, and noise alone gives none", () => {
+  const R = rng(12), g = () => Math.sqrt(-2 * Math.log(R() + 1e-12)) * Math.cos(2 * Math.PI * R());
+  const nx = 70, ny = 60, img = new Float64Array(nx * ny), ok = new Uint8Array(nx * ny);
+  for (let i = 0; i < ny; i++) for (let j = 0; j < nx; j++) {
+    img[i * nx + j] = 0.05 + 0.004 * g();
+    ok[i * nx + j] = (i - 30) ** 2 / 26 ** 2 + (j - 35) ** 2 / 30 ** 2 <= 1 ? 1 : 0;
+  }
+  assert.ok(hotSpots(img, ok, nx, ny).cold < 0.005);                 // white noise: no thin place
+  const disc = (i, j) => (i - 30) ** 2 + (j - 20) ** 2 <= 36, thin = Float64Array.from(img);
+  let inDisc = 0; for (let i = 0; i < ny; i++) for (let j = 0; j < nx; j++) if (disc(i, j)) { thin[i * nx + j] -= 0.02; inDisc += ok[i * nx + j]; }
+  const found = hotSpots(thin, ok, nx, ny), sh = blockShuffle(thin, ok, nx, ny, 8), nul = hotSpots(sh.img, sh.ok, sh.nx, sh.ny);
+  // the 5 x 5 neighbourhood spreads a thin place into its surroundings, so its extent is overstated
+  const share = inDisc / found.n;
+  assert.ok(found.cold >= 0.9 * share && found.cold <= 2 * share, `flagged ${found.cold} vs patch ${share}`);
+  // moving whole 8 x 8 blocks keeps a patch no bigger than a few blocks largely together, so the
+  // block null finds it too: only structure larger than the blocks shows as an excess over it
+  assert.ok(Math.abs(nul.cold - found.cold) < 0.5 * found.cold, JSON.stringify({ found, nul }));
+  const sh0 = blockShuffle(img, ok, nx, ny, 8);
+  assert.ok(hotSpots(sh0.img, sh0.ok, sh0.nx, sh0.ny).cold < 0.005);   // and noise moved in blocks is still noise
+});
+
+import { floorWithReference } from "../../web/js/pf-analysis.js";
+
+test("floor and threshold together: the reference's scatter at the brightness of the floor", () => {
+  // an uncoated reference whose index scatters as 1/G (D3 noise 1 count, G noise 2 counts)
+  const R = rng(21), g = () => Math.sqrt(-2 * Math.log(R() + 1e-12)) * Math.cos(2 * Math.PI * R());
+  const G = Array.from({ length: 4000 }, () => 20 + 380 * R()), r = G.map(v => 0.01 + Math.sqrt(1 + 0.0004) / v * g());
+  const all = Float64Array.from(r).sort(), tauAll = all[Math.floor(0.99 * (all.length - 1))];
+  const t = floorWithReference(G, r, 0.03, 1, 2, 0.95);
+  assert.ok(t && t.g >= signalFloor(0.03, t.tau, 1, 2, 0.95), JSON.stringify(t));
+  assert.ok(t.tau < tauAll && t.n >= 100);                     // bright spectra scatter less than all of them
+  // a lower floor would not hold: its threshold, taken over dimmer spectra, needs a higher floor than itself
+  const lower = G.filter(v => v >= 0.8 * t.g), idx = G.map((v, i) => i).filter(i => G[i] >= 0.8 * t.g);
+  const rl = Float64Array.from(idx, i => r[i]).sort(), tauL = rl[Math.floor(0.99 * (rl.length - 1))];
+  assert.ok(0.8 * t.g < signalFloor(0.03, tauL, 1, 2, 0.95), `${lower.length}`);
+  assert.equal(floorWithReference(G, r, 0.011, 1, 2, 0.95), null); // a coating barely above uncoated is never found
+});
+

@@ -25,11 +25,12 @@ function components(inside, nx, ny) {
   return { labels, groups };
 }
 
-// Chamfer (3-4) distance to the nearest outside pixel, in pixels.
-export function distance(inside, nx, ny) {
-  const N = nx * ny, d = new Float32Array(N);
+// Chamfer (3-4) distance to the nearest outside pixel, in pixels. edgeInside: the
+// space beyond the map counts as inside, so where the map cuts a particle there is no edge.
+export function distance(inside, nx, ny, edgeInside = false) {
+  const N = nx * ny, d = new Float32Array(N), beyond = edgeInside ? 1e9 : 0;
   for (let p = 0; p < N; p++) d[p] = inside[p] ? 1e9 : 0;
-  const at = (i, j) => (i < 0 || j < 0 || i >= ny || j >= nx) ? 0 : d[i * nx + j];
+  const at = (i, j) => (i < 0 || j < 0 || i >= ny || j >= nx) ? beyond : d[i * nx + j];
   for (let i = 0; i < ny; i++) for (let j = 0; j < nx; j++) {
     const p = i * nx + j; if (!d[p]) continue;
     d[p] = Math.min(d[p], at(i, j - 1) + 3, at(i - 1, j) + 3, at(i - 1, j - 1) + 4, at(i - 1, j + 1) + 4);

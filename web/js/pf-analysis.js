@@ -409,3 +409,258 @@ export function spearmanCI(rho, n) {
   const z = Math.atanh(Math.max(-0.999999, Math.min(0.999999, rho))), h = 1.959964 * 1.03 / Math.sqrt(n - 3);
   return [Math.tanh(z - h), Math.tanh(z + h)];
 }
+
+// --------------------------------------------------------------------------
+// Coverage: a signal floor from detection power, and exact binomial counts
+// --------------------------------------------------------------------------
+
+// inverse of the normal CDF (Acklam's rational approximation, relative error ~1e-9)
+export function normInv(p) {
+  if (!(p > 0 && p < 1)) return p === 0 ? -Infinity : p === 1 ? Infinity : NaN;
+  const a = [-39.69683028665376, 220.9460984245205, -275.9285104469687, 138.357751867269, -30.66479806614716, 2.506628277459239];
+  const b = [-54.47609879822406, 161.5858368580409, -155.6989798598866, 66.80131188771972, -13.28068155288572];
+  const c = [-0.007784894002430293, -0.3223964580411365, -2.400758277161838, -2.549732539343734, 4.374664141464968, 2.938163982698783];
+  const d = [0.007784695709041462, 0.3224671290700398, 2.445134137142996, 3.754408661907416];
+  const lo = 0.02425, q = p < lo ? Math.sqrt(-2 * Math.log(p)) : p > 1 - lo ? Math.sqrt(-2 * Math.log(1 - p)) : 0;
+  if (p < lo) return (((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) / ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1);
+  if (p > 1 - lo) return -(((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) / ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1);
+  const r = p - 0.5, s = r * r;
+  return (((((a[0] * s + a[1]) * s + a[2]) * s + a[3]) * s + a[4]) * s + a[5]) * r / (((((b[0] * s + b[1]) * s + b[2]) * s + b[3]) * s + b[4]) * s + 1);
+}
+
+function lnGamma(z) {                                // Lanczos, g = 7
+  const g = [0.99999999999980993, 676.5203681218851, -1259.1392167224028, 771.32342877765313, -176.61502916214059,
+             12.507343278686905, -0.13857109526572012, 9.9843695780195716e-6, 1.5056327351493116e-7];
+  if (z < 0.5) return Math.log(Math.PI / Math.sin(Math.PI * z)) - lnGamma(1 - z);
+  z -= 1;
+  let x = g[0]; for (let i = 1; i < 9; i++) x += g[i] / (z + i);
+  const t = z + 7.5;
+  return 0.5 * Math.log(2 * Math.PI) + (z + 0.5) * Math.log(t) - t + Math.log(x);
+}
+
+// the regularised incomplete beta function I_x(a, b), by its continued fraction
+export function betaInc(x, a, b) {
+  if (x <= 0) return 0;
+  if (x >= 1) return 1;
+  const front = Math.exp(lnGamma(a + b) - lnGamma(a) - lnGamma(b) + a * Math.log(x) + b * Math.log(1 - x));
+  const cf = (a, b, x) => {
+    let c = 1, d = 1 - (a + b) * x / (a + 1); d = 1 / (Math.abs(d) < 1e-300 ? 1e-300 : d);
+    let h = d;
+    for (let m = 1; m <= 500; m++) {
+      for (const num of [m * (b - m) * x / ((a + 2 * m - 1) * (a + 2 * m)), -(a + m) * (a + b + m) * x / ((a + 2 * m) * (a + 2 * m + 1))]) {
+        d = 1 + num * d; d = 1 / (Math.abs(d) < 1e-300 ? 1e-300 : d);
+        c = 1 + num / c; if (Math.abs(c) < 1e-300) c = 1e-300;
+        h *= d * c;
+      }
+      if (Math.abs(d * c - 1) < 1e-15) break;
+    }
+    return h;
+  };
+  return x < (a + 1) / (a + b + 2) ? front * cf(a, b, x) / a : 1 - front * cf(b, a, 1 - x) / b;
+}
+
+// one-sided (1 - alpha) Clopper-Pearson lower bound on a success fraction, x failures in n
+export function binomLower(n, x, alpha = 0.05) {
+  if (!(n > 0) || x >= n) return 0;
+  if (x <= 0) return alpha ** (1 / n);
+  let lo = 0, hi = 1;
+  for (let it = 0; it < 80; it++) { const m = 0.5 * (lo + hi); if (betaInc(m, n - x, x + 1) < alpha) lo = m; else hi = m; }
+  return 0.5 * (lo + hi);
+}
+
+// How many particles certify that at least pSpec of a population is coated, with
+// (1 - alpha) confidence. Each particle is detected as coated with probability
+// `power` when it is coated and `fpr` when it is not, so the detected fraction must
+// have a lower bound above pSpec x power + (1 - pSpec) x fpr; a fully coated population
+// gives a detected fraction of power. Failures are rounded, so passing is not monotone
+// in n just above the first passing count: this is the count from which every larger
+// one passes. Null when no count can pass (power too close to pSpec).
+export function certifyCount(pSpec, power = 1, fpr = 0, alpha = 0.05, nmax = 20000) {
+  const need = pSpec * power + (1 - pSpec) * fpr, rate = 1 - power;
+  if (!(power > need)) return null;
+  const pass = n => binomLower(n, Math.round(n * rate), alpha) >= need;
+  // failures come back just after each rounding step until the margin outgrows them: the
+  // count is one past the last failure, taken once three rounding periods (or 50 counts
+  // without failures to round) have passed in a row
+  const span = rate > 0 ? Math.ceil(3 / rate) : 50;
+  let last = 0;
+  for (let n = 1; n <= nmax; n++) {
+    if (!pass(n)) last = n;
+    else if (n - last > span) return last + 1;
+  }
+  return null;
+}
+
+// The detection power for a coating of index rc against the threshold tau, at G height g:
+// P = 1 - Phi[(tau - rc) / sigma_R(g)], sigma_R(g) = sqrt(sigmaD² + rc² sigmaG²) / g. The
+// signal floor is the G height at which that power reaches `power`.
+export function detectionPower(rc, tau, sigmaD, sigmaG, g) {
+  return normCdf((rc - tau) * g / Math.sqrt(sigmaD * sigmaD + rc * rc * sigmaG * sigmaG));
+}
+export function signalFloor(rc, tau, sigmaD, sigmaG, power = 0.95) {
+  return rc > tau ? normInv(power) * Math.sqrt(sigmaD * sigmaD + rc * rc * sigmaG * sigmaG) / (rc - tau) : Infinity;
+}
+
+// The floor and the threshold together, from an uncoated reference. Dim spectra scatter more,
+// so the reference's 99th percentile depends on how bright the spectra are that it is taken
+// over: tau(g) is taken over the reference spectra with G at least g. The floor is the lowest
+// g at which g >= signalFloor(rc, tau(g)), with at least minRef reference spectra above it.
+// Null when no brightness gets there. gRef, rRef: the reference's G heights and coating index.
+export function floorWithReference(gRef, rRef, rc, sigmaD, sigmaG, power = 0.95, { q = 0.99, minRef = 100, steps = 80 } = {}) {
+  const idx = Array.from(gRef, (_, i) => i).filter(i => Number.isFinite(gRef[i]) && Number.isFinite(rRef[i])).sort((a, b) => gRef[a] - gRef[b]);
+  if (idx.length < minRef) return null;
+  const at = k => {                                      // tau over the reference spectra from rank k up
+    const r = Float64Array.from(idx.slice(k), i => rRef[i]).sort();
+    return { g: gRef[idx[k]], tau: quantileSorted(r, q), n: r.length };
+  };
+  const top = idx.length - minRef;
+  for (let s = 0; s <= steps; s++) {
+    const t = at(Math.round(top * s / steps));
+    if (t.g >= signalFloor(rc, t.tau, sigmaD, sigmaG, power)) return t;
+  }
+  return null;
+}
+
+// --------------------------------------------------------------------------
+// Uniformity beyond the coefficient of variation, over a particle's pixels
+// --------------------------------------------------------------------------
+
+// Gini coefficient of a non-negative sample: 0 when every value is equal
+export function gini(x) {
+  const s = Float64Array.from(x).filter(Number.isFinite).map(v => Math.max(0, v)).sort(), n = s.length;
+  let tot = 0, w = 0; for (let i = 0; i < n; i++) { tot += s[i]; w += (i + 1) * s[i]; }
+  return n < 2 || !(tot > 0) ? NaN : 2 * w / (n * tot) - (n + 1) / n;
+}
+// what the Gini reads on noise alone: each value replaced by the level plus its own noise
+export function noiseGini(level, se, reps = 8, seed = 11) {
+  const R = rng(seed), g = () => Math.sqrt(-2 * Math.log(R() + 1e-12)) * Math.cos(2 * Math.PI * R());
+  let s = 0; for (let k = 0; k < reps; k++) s += gini(Array.from(se, v => level + v * g()));
+  return s / reps;
+}
+// the geometric (log-scale) CV of the positive values
+export function logCV(x) {
+  const l = Array.from(x).filter(v => v > 0).map(Math.log), n = l.length;
+  if (n < 10) return NaN;
+  const m = l.reduce((a, b) => a + b, 0) / n, v = l.reduce((a, b) => a + (b - m) ** 2, 0) / n;
+  return Math.sqrt(Math.expm1(v));
+}
+// whether a lognormal fits the positive values better than a normal, by log-likelihood
+export function lognormalPreferred(x) {
+  const v = Array.from(x).filter(u => u > 0), n = v.length;
+  if (n < 30) return null;
+  const ll = a => { const m = a.reduce((s, u) => s + u, 0) / n, s2 = a.reduce((s, u) => s + (u - m) ** 2, 0) / n; return -0.5 * n * (Math.log(2 * Math.PI * s2) + 1); };
+  const lx = v.map(Math.log);
+  return ll(lx) - lx.reduce((s, u) => s + u, 0) > ll(v);
+}
+
+// Moran's I on a grid with rook neighbours over a mask (0 = no autocorrelation)
+export function gridMoran(img, ok, nx, ny) {
+  let s = 0, n = 0; for (let p = 0; p < nx * ny; p++) if (ok[p]) { s += img[p]; n++; }
+  if (n < 3) return NaN;
+  const m = s / n; let num = 0, den = 0, edges = 0;
+  for (let i = 0; i < ny; i++) for (let j = 0; j < nx; j++) {
+    const p = i * nx + j; if (!ok[p]) continue;
+    den += (img[p] - m) ** 2;
+    if (j + 1 < nx && ok[p + 1]) { num += (img[p] - m) * (img[p + 1] - m); edges++; }
+    if (i + 1 < ny && ok[p + nx]) { num += (img[p] - m) * (img[p + nx] - m); edges++; }
+  }
+  return edges && den ? n * num / (edges * den) : NaN;
+}
+// how many independent values n correlated pixels are worth, from the lag-one correlation
+export const effectiveN = (n, rho) => { const r = Math.max(-0.99, Math.min(0.99, rho)); return n * (1 - r) / (1 + r); };
+
+// Isotropic experimental variogram over a mask, lags binned by the rounded distance of
+// the shift: the classical estimator and the robust one of Cressie and Hawkins.
+export function variogram(img, ok, nx, ny, hmax = 15) {
+  const sq = new Float64Array(hmax + 1), rb = new Float64Array(hmax + 1), cnt = new Float64Array(hmax + 1);
+  for (let dy = 0; dy <= hmax; dy++) for (let dx = -hmax; dx <= hmax; dx++) {
+    if (dy === 0 && dx <= 0) continue;
+    const h = Math.round(Math.hypot(dx, dy)); if (h < 1 || h > hmax) continue;
+    for (let i = 0; i + dy < ny; i++) for (let j = Math.max(0, -dx); j < nx && j + dx < nx; j++) {
+      const p = i * nx + j, q = p + dy * nx + dx; if (!ok[p] || !ok[q]) continue;
+      const d = img[p] - img[q]; sq[h] += d * d; rb[h] += Math.sqrt(Math.abs(d)); cnt[h]++;
+    }
+  }
+  const out = { lags: [], classical: [], robust: [], pairs: [] };
+  for (let h = 1; h <= hmax; h++) {
+    if (cnt[h] < 30) continue;
+    out.lags.push(h); out.pairs.push(cnt[h]);
+    out.classical.push(0.5 * sq[h] / cnt[h]);
+    out.robust.push(0.5 * (rb[h] / cnt[h]) ** 4 / (0.457 + 0.494 / cnt[h]));
+  }
+  return out;
+}
+
+const VG_MODELS = { exponential: [t => 1 - Math.exp(-t), 3], gaussian: [t => 1 - Math.exp(-t * t), 1.73], spherical: [t => (t < 1 ? 1.5 * t - 0.5 * t ** 3 : 1), 1] };
+// gamma(h) = c0 + c1 f(h / a) for three families, a on a grid and c0, c1 >= 0 by least
+// squares; the best family by its residual. The range is identified only if it lies
+// within the lags measured (otherwise it is a lower bound).
+export function fitVariogram(lags, gam, hmax = 15) {
+  if (lags.length < 4) return null;
+  const gmax = Math.max(...gam); if (!(gmax > 0)) return null;
+  let best = null;
+  for (const [model, [f, toRange]] of Object.entries(VG_MODELS)) {
+    for (let k = 0; k <= 120; k++) {
+      const a = 0.3 * (3 * hmax / 0.3) ** (k / 120), fh = lags.map(h => f(h / a));
+      // two-parameter non-negative least squares
+      const n = lags.length, sf = fh.reduce((s, v) => s + v, 0), sff = fh.reduce((s, v) => s + v * v, 0);
+      const sg = gam.reduce((s, v) => s + v, 0), sfg = fh.reduce((s, v, i) => s + v * gam[i], 0), det = n * sff - sf * sf;
+      let c0 = det ? (sg * sff - sf * sfg) / det : sg / n, c1 = det ? (n * sfg - sf * sg) / det : 0;
+      if (c0 < 0) { c0 = 0; c1 = sfg / sff; }
+      if (c1 < 0) { c1 = 0; c0 = sg / n; }
+      const rms = Math.sqrt(gam.reduce((s, v, i) => s + (c0 + c1 * fh[i] - v) ** 2, 0) / n) / gmax;
+      if (!best || rms < best.rms) best = { model, nugget: c0, sill: c0 + c1, range: toRange * a, rms };
+    }
+  }
+  best.identified = best.range <= lags[lags.length - 1];
+  return best;
+}
+
+// Local Getis-Ord Gi* z-scores over a mask, on a (2r + 1) square including the pixel
+export function getisOrd(img, ok, nx, ny, r = 2) {
+  let s = 0, s2 = 0, n = 0; for (let p = 0; p < nx * ny; p++) if (ok[p]) { s += img[p]; s2 += img[p] ** 2; n++; }
+  const z = new Float64Array(nx * ny).fill(NaN); if (n < 3) return z;
+  const xbar = s / n, sd = Math.sqrt(Math.max(0, s2 / n - xbar * xbar));
+  // integral images of the values and of the mask
+  const W = nx + 1, SV = new Float64Array(W * (ny + 1)), SM = new Float64Array(W * (ny + 1));
+  for (let i = 0; i < ny; i++) for (let j = 0; j < nx; j++) {
+    const p = i * nx + j, v = ok[p] ? img[p] : 0, m = ok[p] ? 1 : 0, o = (i + 1) * W + j + 1;
+    SV[o] = v + SV[o - 1] + SV[o - W] - SV[o - W - 1]; SM[o] = m + SM[o - 1] + SM[o - W] - SM[o - W - 1];
+  }
+  const box = (A, i0, j0, i1, j1) => A[(i1 + 1) * W + j1 + 1] - A[i0 * W + j1 + 1] - A[(i1 + 1) * W + j0] + A[i0 * W + j0];
+  for (let i = 0; i < ny; i++) for (let j = 0; j < nx; j++) {
+    const p = i * nx + j; if (!ok[p]) continue;
+    const i0 = Math.max(0, i - r), i1 = Math.min(ny - 1, i + r), j0 = Math.max(0, j - r), j1 = Math.min(nx - 1, j + r);
+    const sl = box(SV, i0, j0, i1, j1), wl = box(SM, i0, j0, i1, j1);
+    const den = sd * Math.sqrt(Math.max((n * wl - wl * wl) / (n - 1), 1e-12));
+    z[p] = (sl - xbar * wl) / den;
+  }
+  return z;
+}
+
+// share of the masked pixels significantly low (cold) and high (hot) by Gi*, with the
+// false discovery rate held at q across them (Benjamini-Hochberg)
+export function hotSpots(img, ok, nx, ny, { r = 2, q = 0.05 } = {}) {
+  const z = getisOrd(img, ok, nx, ny, r), idx = [];
+  for (let p = 0; p < nx * ny; p++) if (ok[p] && Number.isFinite(z[p])) idx.push(p);
+  const m = idx.length; if (!m) return { cold: NaN, hot: NaN, n: 0 };
+  const pv = idx.map(p => 2 * (1 - normCdf(Math.abs(z[p])))), order = pv.map((_, i) => i).sort((a, b) => pv[a] - pv[b]);
+  let thr = -1; order.forEach((i, k) => { if (pv[i] <= (k + 1) / m * q) thr = pv[i]; });
+  let cold = 0, hot = 0; idx.forEach((p, i) => { if (pv[i] <= thr) { if (z[p] < 0) cold++; else hot++; } });
+  return { cold: cold / m, hot: hot / m, n: m };
+}
+
+// the field with whole b x b blocks moved to other block places: structure inside a
+// block survives, so hot spots found on it are what the autocorrelation alone gives
+export function blockShuffle(img, ok, nx, ny, b = 8, seed = 5) {
+  const bx = Math.floor(nx / b), by = Math.floor(ny / b);
+  if (bx < 2 || by < 2) return null;
+  const R = rng(seed), order = Array.from({ length: bx * by }, (_, i) => i);
+  for (let i = order.length - 1; i > 0; i--) { const j = Math.floor(R() * (i + 1)); [order[i], order[j]] = [order[j], order[i]]; }
+  const W = bx * b, Hh = by * b, v = new Float64Array(W * Hh), m = new Uint8Array(W * Hh);
+  order.forEach((src, dst) => {
+    const si = Math.floor(src / bx) * b, sj = (src % bx) * b, di = Math.floor(dst / bx) * b, dj = (dst % bx) * b;
+    for (let a = 0; a < b; a++) for (let c = 0; c < b; c++) { const sp = (si + a) * nx + sj + c, dp = (di + a) * W + dj + c; v[dp] = img[sp]; m[dp] = ok[sp]; }
+  });
+  return { img: v, ok: m, nx: W, ny: Hh };
+}

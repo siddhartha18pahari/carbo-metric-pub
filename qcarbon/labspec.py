@@ -311,6 +311,49 @@ def _pf_angles(pts: dict, video: "VideoImage | None") -> np.ndarray:
     return out
 
 
+def _pf_seams(pts: dict, video: "VideoImage | None") -> np.ndarray:
+    """Objects lying on the seams of a stitched mosaic: the borders between camera tiles
+    show as dark lines that ParticleFinder can take for particles. A seam is a column (or
+    row) whose median brightness lies at least 10 grey levels (30 in R+G+B) below the
+    running median of the 41 lines around it, widened by one line. An object is on a seam
+    when its centre is within one pixel of one, or when it runs along one (within 15
+    degrees of its direction, at least 2.5 times longer than wide) and the seam passes
+    within half its width. Integer medians, so both readers agree exactly."""
+    P = pts["x"].size
+    out = np.zeros(P, np.uint8)
+    if video is None:
+        return out
+    # medians over every step-th pixel of each line (at most about 2000), as the browser reader does
+    H, W = video.rgb.shape[:2]
+    sr, sc = max(1, -(-H // 2000)), max(1, -(-W // 2000))
+    col_med = np.median(video.rgb[::sr].astype(np.int32).sum(axis=2), axis=0)
+    row_med = np.median(video.rgb[:, ::sc].astype(np.int32).sum(axis=2), axis=1)
+
+    def seams_of(med):
+        pad = np.pad(med, 20, mode="symmetric")                 # scipy's "reflect"
+        run = np.median(np.lib.stride_tricks.sliding_window_view(pad, 41), axis=1)
+        flag = med < run - 30
+        wide = flag.copy()
+        wide[1:] |= flag[:-1]
+        wide[:-1] |= flag[1:]
+        return wide
+
+    cols, rows = seams_of(col_med), seams_of(row_med)
+    dx, dy = float(video.x[1] - video.x[0]), float(video.y[1] - video.y[0])
+    xs = float(video.x[0]) + np.flatnonzero(cols) * dx
+    ys = float(video.y[0]) + np.flatnonzero(rows) * dy
+    if not xs.size and not ys.size:
+        return out
+    for p in range(P):
+        L, D = float(pts["feret_max"][p]), float(pts["min_diam"][p])
+        deg = abs(float(pts["angle"][p])) * 180 / math.pi
+        dv = float(np.min(np.abs(xs - pts["x"][p]))) if xs.size else math.inf
+        dh = float(np.min(np.abs(ys - pts["y"][p]))) if ys.size else math.inf
+        reach, long = D / 2 + abs(dx), L >= 2.5 * D
+        out[p] = dv <= abs(dx) or dh <= abs(dy) or (long and deg >= 75 and dv <= reach) or (long and deg <= 15 and dh <= reach)
+    return out
+
+
 def _pf_table(raw: bytes, P: int, lo: int, hi: int) -> int | None:
     """Byte offset of P consecutive particle records inside raw[lo:hi].
 
@@ -408,6 +451,7 @@ def read_l6pf(path: str) -> tuple[RamanMap, VideoImage | None]:
     if inside.mean() < 0.95:
         raise ValueError(f"{name}: particle table found but positions fall outside their boxes")
     pts["angle"] = _pf_angles(pts, video)
+    pts["seam"] = _pf_seams(pts, video)
 
     wn = np.asarray(wn, np.float64)
     cube = np.ascontiguousarray(spectra[None].astype(np.float32))

@@ -695,6 +695,8 @@ table.pf-pops .sw { display: inline-block; width: 10px; height: 10px; border-rad
 table.pf-pops td, table.pf-pops th, table.pf-sizes td, table.pf-sizes th { padding: 4px 5px; }
 table.pf-pops .sub, table.pf-sizes .sub { font-size: 11.5px; }
 .pf-scroll { overflow-x: auto; }
+.sub-h { font-size: 12px; font-weight: 600; color: var(--muted); margin: 8px 0 4px; }
+.sub-h:empty { display: none; }
 #pf-pop-note, #pf-la-note, #pf-size-note { margin-top: 6px; line-height: 1.45; }
 @media (max-width: 1280px) {
   body.particles-mode .pt-main { grid-template-rows: auto auto; }

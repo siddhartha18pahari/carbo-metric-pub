@@ -297,6 +297,27 @@
       </div>
     </div>
     <aside class="side">
+      <div class="sec seg-only">
+        <div class="sec-h">Find particles</div>
+        <div class="frow"><label>Segment on</label><select id="pt-src"></select></div>
+        <div class="frow"><label>Threshold</label><div class="row2"><input type="range" id="pt-thr" min="0" max="1" step="0.001"><input type="number" id="pt-thr-n" step="any"></div></div>
+        <div class="frow"><label>Min. size (px)</label><div class="row2"><input type="number" id="pt-min" value="8" min="1"><button id="pt-otsu">Otsu</button></div></div>
+        <div class="frow"><label></label><label class="chk" title="Distance-transform watershed: particles that touch are cut at their neck"><input type="checkbox" id="pt-split" checked> Split touching particles</label></div>
+      </div>
+      <div class="sec seg-only" data-sec="seg-coat">
+        <div class="sec-h toggle">Coating uniformity</div>
+        <div class="sec-b">
+          <div class="frow"><label>Coating band</label><select id="seg-coat-band" title="The band of the amorphous carbon coating, taken over G (D3 by default)"></select></div>
+          <div class="frow"><label>Leave out the rim</label><div class="kx"><input type="number" id="seg-rim" value="1" min="0" step="0.25" title="Pixels this close to a particle's edge are left out: the laser spot (about 1 µm) lies partly off the particle there"><span>µm from the edge</span></div></div>
+          <div class="frow"><label>Colour pixels</label><select id="seg-colour"><option value="coat">by coating (against the noise band)</option><option value="value">by the map value</option></select></div>
+          <div class="verdict" id="seg-verdict"></div>
+          <div class="cards" id="seg-coat-cards"></div>
+          <div class="sub-h" id="seg-more-cards-h"></div>
+          <div class="cards" id="seg-more-cards"></div>
+          <div class="pf-scroll"><table class="stats" id="seg-coat-table"></table></div>
+          <div class="muted small" id="seg-coat-note"></div>
+        </div>
+      </div>
       <div class="sec pf-only">
         <div class="sec-h">ParticleFinder particles</div>
         <div class="frow"><label>Plot against</label><select id="pf-x"></select></div>
@@ -309,7 +330,22 @@
           <div class="frow"><label>Coating band</label><select id="pf-coat-band" title="The band of the amorphous carbon coating, taken over G (D3 by default)"></select></div>
           <div class="verdict" id="pf-verdict"></div>
           <div class="cards" id="pf-coat-cards"></div>
+          <div class="sub-h" id="pf-more-cards-h"></div>
+          <div class="cards" id="pf-more-cards"></div>
           <div class="muted small" id="pf-coat-note"></div>
+        </div>
+      </div>
+      <div class="sec" data-sec="coverage">
+        <div class="sec-h toggle">Coverage</div>
+        <div class="sec-b">
+          <div class="frow"><label>Uncoated reference</label><select id="cov-ref" title="An uncoated sample measured in the same session and open in this window: the threshold is the 99th percentile of its coating index"></select></div>
+          <div class="frow"><label>Threshold &tau;</label><div class="kx"><input type="number" id="cov-tau" step="any" min="0"><span id="cov-tau-note">uncoated above it: 1 %</span></div></div>
+          <div class="frow"><label>Thinnest coating</label><div class="kx"><input type="number" id="cov-rc" step="any" min="0" placeholder="2 &times; &tau;"><span>that must still be found</span></div></div>
+          <div class="frow"><label>Detection power</label><div class="kx"><input type="number" id="cov-power" value="0.95" min="0.5" max="0.9999" step="0.01"><span>at the signal floor</span></div></div>
+          <div class="frow"><label>Certify</label><div class="kx"><input type="number" id="cov-spec" value="0.99" min="0.5" max="0.9999" step="0.005"><span>coated, 95 % confidence</span></div></div>
+          <div class="verdict" id="cov-verdict"></div>
+          <div class="cards" id="cov-cards"></div>
+          <div class="muted small" id="cov-note"></div>
         </div>
       </div>
       <div class="sec pf-only" data-sec="pf-detect">
@@ -317,6 +353,7 @@
         <div class="sec-b">
           <div class="frow"><label>Detected</label><div class="kx"><span>height ≥</span><input type="number" id="pf-kd" value="3" min="0.5" step="0.5"><span>standard errors</span></div></div>
           <div class="frow"><label>Quantified</label><div class="kx"><span>G ≥</span><input type="number" id="pf-kq" value="10" min="1" step="1"><span>× noise</span></div></div>
+          <div class="frow"><label></label><label class="chk" title="ParticleFinder keeps a status for every located particle: measured, selected but not measured, or excluded by the run's own filter (size, shape). LabSpec's results use the measured ones only."><input type="checkbox" id="pf-incl-excl"> Include particles the run's filter excluded</label></div>
           <div class="cards" id="pf-detect-cards"></div>
           <div class="muted small">A band is detected when its fitted height is at least this many standard errors above zero. The standard error comes from the particle's own fit (its residual through the fit's covariance), so a broad weak band such as D3 is judged against every channel under it, not against the noise of one channel. Quantified: G at least 10 × the residual noise, inside its fit bounds (a band stuck on a bound is fitting noise), passing the Constraints of the Carbon fit tab. Everything below uses the quantified particles.</div>
         </div>
@@ -349,25 +386,6 @@
       </div>
       <div class="sec pf-only">
         <button class="wide" id="pf-csv">Export particle analysis (CSV)</button>
-      </div>
-      <div class="sec seg-only">
-        <div class="sec-h">Find particles</div>
-        <div class="frow"><label>Segment on</label><select id="pt-src"></select></div>
-        <div class="frow"><label>Threshold</label><div class="row2"><input type="range" id="pt-thr" min="0" max="1" step="0.001"><input type="number" id="pt-thr-n" step="any"></div></div>
-        <div class="frow"><label>Min. size (px)</label><div class="row2"><input type="number" id="pt-min" value="8" min="1"><button id="pt-otsu">Otsu</button></div></div>
-        <div class="frow"><label></label><label class="chk" title="Distance-transform watershed: particles that touch are cut at their neck"><input type="checkbox" id="pt-split" checked> Split touching particles</label></div>
-      </div>
-      <div class="sec seg-only" data-sec="seg-coat">
-        <div class="sec-h toggle">Coating uniformity</div>
-        <div class="sec-b">
-          <div class="frow"><label>Coating band</label><select id="seg-coat-band" title="The band of the amorphous carbon coating, taken over G (D3 by default)"></select></div>
-          <div class="frow"><label>Leave out the rim</label><div class="kx"><input type="number" id="seg-rim" value="1" min="0" step="0.25" title="Pixels this close to a particle's edge are left out: the laser spot (about 1 µm) lies partly off the particle there"><span>µm from the edge</span></div></div>
-          <div class="frow"><label>Colour pixels</label><select id="seg-colour"><option value="coat">by coating (against the noise band)</option><option value="value">by the map value</option></select></div>
-          <div class="verdict" id="seg-verdict"></div>
-          <div class="cards" id="seg-coat-cards"></div>
-          <div class="pf-scroll"><table class="stats" id="seg-coat-table"></table></div>
-          <div class="muted small" id="seg-coat-note"></div>
-        </div>
       </div>
       <div class="sec">
         <div class="sec-h" id="pt-cards-h">Pixels vs particles</div>

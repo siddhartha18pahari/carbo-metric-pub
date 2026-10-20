@@ -168,3 +168,17 @@ test("ParticleFinder tilt: size from the box and the Feret axes, the way it lean
   // without a mosaic only the size of the tilt is known
   near(pfAngles(pts, null)[1], Math.PI / 6, 1e-6);
 });
+
+import { pfSeams } from "../../web/js/engine/readers.js";
+
+test("ParticleFinder seams: objects on the dark border between mosaic tiles, and only those", () => {
+  // a 120 x 80 mosaic, light with a little texture, a dark seam column at q = 60; X ascending, Y descending
+  const W = 120, H = 80, x = Float32Array.from({ length: W }, (_, q) => q), y = Float32Array.from({ length: H }, (_, r) => H - 1 - r);
+  const raw = new Uint8Array(W * H * 3);
+  for (let r = 0; r < H; r++) for (let q = 0; q < W; q++) raw.fill(q === 60 ? 150 : 200 + ((q * 7 + r * 3) % 9), (r * W + q) * 3, (r * W + q) * 3 + 3);
+  const pts = { x: [60, 60.6, 30, 62.6, 90], y: [40, 20, 40, 60, 30], feret_max: [30, 3, 6, 6, 30], min_diam: [2, 2, 5, 5, 2], angle: [Math.PI / 2, 0, 0, 0, Math.PI / 2] };
+  // a long thin object along the seam, a speck centred on it, a round particle off it, a round particle
+  // across the seam (widened to columns 59-61) but centred 1.6 px beyond it, and a long thin object far from any seam
+  assert.deepEqual(Array.from(pfSeams(pts, { raw, off: 0, W, H, x, y })), [1, 1, 0, 0, 0]);
+  assert.deepEqual(Array.from(pfSeams(pts, null)), [0, 0, 0, 0, 0]);
+});
