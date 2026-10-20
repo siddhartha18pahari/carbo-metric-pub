@@ -8,6 +8,9 @@ import { cssGradient, lut, COLORMAPS } from "./colormaps.js";
 import { el, fmt, hidpi, niceTicks, quantile } from "./util.js";
 import { T, font } from "./theme.js";
 
+// margins around the map: axis, colour bar and its labels
+const PAD = { l: 34, b: 26, t: 6, cb: 12, cbPad: 50 };
+
 // diagonal hatch behind invalid points, in the current theme's colours
 let hatch = null;
 function HATCH() {
@@ -47,9 +50,9 @@ export class MapView {
       el("button", { class: "icon", title: "Display options", onclick: e => this.menu(e) }, "⚙"),
       el("button", { class: "icon", title: "Save as PNG", onclick: () => this.save() }, "⤓"),
       el("button", { class: "icon", title: "Enlarge", onclick: () => this.toggleMax() }, "⤢"));
-    this.head = el("div", { class: "map-head" }, this.titleEl, this.readout, tools);
+    this.head = el("div", { class: "map-head" }, this.titleEl, this.readout);
     this.canvas = el("canvas", { class: "map-canvas" });
-    this.body = el("div", { class: "map-body" }, this.canvas);
+    this.body = el("div", { class: "map-body" }, this.canvas, tools);     // tools float over the map
     host.append(this.head, this.body);
     this.off = document.createElement("canvas");
 
@@ -65,6 +68,19 @@ export class MapView {
     window.addEventListener("mouseup", () => { this._drag = null; });
     this.canvas.addEventListener("dblclick", () => this.setView(null, true));
     new ResizeObserver(() => this.render()).observe(this.body);
+  }
+
+  // for laying out the cards: the body height at which the whole map fills
+  // a body W px wide, and the size the whole map is drawn at in W x H
+  fitBody(W) {
+    const E = this.ext; if (!E) return 0;
+    return Math.ceil((W - PAD.l - PAD.cb - PAD.cbPad - 8) * (E.y1 - E.y0) / (E.x1 - E.x0)) + PAD.b + PAD.t;
+  }
+  plotSize(W, H) {
+    const E = this.ext; if (!E) return { w: 0, h: 0 };
+    const wu = E.x1 - E.x0, hu = E.y1 - E.y0;
+    const k = Math.max(0, Math.min((W - PAD.l - PAD.cb - PAD.cbPad - 8) / wu, (H - PAD.b - PAD.t) / hu));
+    return { w: k * wu, h: k * hu };
   }
 
   // the region shown, in stage um; the full extent is this.ext
@@ -260,7 +276,7 @@ export class MapView {
     if (W < 20 || H < 20) return;
     const ctx = hidpi(this.canvas, W, H);
     this.ctx = ctx;
-    const padL = 34, padB = 26, padT = 6, cbW = 12, cbPad = 50;
+    const { l: padL, b: padB, t: padT, cb: cbW, cbPad } = PAD;
     const aw = W - padL - cbW - cbPad - 8, ah = H - padB - padT;
     const wu = this.x1 - this.x0, hu = this.y1 - this.y0;
     this.k = Math.max(0.1, Math.min(aw / wu, ah / hu));

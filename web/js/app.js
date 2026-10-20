@@ -567,7 +567,19 @@ $("#cfg-input").onchange = async e => {
   e.target.value = "";
 };
 $("#cfg-reset").onclick = () => { S.cfg = structuredClone(S.defaultCfg); $("#cfg-file").value = ""; fillSide(); onProcessing(); };
-$$(".sec-h.toggle").forEach(h => h.addEventListener("click", () => h.parentElement.classList.toggle("closed")));
+// folded sections stay folded, per browser
+const CLOSED_KEY = "carbo-closed";
+let closedSecs = [];
+try { closedSecs = JSON.parse(localStorage.getItem(CLOSED_KEY) || "[]"); } catch { closedSecs = []; }
+$$(".sec-h.toggle").forEach(h => {
+  const sec = h.parentElement, id = sec.dataset.sec;
+  if (id && closedSecs.includes(id)) sec.classList.add("closed");
+  h.addEventListener("click", () => {
+    sec.classList.toggle("closed");
+    if (!id) return;
+    try { localStorage.setItem(CLOSED_KEY, JSON.stringify($$(".sec[data-sec].closed").map(s => s.dataset.sec))); } catch { /* storage blocked */ }
+  });
+});
 
 // =========================================================================
 // fitting
@@ -683,6 +695,7 @@ async function loadDataset(info) {
     if (ok) S.video = img;
   }
   for (const m of [...maps, pmap]) { m.setGeometry({ nx: S.nx, ny: S.ny, x: S.x, y: S.y, points: S.points }); m.values = null; }
+  fitMapRow();
   S.vidFull = false;
   setActive(S.active);
   renderDensity(); renderVideo();
@@ -803,6 +816,7 @@ async function loadResults(grid) {
     if (await new Promise(res => { img.onload = () => res(true); img.onerror = () => res(false); img.src = r.video.url; })) S.video = img;
   }
   for (const m of [...maps, pmap]) { m.setGeometry({ nx: S.nx, ny: S.ny, x: S.x, y: S.y }); m.values = null; }
+  fitMapRow();
   // no spectra in the file: the graphs show the bands its fitted values describe
   S.wn = Float32Array.from({ length: 321 }, (_, c) => S.cfg.range_lo + (S.cfg.range_hi - S.cfg.range_lo) * c / 320);
   setActive(S.active);
@@ -928,14 +942,41 @@ function switchTab(name) {
   if (name === "splat") splatShow();
   if (name === "particles") particlesInit();
   if (name === "report") makeReport();
-  if (name === "qc") setTimeout(() => { maps.forEach(m => m.render()); renderVideo(); cursorPlot.render(); hist.render(); density.render(); }, 0);
+  if (name === "qc") setTimeout(() => { fitMapRow(); maps.forEach(m => m.render()); renderVideo(); cursorPlot.render(); hist.render(); density.render(); }, 0);
 }
 function moveInk() {
   const on = $("#tabs button.on"), ink = $(".tab-ink");
   ink.style.left = on.offsetLeft + "px"; ink.style.width = on.offsetWidth + "px";
 }
 $$("#tabs button").forEach(b => b.addEventListener("click", () => switchTab(b.dataset.tab)));
-window.addEventListener("resize", moveInk);
+window.addEventListener("resize", () => { moveInk(); fitMapRow(); });
+
+// Map cards as tall as the map needs, so a wide map leaves no empty band.
+// Side by side, four in a row or 2 x 2, whichever draws each map at least
+// 1.5x bigger (wide maps get tiny four across); the row below takes the rest.
+// Stacked (narrow screens), the columns are the stylesheet's.
+function fitMapRow() {
+  const chart = $(".chart"), grid = $(".maps"), mv = maps.find(m => !m.host.classList.contains("maxed")) || maps[0];
+  const clear = () => { chart.style.removeProperty("--maps-h"); grid.style.removeProperty("--map-cols"); chart.style.removeProperty("--map-card-h"); };
+  if (!S.ds || !mv.ext || !grid.clientWidth) { clear(); return; }
+  const head = mv.head.offsetHeight + 2, gap = 12;
+  if (matchMedia("(max-width: 1280px)").matches) {
+    clear();
+    chart.style.setProperty("--map-card-h", Math.round(Math.max(220, Math.min(innerHeight * 0.8, mv.fitBody(mv.body.clientWidth) + head))) + "px");
+    return;
+  }
+  // the maps may take 62% of the height, leaving the row below at least 280 px
+  const W = grid.clientWidth, cap = Math.min(chart.clientHeight * 0.62, chart.clientHeight - 280 - gap);
+  const layout = cols => {
+    const rows = 4 / cols, cw = (W - gap * (cols - 1)) / cols;
+    const rowH = Math.max(170, Math.min(mv.fitBody(cw) + head, (cap - gap * (rows - 1)) / rows));
+    const s = mv.plotSize(cw, rowH - head);
+    return { cols, h: rows * rowH + gap * (rows - 1), area: s.w * s.h };
+  };
+  const four = layout(4), two = layout(2), L = two.area >= 1.5 * four.area ? two : four;
+  grid.style.setProperty("--map-cols", L.cols);
+  chart.style.setProperty("--maps-h", Math.round(L.h) + "px");
+}
 
 // =========================================================================
 // splat 3-D
@@ -1399,15 +1440,18 @@ function themeButton() {
   $("#theme-toggle").title = `Switch to ${next} mode`;
 }
 $("#theme-toggle").onclick = () => setTheme(currentTheme() === "light" ? "dark" : "light");
-window.addEventListener("themechange", () => {
-  themeButton();
+window.addEventListener("themechange", () => { themeButton(); repaintAll(); });
+// canvas text is drawn in the web font: draw everything again once it has loaded
+if (document.fonts) Promise.all(["400 12px Inter", "600 12px Inter"].map(f => document.fonts.load(f)))
+  .then(() => { moveInk(); fitMapRow(); repaintAll(); }).catch(() => {});
+function repaintAll() {
   buildPeaks();                                   // band swatches
   for (const m of [...maps, pmap, sliceData, sliceFieldView]) { m._dirty = true; m.render(); }
   if (S.fit) refreshAll(); else { renderCursor(); renderVideo(); }
   if (S.cube) renderDensity();
   if (S.seg) { drawStrip(); renderParticles(); }
   const st = splatState(); if (st.history) drawLoss(st.history);
-});
+}
 themeButton();
 
 // =========================================================================

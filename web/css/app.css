@@ -3,7 +3,8 @@
    read by the canvas code (js/theme.js), so plots and maps follow the theme. */
 :root {
   color-scheme: dark;
-  --font: "Times New Roman", Times, serif;
+  --font: "Inter", "Segoe UI", system-ui, -apple-system, Roboto, Arial, sans-serif;
+  --serif: "Times New Roman", Times, serif;      /* the printed report */
   --sans: var(--font);
   --mono: var(--font);
   --r: 12px;
@@ -223,8 +224,8 @@ footer.credit {
 .tab { display: none; height: 100%; }
 .tab.on { display: grid; }
 #tab-qc { grid-template-columns: minmax(0, 1fr) 420px; gap: 12px; padding: 12px; }
-.chart { position: relative; display: grid; grid-template-rows: minmax(0, 1.06fr) minmax(0, 1fr); gap: 12px; min-height: 0; min-width: 0; }
-.maps { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; min-height: 0; }
+.chart { position: relative; display: grid; grid-template-rows: var(--maps-h, minmax(0, 1.06fr)) minmax(0, 1fr); gap: 12px; min-height: 0; min-width: 0; }
+.maps { display: grid; grid-template-columns: repeat(var(--map-cols, 4), minmax(0, 1fr)); grid-auto-rows: minmax(0, 1fr); gap: 12px; min-height: 0; }
 .lower { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr) minmax(0, 1fr); gap: 12px; min-height: 0; }
 
 .panel {
@@ -239,25 +240,36 @@ footer.credit {
   white-space: nowrap; overflow: hidden;
 }
 .panel-h .muted, .panel-h .small { font-weight: 400; }
+.panel-h > .muted, .panel-h > .hint, .panel-h > .link { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.panel-h > .grow { flex: 1 1 0; }
 .plot { position: relative; flex: 1; min-height: 0; }
 .plot canvas { position: absolute; inset: 0; display: block; }
-.cursor-table { display: flex; flex-wrap: wrap; gap: 4px 12px; padding: 5px 12px 8px; font-size: 12.5px; color: var(--muted); border-top: 1px solid var(--line); min-height: 28px; }
+.cursor-table { display: flex; flex-wrap: wrap; gap: 4px 14px; padding: 6px 12px 8px; font-size: 13px; color: var(--muted); border-top: 1px solid var(--line); min-height: 28px; }
 .cursor-table span b { font-weight: 700; }
 
 /* map panels */
 .mapview { display: flex; flex-direction: column; transition: box-shadow 0.2s, border-color 0.2s; }
 .mapview.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent-glow), 0 0 22px var(--accent-soft-2); }
-.map-head { display: flex; align-items: center; gap: 6px; padding: 4px 6px 4px 10px; min-height: 34px; border-bottom: 1px solid var(--line); }
+.map-head { display: flex; align-items: center; gap: 6px; padding: 4px 10px 4px 8px; min-height: 34px; border-bottom: 1px solid var(--line); }
 .map-title {
   border: 0; background: none; height: auto; color: var(--heading); cursor: pointer; padding: 2px 6px; border-radius: 6px;
-  font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 70%;
+  font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; min-width: 0;
 }
 .map-title:hover:not(:disabled) { background: var(--accent-soft-2); border: 0; }
 .map-title u { text-decoration: none; color: var(--accent); border-bottom: 1px dotted var(--accent); font-weight: 400; }
 .map-title .caret { color: var(--dim); font-size: 10px; }
-.map-readout { flex: 1; text-align: right; font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.map-tools { display: flex; gap: 2px; opacity: 0.45; transition: opacity 0.2s; }
-.mapview:hover .map-tools, .mapview.active .map-tools { opacity: 1; }
+.map-readout { flex: 1 1 0; min-width: 0; text-align: right; font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.map-tools {
+  position: absolute; top: 4px; right: 4px; z-index: 2; display: flex; gap: 1px; padding: 2px; border-radius: 9px;
+  background: var(--solid); border: 1px solid var(--line); box-shadow: var(--shadow); transition: opacity 0.15s;
+}
+@media (hover: hover) {
+  .map-tools { opacity: 0; pointer-events: none; }
+  .mapview:hover .map-tools, .mapview:focus-within .map-tools { opacity: 1; pointer-events: auto; }
+}
+@media (hover: none) {
+  .mapview:not(.active) .map-tools { display: none; }
+}
 .map-body { position: relative; flex: 1; min-height: 0; }
 .map-body canvas { position: absolute; inset: 0; cursor: crosshair; }
 .mapview.maxed { position: fixed; inset: 66px 442px 12px 12px; z-index: 30; }
@@ -505,7 +517,7 @@ table.stats .sub { color: var(--dim); }
 .report-scroll { overflow: auto; border-radius: var(--r); }
 .paper {
   width: 210mm; min-height: 297mm; margin: 0 auto 30px; padding: 16mm 15mm; background: #fff; color: #142033;
-  font: 11pt/1.45 var(--font); box-shadow: var(--shadow-lg); border-radius: 4px;
+  font: 11pt/1.45 var(--serif); box-shadow: var(--shadow-lg); border-radius: 4px;
 }
 .paper h1 { font-size: 21pt; margin: 0 0 2mm; color: #0b2a6b; font-weight: 700; }
 .paper h2 { font-size: 13pt; margin: 6mm 0 2mm; color: #0b2a6b; border-bottom: 1px solid #cdd8ea; padding-bottom: 1mm; }
@@ -534,7 +546,7 @@ table.stats .sub { color: var(--dim); }
   #tab-qc, #tab-splat, #tab-particles { grid-template-columns: minmax(0, 1fr); }
   .chart { grid-template-rows: auto auto; }
   .maps { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .maps .panel { height: 320px; }
+  .maps .panel { height: var(--map-card-h, 320px); }
   .lower { grid-template-columns: minmax(0, 1fr); }
   .lower .panel { height: 300px; }
   .side { overflow: visible; }
@@ -569,7 +581,6 @@ table.stats .sub { color: var(--dim); }
 .browser-only .browser-note { display: block; }
 .browser-only #hero-open, .browser-only #recent { display: none; }
 
-/* a fitted-result table: nothing to refit */
 /* a file of fitted values: the spectral settings have nothing to act on, spatial smoothing does */
 .results-only [data-sec="processing"] .spec-ctl, .results-only [data-sec="peaks"] { opacity: .45; pointer-events: none; }
 .ro-note { display: none; }

@@ -188,7 +188,10 @@ export class HistogramPlot extends Base {
     vline(d.median, T.strong, `median ${fmt(d.median)}`, []);
     vline(d.mean, T.mean, `mean ${fmt(d.mean)}`, [4, 3]);
     ctx.fillStyle = T.label; ctx.font = font(11); ctx.textAlign = "center"; ctx.textBaseline = "bottom";
-    ctx.fillText(d.label + (out ? `   (${out} outside the axis)` : ""), F.x + F.w / 2, F.y + F.h + 33);
+    // the longest caption that fits the axis
+    const cap = [d.label + (out ? `   (${out} outside the axis)` : ""), d.label + (out ? `  (${out} off axis)` : ""), d.label]
+      .find(t => ctx.measureText(t).width <= F.w + F.x - 4) || d.label;
+    ctx.fillText(cap, F.x + F.w / 2, F.y + F.h + 33);
   }
 }
 

@@ -2,7 +2,7 @@
 // canvases read the --cv-* ones here, so plots and maps follow the theme too.
 // The choice is kept per browser; the first visit follows the system setting.
 
-export const FONT = '"Times New Roman", Times, serif';
+export const FONT = '"Inter", "Segoe UI", system-ui, -apple-system, Roboto, Arial, sans-serif';
 export const font = (px, weight = "") => `${weight ? weight + " " : ""}${px}px ${FONT}`;
 
 // canvas palette, refreshed on every theme change

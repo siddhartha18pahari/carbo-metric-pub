@@ -15,6 +15,9 @@
     document.documentElement.dataset.theme = t;
   })();
 </script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
 <link rel="stylesheet" href="/static/css/app.css">
 </head>
 <body>
@@ -54,7 +57,7 @@
       <div class="lower">
         <div class="panel col">
           <div class="panel-h">Cursor spectrum <span class="muted" id="cursor-info"></span>
-            <span class="grow"></span><span class="muted small">drag to zoom · ←↑→↓ move · click a map to pin</span></div>
+            <span class="grow"></span><span class="muted small hint">drag to zoom · ←↑→↓ move · click a map to pin</span></div>
           <div class="plot" id="plot-cursor"></div>
           <div class="cursor-table" id="cursor-table"></div>
         </div>
