@@ -608,8 +608,11 @@ async function startFit() {
   }
   if (S.fitRunning) { S.pendingFit = true; return; }
   if (validate().length) return;
+  // the batch is fitting this map: refit it with these settings when it is done
+  if (F.busy === S.ds.id) { S.pendingFit = true; setStatus("Fitting in the batch; refits with these settings after it", "busy"); return; }
   S.fitRunning = true; S.pendingFit = false;
-  const id = S.ds.id;
+  const id = S.ds.id, f = fileOf(id);
+  if (f) { f.state = "fitting"; f.progress = 0; }
   document.body.classList.add("fitting");
   setStatus(`Fitting ${fmt(P())} spectra…`, "busy"); setProgress(0.02);
   try {
@@ -619,14 +622,17 @@ async function startFit() {
       await sleep(140);
       st = await api(`/api/ds/${id}/fit`);
       setProgress(Math.max(0.03, st.progress || 0));
+      if (f) { f.progress = st.progress || 0; renderFiles({ compare: false }); }
       if (st.state !== "running") break;
     }
     if (st.state === "error") throw new Error(st.error);
     const r = await api(`/api/ds/${id}/fit?result=1`);
+    rememberFit(id, r.result);
     if (!S.ds || S.ds.id !== id) return;
     decodeFit(r.result);
     setStatus(`Fitted ${fmt(P() - (S.ds.missing || 0))} spectra in ${r.result.seconds.toFixed(1)} s`);
   } catch (e) {
+    if (f) { f.state = "error"; f.error = e.message; renderFiles(); }
     setStatus("Fit failed", "err"); toast(e.message, "error", 8000);
   } finally {
     setProgress(1); S.fitRunning = false; document.body.classList.remove("fitting");
@@ -662,12 +668,14 @@ function refreshAll() {
   renderMaps(); renderQuality(); renderStats(); renderHist(); renderCursor(); renderVideo(); renderDensity();
   maps.forEach(m => m.setCursor(S.hover, S.pinned));
   if ($("#tab-particles").classList.contains("on")) renderParticles();
+  renderFiles();
 }
 
 // =========================================================================
 // opening maps
 // =========================================================================
 async function loadDataset(info) {
+  addFile(info);
   S.results = null;
   document.body.classList.remove("results-only");
   $("#grid-row").classList.add("hidden"); $("#results-note").textContent = ""; $("#results-bands").textContent = "";
@@ -703,6 +711,7 @@ async function loadDataset(info) {
   // reopening a map the server already fitted with these settings: reuse it
   const prev = await api(`/api/ds/${info.id}/fit?result=1`).catch(() => null);
   if (prev && prev.state === "done" && prev.result && JSON.stringify(prev.result.config) === JSON.stringify(S.cfg)) {
+    rememberFit(info.id, prev.result);
     decodeFit(prev.result);
     setStatus(`Fitted ${fmt(P() - (S.ds.missing || 0))} spectra (kept from earlier)`);
   } else startFit();
@@ -755,7 +764,7 @@ function renderLibrary() {
   const nOk = S.library.filter(i => i.ok).length, nUnknown = S.library.filter(i => i.ok === undefined).length;
   $("#lib-meta").textContent = `${items.length} of ${S.library.length} files · ${nOk} readable maps` + (nUnknown ? ` · ${nUnknown} not read yet (Scan details)` : "");
 }
-$("#btn-library").onclick = () => (isBrowserOnly() ? $("#file-input").click() : showLibrary());
+$("#btn-library").onclick = e => (F.files.length > 1 ? fileMenu(e) : isBrowserOnly() ? $("#file-input").click() : showLibrary());
 $("#hero-open").onclick = () => showLibrary();
 $("#lib-close").onclick = () => $("#library").classList.add("hidden");
 $("#library").addEventListener("click", e => { if (e.target.id === "library") $("#library").classList.add("hidden"); });
@@ -890,6 +899,8 @@ $("#grid-select").onchange = e => { if (S.results) loadResults(S.results.r.choic
 async function uploadFiles(files) {
   if (!files.length) return;
   try {
+    const { groups, tables } = await mapGroups(files);
+    if (groups.length > 1) { await openMany(groups, tables); $("#library").classList.add("hidden"); return; }
     const R = await import("./engine/results-file.js");
     const table = await R.findResultsFile(files);
     if (table) {
@@ -942,6 +953,7 @@ function switchTab(name) {
   if (name === "splat") splatShow();
   if (name === "particles") particlesInit();
   if (name === "report") makeReport();
+  if (name === "files") setTimeout(() => renderFiles(), 0);
   if (name === "qc") setTimeout(() => { fitMapRow(); maps.forEach(m => m.render()); renderVideo(); cursorPlot.render(); hist.render(); density.render(); }, 0);
 }
 function moveInk() {
@@ -976,6 +988,299 @@ function fitMapRow() {
   const four = layout(4), two = layout(2), L = two.area >= 1.5 * four.area ? two : four;
   grid.style.setProperty("--map-cols", L.cols);
   chart.style.setProperty("--maps-h", Math.round(L.h) + "px");
+}
+
+// =========================================================================
+// several files: open together, fit as a batch, switch between, compare
+// =========================================================================
+// Every map opened this session is listed. A batch fits them one after
+// another with the Carbon fit tab's settings; the summary and the compare
+// maps use each file's own fit, with the current ratio and constraints.
+const F = { files: [], busy: null, running: false, dirty: false };
+const VIEW_KEYS = ["ratio_num", "ratio_den", "intensity", "ratio_i", "ratio_a"];
+function stableJSON(v) {
+  if (Array.isArray(v)) return `[${v.map(stableJSON).join(",")}]`;
+  if (v && typeof v === "object") return `{${Object.keys(v).sort().map(k => JSON.stringify(k) + ":" + stableJSON(v[k])).join(",")}}`;
+  return JSON.stringify(v);
+}
+// the settings a fit depends on: the ratio and constraints are applied after it
+function fitKey(cfg, info) {
+  const c = { ...cfg };
+  for (const k of VIEW_KEYS) delete c[k];
+  if (info && info.points) c.spatial_kernel = 0;        // never applied to particles
+  return stableJSON(c);
+}
+const fileOf = id => F.files.find(f => f.id === id);
+const escHTML = t => String(t).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+function addFile(info) {
+  if (info.resultsOnly || fileOf(info.id)) return;
+  F.files.push({ id: info.id, name: info.name, info, result: null, key: null, state: "idle", progress: 0, error: "",
+                 compare: F.files.filter(f => f.compare).length < 4 });
+  renderFiles();
+}
+function rememberFit(id, result) {
+  const f = fileOf(id); if (!f) return;
+  Object.assign(f, { result, key: fitKey(result.config, f.info), state: "done", progress: 1, error: "", dec: null, sum: null });
+  renderFiles();
+}
+function statusOf(f) {
+  if (f.state === "fitting") return ["st-run", `fitting ${Math.round(f.progress * 100)} %`];
+  if (f.state === "queued") return ["st-run", "queued"];
+  if (f.state === "error") return ["st-err", "failed"];
+  if (!f.result) return ["", "not fitted"];
+  return f.key === fitKey(S.cfg, f.info) ? ["", "fitted"] : ["st-old", "settings changed"];
+}
+
+// a file's chosen map and its valid points, from its own fit
+function fileValues(f, q) {
+  const r = f.result, c = S.cfg, m = r.m;
+  f.dec ||= { I: f32(r.intensity), A: f32(r.area), se: f32(r.std_error) };
+  const { I, A, se } = f.dec, P = se.length;
+  const jn = r.names.indexOf(c.ratio_num), jd = r.names.indexOf(c.ratio_den);
+  if (jn < 0 || jd < 0) return null;
+  const col = (X, j) => { const o = new Float32Array(P); for (let p = 0; p < P; p++) o[p] = X[p * m + j]; return o; };
+  const In = col(I, jn), Id = col(I, jd), rI = safeRatio(In, Id), rA = safeRatio(col(A, jn), col(A, jd));
+  const valid = new Uint8Array(P);
+  for (let p = 0; p < P; p++) valid[p] = admits(c.intensity, Math.max(In[p], Id[p])) && admits(c.ratio_i, rI[p])
+    && admits(c.ratio_a, rA[p]) && Number.isFinite(se[p]) ? 1 : 0;
+  return { values: { "ratio-i": rI, "ratio-a": rA, "num-i": In, "den-i": Id, err: se }[q], valid, rI, rA, In, Id, se };
+}
+function fileSummary(f) {
+  if (!f.result) return null;
+  const vk = stableJSON(VIEW_KEYS.map(k => S.cfg[k]));
+  if (f.sum && f.sum.vk === vk) return f.sum;
+  const v = fileValues(f, "ratio-i");
+  if (!v) return (f.sum = { vk, missing: true });
+  const pick = a => summary(a.filter((_, p) => v.valid[p]));
+  let measured = 0, nValid = 0;
+  for (let p = 0; p < v.se.length; p++) { if (Number.isFinite(v.se[p])) measured++; nValid += v.valid[p]; }
+  return (f.sum = { vk, measured, valid: nValid, rI: pick(v.rI), rA: pick(v.rA), In: pick(v.In), Id: pick(v.Id), se: pick(v.se) });
+}
+
+function renderFiles(opts = {}) {
+  filePill();
+  if (!$("#tab-files").classList.contains("on")) { F.dirty = true; return; }
+  F.dirty = false;
+  $("#files-count").textContent = F.files.length ? `${F.files.length} open` : "";
+  const t = $("#files-table"); t.textContent = "";
+  const lab = S.cfg ? `${S.cfg.ratio_num}/${S.cfg.ratio_den}` : "";
+  const nCmp = F.files.filter(f => f.compare).length;
+  if (F.files.length) t.append(el("tr", {},
+    el("th", { title: "Show in Compare (up to four)" }, ""), el("th", {}, "File"), el("th", {}, "Status"),
+    el("th", { title: "valid points / points fitted" }, "Valid"), el("th", {}, `${lab} I median`), el("th", {}, "mean ± SD"),
+    el("th", {}, `${lab} A median`), el("th", {}, "mean ± SD"), el("th", {}, "")));
+  for (const f of F.files) {
+    const [cls, st] = statusOf(f), s = fileSummary(f);
+    const cb = el("input", { type: "checkbox", title: "Show in Compare" });
+    cb.checked = f.compare; cb.disabled = !f.compare && nCmp >= 4;
+    cb.onchange = () => { f.compare = cb.checked; renderFiles(); };
+    const cells = !s ? ["", "", "", "", ""] : s.missing ? ["", `no ${lab}`, "", "", ""]
+      : [`${fmt(s.valid)} / ${fmt(s.measured)}`, fmt(s.rI.median), `${fmt(s.rI.mean)} ± ${fmt(s.rI.sd)}`, fmt(s.rA.median), `${fmt(s.rA.mean)} ± ${fmt(s.rA.sd)}`];
+    t.append(el("tr", { class: S.ds && S.ds.id === f.id ? "open" : "" },
+      el("td", {}, cb),
+      el("td", { class: "name", title: `${f.name}: open on the Carbon fit tab` }, el("button", { class: "link", onclick: () => openFile(f) }, f.name)),
+      el("td", { class: cls, title: f.error || "" }, st),
+      ...cells.map(c => el("td", {}, c)),
+      el("td", {}, el("button", { class: "icon", title: "Remove from the list", onclick: () => removeFile(f) }, "✕"))));
+  }
+  $("#files-run").disabled = F.running || !F.files.length;
+  $("#files-run").textContent = F.running ? "Fitting…" : "Fit all";
+  $("#files-csv").disabled = !F.files.some(f => f.result);
+  if (opts.compare !== false) renderCompare();
+}
+
+async function openFile(f) {
+  switchTab("qc");
+  if (S.ds && S.ds.id === f.id && !S.ds.resultsOnly) return;
+  try { await loadDataset(f.info); } catch (e) { setStatus("Could not open", "err"); toast(e.message, "error"); }
+}
+function removeFile(f) {
+  if (F.busy === f.id) { toast("This file is being fitted: remove it when it has finished", "error"); return; }
+  F.files.splice(F.files.indexOf(f), 1);
+  // the web build keeps every file in memory: let it go (unless it is the one open)
+  if (isBrowserOnly() && !(S.ds && S.ds.id === f.id)) api(`/api/ds/${f.id}/close`, {}).catch(() => {});
+  renderFiles();
+}
+
+// fit every file whose fit is missing or used other settings, one at a time
+async function fitAll() {
+  if (F.running || !S.cfg) return;
+  const errs = validate();
+  if (errs.length) { toast(errs[0], "error"); return; }
+  const cfg = structuredClone(S.cfg), key = f => fitKey(cfg, f.info);
+  const todo = F.files.filter(f => !(f.result && f.key === key(f)));
+  if (!todo.length) { toast("Every file is already fitted with these settings", "good"); return; }
+  F.running = true;
+  todo.forEach(f => { f.state = "queued"; });
+  renderFiles({ compare: false });
+  try {
+    for (const [i, f] of todo.entries()) {
+      if (!fileOf(f.id)) continue;                       // removed meanwhile
+      while (S.fitRunning) await sleep(200);             // the open map's own fit goes first
+      if (f.result && f.key === key(f)) continue;        // fitted meanwhile, as the open map
+      setStatus(`Fitting ${f.name} (${i + 1} of ${todo.length})…`, "busy");
+      await fitOne(f, cfg);
+      // the open map was waiting on this fit: refit only if its settings changed meanwhile
+      if (S.pendingFit && S.ds && !S.fitRunning) {
+        const g = fileOf(S.ds.id);
+        if (g && g.result && JSON.stringify(g.result.config) === JSON.stringify(S.cfg)) S.pendingFit = false; else startFit();
+      }
+    }
+  } finally {
+    F.running = false;
+    const bad = todo.filter(f => f.state === "error").length;
+    setStatus(`Fitted ${todo.length - bad} of ${todo.length} files` + (bad ? `: ${bad} failed (hover its status)` : ""), bad ? "err" : "");
+    renderFiles();
+  }
+}
+async function fitOne(f, cfg) {
+  F.busy = f.id; f.state = "fitting"; f.progress = 0;
+  renderFiles({ compare: false });
+  try {
+    await api(`/api/ds/${f.id}/fit`, cfg);
+    let st;
+    do {
+      await sleep(250);
+      st = await api(`/api/ds/${f.id}/fit`);
+      f.progress = st.progress || 0; renderFiles({ compare: false });
+    } while (st.state === "running");
+    if (st.state === "error") throw new Error(st.error);
+    const r = await api(`/api/ds/${f.id}/fit?result=1`);
+    F.busy = null;
+    rememberFit(f.id, r.result);
+    if (S.ds && S.ds.id === f.id && !S.ds.resultsOnly) decodeFit(r.result);     // the open map: show it
+  } catch (e) {
+    f.state = "error"; f.error = e.message;
+  } finally { F.busy = null; }
+}
+
+// several maps dropped together: one group per map, each with its white-light
+// image (matched by name) or its ParticleFinder project; result tables left out
+async function mapGroups(files) {
+  const { isResultsTable } = await import("./engine/readers.js");
+  const stem = f => f.name.toLowerCase().replace(/\.[^.]+$/, "");
+  const maps_ = [], pfs = [], vids = [], tables = [];
+  for (const f of files) {
+    if (/\.l6v$/i.test(f.name)) vids.push(f);
+    else if (/\.l6pf$/i.test(f.name)) pfs.push(f);
+    else if (/\.l6m$/i.test(f.name)) maps_.push(f);
+    else if (/\.(txt|csv|tsv|dat)$/i.test(f.name)) (isResultsTable(await f.slice(0, 65536).text()) ? tables : maps_).push(f);
+  }
+  const groups = maps_.map(f => [f]);
+  for (const pf of pfs) { const g = groups.find(g => stem(g[0]).startsWith(stem(pf))); if (g) g.push(pf); else groups.push([pf]); }
+  const common = (a, b) => { let i = 0; while (i < a.length && a[i] === b[i]) i++; return i; };
+  for (const v of vids) {
+    let best = null, n = 3;
+    for (const g of groups) { const c = common(stem(v), stem(g[0])); if (c > n) { n = c; best = g; } }
+    if (best) best.push(v);
+  }
+  return { groups, tables };
+}
+async function openMany(groups, tables) {
+  if (tables.length) toast(`Fitted-result tables open one at a time: left out ${tables.map(f => f.name).join(", ")}`, "info", 8000);
+  const infos = [];
+  for (const [i, g] of groups.entries()) {
+    setStatus(`Reading ${i + 1} of ${groups.length}: ${g[0].name}…`, "busy");
+    try { const info = await apiUpload(g); addFile(info); infos.push(info); }
+    catch (e) { toast(`${g[0].name}: ${e.message}`, "error", 9000); }
+  }
+  if (!infos.length) throw new Error("none of these files could be opened");
+  switchTab("files");
+  await loadDataset(infos[0]);
+  fitAll();
+}
+
+// the same map of up to four files, side by side
+const cmpMaps = [0, 1, 2, 3].map(i => new MapView($(`#cmp-${i}`), {
+  onTitle: mv => { const f = fileOf(mv.fileId); if (f) openFile(f); },
+}));
+cmpMaps.forEach(mv => { mv.titleEl.title = "Open this file on the Carbon fit tab"; });
+function fillCmpQ() {
+  const s = $("#cmp-q"), cur = s.value || "ratio-i", n = S.cfg.ratio_num, d = S.cfg.ratio_den;
+  s.replaceChildren(...[["ratio-i", `Ratio ${n}/${d} · Intensity`], ["ratio-a", `Ratio ${n}/${d} · Area`],
+    ["num-i", `${n} · Intensity`], ["den-i", `${d} · Intensity`], ["err", "Error · Std. error"]]
+    .map(([v, t]) => el("option", { value: v, selected: v === cur }, t)));
+}
+function renderCompare() {
+  if (!S.cfg) return;
+  fillCmpQ();
+  const sel = F.files.filter(f => f.compare && f.result), q = $("#cmp-q").value;
+  const grid = $("#cmp-grid"); grid.dataset.n = sel.length;
+  $("#cmp-empty").classList.toggle("hidden", sel.length > 0);
+  $("#cmp-empty").innerHTML = F.files.length
+    ? (F.files.some(f => f.compare) ? "Fitting… the maps appear here when their fits finish." : "Tick files in the summary to compare them here (up to four).")
+    : "Open two or more maps to compare them here: drop them on the window together, or use <b>Add files…</b>.";
+  $("#cmp-info").textContent = sel.length ? `${$("#cmp-q").selectedOptions[0].textContent} · ${$("#cmp-shared").checked ? "one colour scale" : "each map its own scale"}` : "";
+  const vals = sel.map(f => fileValues(f, q));
+  let range = null;
+  if ($("#cmp-shared").checked && vals.some(Boolean)) {
+    const pool = [];
+    for (const v of vals) if (v) for (let p = 0; p < v.values.length; p += Math.max(1, Math.floor(v.values.length / 20000))) if (v.valid[p] && Number.isFinite(v.values[p])) pool.push(v.values[p]);
+    pool.sort((a, b) => a - b);
+    if (pool.length) range = [quantile(pool, 0.01), quantile(pool, 0.99)];
+  }
+  const unit = q === "ratio-i" || q === "ratio-a" ? "" : "counts", label = $("#cmp-q").selectedOptions[0].textContent;
+  cmpMaps.forEach((mv, i) => {
+    const f = sel[i], v = vals[i];
+    mv.host.classList.toggle("hidden", !f);
+    if (!f) { mv.fileId = null; return; }
+    if (mv.fileId !== f.id) {
+      const inf = f.info;
+      mv.setGeometry({ nx: inf.nx, ny: inf.ny, x: f32(inf.x), y: f32(inf.y),
+        points: inf.points ? Object.fromEntries(Object.entries(inf.points).map(([k, a]) => [k, f32(a)])) : null });
+      mv.fileId = f.id;
+    }
+    mv.setTitle(escHTML(f.name));
+    mv.emptyText = v ? null : `This fit has no ${S.cfg.ratio_num} or ${S.cfg.ratio_den} band`;
+    if (v) mv.setData(v.values, { valid: v.valid, label, unit, fixedRange: range });
+    else mv.render();
+  });
+}
+$("#cmp-q").onchange = () => renderCompare();
+$("#cmp-shared").onchange = () => renderCompare();
+$("#files-add").onclick = () => $("#file-input").click();
+$("#files-run").onclick = () => fitAll();
+$("#files-csv").onclick = () => {
+  const n = S.cfg.ratio_num, d = S.cfg.ratio_den, num = v => (Number.isFinite(v) ? String(+v.toPrecision(6)) : "");
+  const csv = v => (/[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v);
+  const rows = [["File", "Status", "Points fitted", "Valid points",
+    `Ratio ${n}/${d} intensity median`, "mean", "SD", `Ratio ${n}/${d} area median`, "mean", "SD",
+    `${n} intensity median`, `${d} intensity median`, "Std error median", "Fit seconds"]];
+  for (const f of F.files) {
+    const s = fileSummary(f), st = statusOf(f)[1];
+    rows.push(!s || s.missing ? [f.name, s ? `no ${n}/${d}` : st] : [f.name, st, String(s.measured), String(s.valid),
+      num(s.rI.median), num(s.rI.mean), num(s.rI.sd), num(s.rA.median), num(s.rA.mean), num(s.rA.sd),
+      num(s.In.median), num(s.Id.median), num(s.se.median), num(f.result.seconds)]);
+  }
+  download("carbo_metrics_summary.csv", rows.map(r => r.map(csv).join(",")).join("\n") + "\n", "text/csv");
+};
+
+// the file pill: with several files open, a menu to switch between them
+function filePill() {
+  const n = F.files.length;
+  $("#file-n").textContent = n > 1 ? `${n} ▾` : "";
+  $("#btn-library").title = n > 1 ? "Switch between the open files" : "Open a map from the library (or drop a .l6m or text file anywhere)";
+}
+function fileMenu(e) {
+  e.stopPropagation();
+  $$(".popover").forEach(p => p.remove());
+  const pop = el("div", { class: "popover file-menu", onclick: ev => ev.stopPropagation() });
+  const close = () => pop.remove();
+  pop.append(el("div", { class: "pop-h" }, "Open files"),
+    el("div", { class: "menu-list" }, ...F.files.map(f => el("button", {
+      class: S.ds && S.ds.id === f.id ? "on" : "", title: f.name, onclick: () => { close(); openFile(f); },
+    }, el("span", {}, f.name), el("span", { class: "s" }, statusOf(f)[1])))),
+    el("div", { class: "menu-list" },
+      el("button", { onclick: () => { close(); $("#file-input").click(); } }, "Add files…"),
+      ...(isBrowserOnly() ? [] : [el("button", { onclick: () => { close(); showLibrary(); } }, "Open from the library…")]),
+      el("button", { onclick: () => { close(); switchTab("files"); } }, "Fit all and compare (Files tab)")));
+  document.body.append(pop);
+  const r = e.currentTarget.getBoundingClientRect();
+  pop.style.width = "320px";
+  pop.style.left = Math.max(8, Math.min(window.innerWidth - 328, r.left)) + "px";
+  pop.style.top = r.bottom + 6 + "px";
+  setTimeout(() => document.addEventListener("click", () => pop.remove(), { once: true }));
 }
 
 // =========================================================================

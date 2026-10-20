@@ -133,6 +133,15 @@ function getDs(id) {
 }
 
 // ---------------------------------------------------------------- fitting
+// One fit at a time: the worker pool is shared, so two fits running together
+// would hand each other's chunks to the wrong job. A fit asked for while
+// another runs waits its turn, reported as running at 0 %.
+let fitChain = Promise.resolve();
+function queueFit(ds, cfg) {
+  ds.job = { state: "running", progress: 0, queued: true, started: Date.now() };
+  fitChain = fitChain.then(() => runFit(ds, cfg));
+}
+
 async function runFit(ds, cfg) {
   const job = ds.job = { state: "running", progress: 0, started: Date.now() };
   try {
@@ -243,13 +252,18 @@ export function createLocalBackend() {
       case "fit":
         if (body !== undefined) {
           if (ds.job.state === "running") throw new Error("a fit is already running");
-          runFit(ds, structuredClone(body));
+          queueFit(ds, structuredClone(body));
           return { ...ds.job };
         }
         return q.get("result") === "1" && ds.fit && ds.job.state === "done" ? { ...ds.job, result: payload(ds) } : { ...ds.job };
       case "export":
         if (!ds.fit) throw new Error("fit the map first");
         return exportText(ds, body);
+      case "close":                                   // removed from the file list: free its memory
+        if (ds.job.state === "running") throw new Error("a fit is running on this map");
+        if (ds.videoUrl) URL.revokeObjectURL(ds.videoUrl);
+        DS.delete(ds.id);
+        return { ok: true };
       case "splat":
         if (ds.map.points) throw new Error("Splat 3D needs a gridded map; ParticleFinder spectra are one point per particle");
         throw new Error("Splat 3D is a work in progress in the web version");

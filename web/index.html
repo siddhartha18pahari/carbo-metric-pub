@@ -28,11 +28,12 @@
     <span>Carbo <b>Metrics</b></span>
   </div>
   <button id="btn-library" class="file-pill" title="Open a map from the library (or drop a .l6m or text file anywhere)">
-    <span class="ico">▤</span><span id="file-name">Open a map…</span>
+    <span class="ico">▤</span><span id="file-name">Open a map…</span><span class="file-n" id="file-n"></span>
   </button>
   <nav class="tabs" id="tabs">
     <span class="tab-ink"></span>
     <button data-tab="qc" class="on">Carbon fit</button>
+    <button data-tab="files">Files</button>
     <button data-tab="splat">Splat&nbsp;3D</button>
     <button data-tab="particles">Particles</button>
     <button data-tab="report">Report</button>
@@ -170,6 +171,38 @@
     </aside>
   </section>
 
+  <!-- ======================= Files: several maps ======================= -->
+  <section id="tab-files" class="tab">
+    <div class="files-main">
+      <div class="panel col">
+        <div class="panel-h">Compare <span class="muted small" id="cmp-info"></span></div>
+        <div class="cmp-grid" id="cmp-grid">
+          <div class="panel map" id="cmp-0"></div><div class="panel map" id="cmp-1"></div>
+          <div class="panel map" id="cmp-2"></div><div class="panel map" id="cmp-3"></div>
+          <div class="cmp-empty muted" id="cmp-empty">Open two or more maps to compare them here: drop them on the window together, or use <b>Add files…</b>.</div>
+        </div>
+      </div>
+      <div class="panel col">
+        <div class="panel-h">Summary <span class="muted small">valid points only · click a file to open it</span></div>
+        <div class="files-scroll"><table class="stats files" id="files-table"></table></div>
+      </div>
+    </div>
+    <aside class="side">
+      <div class="sec">
+        <div class="sec-h">Files <span class="muted small" id="files-count"></span></div>
+        <div class="btnrow"><button id="files-add">Add files…</button><button class="primary" id="files-run">Fit all</button></div>
+        <div class="muted small files-note" id="files-status">Each file is fitted with the settings on the Carbon fit tab, one after another.</div>
+        <button class="wide" id="files-csv">Export summary (CSV)</button>
+      </div>
+      <div class="sec">
+        <div class="sec-h">Compare</div>
+        <div class="frow"><label>Show</label><select id="cmp-q"></select></div>
+        <div class="frow"><label></label><label class="chk" title="The same colours mean the same value in every map (1-99 % of the valid points of all the maps shown)"><input type="checkbox" id="cmp-shared" checked> One colour scale</label></div>
+        <div class="muted small">Tick up to four files in the summary to show them side by side. Ratio and constraints follow the Carbon fit tab.</div>
+      </div>
+    </aside>
+  </section>
+
   <!-- ======================= Splat 3D ======================= -->
   <section id="tab-splat" class="tab">
     <div class="panel splat-stage">
@@ -274,7 +307,7 @@
     <div class="lib-foot muted small">Folders come from <code>data_roots.txt</code>; text files you open are kept under <code>uploads</code> and listed here. Files are only read, never changed. You can also drop a <code>.l6m</code> (plus its <code>.l6v</code> white-light image) or a text export onto the window.</div>
   </div>
 </div>
-<div id="drop" class="drop hidden"><div>Drop a map, spectrum or result table<br><span>.l6m (+ .l6v white-light image) · .txt · .csv</span></div></div>
+<div id="drop" class="drop hidden"><div>Drop a map, spectrum or result table<br><span>.l6m (+ .l6v white-light image) · .txt · .csv · several maps at once to fit them all</span></div></div>
 <input type="file" id="file-input" multiple accept=".l6m,.l6v,.l6pf,.txt,.csv,.tsv,.dat" hidden>
 <div id="toasts"></div>
 <script type="module" src="/static/js/app.js"></script>
