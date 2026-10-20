@@ -45,12 +45,17 @@ function pointerWord(raw) {
   return best === null ? null : Uint8Array.of(best & 255, best >> 8, 0, 0);
 }
 
-function matBlocks(raw) {
+// the offsets of every 24-byte record, in file order
+function records(raw) {
   const word = pointerWord(raw);
   if (!word) return [];
   const recs = new Set();
   for (let i = find(raw, word, 0); i !== -1; i = find(raw, word, i + 1)) if (i >= 12) recs.add(i - 12);
-  const sorted = [...recs].sort((a, b) => a - b), out = [];
+  return [...recs].sort((a, b) => a - b);
+}
+
+function matBlocks(raw) {
+  const sorted = records(raw), out = [];
   for (const p of sorted) {
     if (raw[p + 9] !== MAT[0] || raw[p + 10] !== MAT[1] || raw[p + 11] !== MAT[2]) continue;
     const data = p + RECORD;
@@ -294,7 +299,13 @@ export function readL6pf(buf, name) {
   for (let i = 0; i + 1 < stage.length && !video; i++) {
     const [xo, xa] = stage[i], [, ya] = stage[i + 1], W = xa.length, H = ya.length, need = W * H * 3;
     let off = (blocks.find(([, n]) => n === need) || [null])[0];
-    if (off == null) {          // not tagged as a matrix in some versions: it ends just before the X axis
+    // not tagged as a matrix in some versions: it then fills the gap between two records
+    // exactly (on every project checked); failing that, it ends just before the X axis
+    if (off == null) {
+      const recs = records(raw), i = recs.findIndex((p, j) => j + 1 < recs.length && recs[j + 1] - (p + RECORD) === need);
+      if (i >= 0) off = recs[i] + RECORD;
+    }
+    if (off == null) {
       const rec = xo - RECORD;
       let best = null;
       for (let st = Math.max(0, rec - need - 1024); st <= rec - need; st++) {

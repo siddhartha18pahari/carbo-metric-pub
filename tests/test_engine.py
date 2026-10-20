@@ -419,6 +419,22 @@ def test_particlefinder_feret_max_is_a_caliper_length():
     assert (pts["angle"][pts["feret_max"] <= 1.05 * pts["min_diam"]] == 0).all()
 
 
+def test_untagged_mosaic_sits_under_its_particles():
+    """This project's mosaic is not tagged as a matrix. It fills the gap between two
+    records exactly; the smoothness search used before cannot tell whole-pixel shifts
+    apart and drew it 16 pixels (23 um) off, so particle centres fell on particles no
+    more often than chance (13 % against 11 % of the image)."""
+    from qcarbon.labspec import read_l6pf
+    m, video = read_l6pf(vendor("pf_small_project"))
+    pts = m.meta["points"]
+    I = video.rgb.astype(np.int32).sum(axis=2)
+    bg = np.median(I[::5, ::5])
+    on = np.abs(I - bg) > 0.4 * bg                       # pixels clearly unlike the background
+    q = np.round((pts["x"] - video.x[0]) / (video.x[1] - video.x[0])).astype(int)
+    r = np.round((pts["y"] - video.y[0]) / (video.y[1] - video.y[0])).astype(int)
+    assert on.mean() < 0.15 and on[r, q].mean() > 0.9
+
+
 def test_small_project_mosaic_axes():
     from qcarbon.labspec import read_l6pf
     m, video = read_l6pf(vendor("pf_small_project"))

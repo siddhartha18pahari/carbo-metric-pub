@@ -83,3 +83,6 @@ def test_browser_reader_matches_python_on_lab_files(key):
         for k, v in js["points"].items():
             np.testing.assert_allclose(v, m.meta["points"][k][:5], rtol=1e-6)
         assert (js["video"]["w"], js["video"]["h"]) == (video.x.size, video.y.size)
+        # the same pixels too (an untagged mosaic once started 16 pixels apart in the two readers)
+        flat = video.rgb.reshape(-1).astype(np.int64)[::997]
+        assert js["video"]["rgb_probe"] == int((flat * (np.arange(0, video.rgb.size, 997) % 7 + 1)).sum())

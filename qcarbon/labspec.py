@@ -377,8 +377,13 @@ def read_l6pf(path: str) -> tuple[RamanMap, VideoImage | None]:
         (xo, xa), (yo, ya) = stage[i], stage[i + 1]
         need = xa.size * ya.size * 3
         img_off = next((o for o, n in blocks if n == need), None)
+        # not tagged as a matrix in some versions: it then fills the gap between two records
+        # exactly (on every project checked); failing that, it ends just before the X axis
         if img_off is None:
-            # not tagged as a matrix in some versions: it ends just before the X axis
+            word = _pointer_word(raw)
+            recs = sorted(set(_records(raw, word))) if word else []
+            img_off = next((p + _RECORD for p, q in zip(recs, recs[1:]) if q - (p + _RECORD) == need), None)
+        if img_off is None:
             rec = xo - _RECORD
             best = None
             for st in range(max(0, rec - need - 1024), rec - need + 1):
