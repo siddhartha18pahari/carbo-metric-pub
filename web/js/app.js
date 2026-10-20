@@ -206,9 +206,15 @@ function renderCursor() {
     const i = Math.floor(p / S.nx), j = p % S.nx;
     $("#cursor-info").textContent = `· point ${p + 1} · column ${j + 1}, row ${i + 1}${S.hover != null && S.hover !== S.pinned ? "" : " · pinned"}${S.valid && !S.valid[p] ? " · not valid" : ""}`;
     const tb = $("#cursor-table"); tb.textContent = "";
-    S.fit.names.forEach((name, j2) => tb.append(el("span", {}, el("b", { style: `color:${PEAK_COLOURS[j2 % PEAK_COLOURS.length]}` }, name),
-      ` I ${fmt(S.fit.intensity[p * S.fit.m + j2], 3)} · w ${fmt(S.fit.width[p * S.fit.m + j2], 3)} · A ${fmt(S.fit.area[p * S.fit.m + j2], 3)}`)));
-    if (S.ratio) tb.append(el("span", {}, el("b", { style: "color:#fff" }, `${S.cfg.ratio_num}/${S.cfg.ratio_den}`), ` I ${fmt(S.ratio.intensity[p], 3)} · A ${fmt(S.ratio.area[p], 3)}`));
+    // every configured band, so the ones Q-Carbon did not export are visibly absent
+    const all = [...new Set([...S.cfg.peaks.map(q => q.name), ...S.fit.names])].sort();
+    all.forEach(name => {
+      const j2 = S.fit.names.indexOf(name);
+      tb.append(j2 < 0 ? el("span", { class: "muted" }, el("b", {}, name), " not in this file")
+        : el("span", {}, el("b", { style: `color:${PEAK_COLOURS[j2 % PEAK_COLOURS.length]}` }, name),
+            ` I ${fmt(S.fit.intensity[p * S.fit.m + j2], 3)} · w ${fmt(S.fit.width[p * S.fit.m + j2], 3)} · A ${fmt(S.fit.area[p * S.fit.m + j2], 3)}`));
+    });
+    if (S.ratio) tb.append(el("span", {}, el("b", { style: "color:var(--text)" }, `${S.cfg.ratio_num}/${S.cfg.ratio_den}`), ` I ${fmt(S.ratio.intensity[p], 3)} · A ${fmt(S.ratio.area[p], 3)}`));
     return;
   }
   if (p == null || !S.cube) { cursorPlot.setData(null); $("#cursor-table").textContent = ""; $("#cursor-info").textContent = ""; return; }
@@ -233,7 +239,7 @@ function renderCursor() {
   if (S.fit) {
     d.fit.comps.forEach((c, j2) => tb.append(el("span", {}, el("b", { style: `color:${PEAK_COLOURS[j2 % PEAK_COLOURS.length]}` }, c.name), ` ${fmt(c.A, 3)} @ ${c.pos.toFixed(1)} w ${c.width.toFixed(1)}`)));
     tb.append(el("span", {}, `σ ${fmt(S.fit.std_error[p], 3)} · χ²ᵣ ${fmt(S.fit.red_chi2[p], 3)}`));
-    if (S.ratio) tb.append(el("span", {}, el("b", { style: "color:#fff" }, `${S.cfg.ratio_num}/${S.cfg.ratio_den}`), ` I ${fmt(S.ratio.intensity[p], 3)} · A ${fmt(S.ratio.area[p], 3)}`));
+    if (S.ratio) tb.append(el("span", {}, el("b", { style: "color:var(--text)" }, `${S.cfg.ratio_num}/${S.cfg.ratio_den}`), ` I ${fmt(S.ratio.intensity[p], 3)} · A ${fmt(S.ratio.area[p], 3)}`));
   }
 }
 
