@@ -174,6 +174,95 @@ def laser_nm(raw: bytes) -> float | None:
         end = i
 
 
+_T_INT, _T_DOUBLE, _T_INLINE, _T_ARRAY, _T_STRING = 4, 5, 7, 0x1006, 0x1007
+
+
+def _fill_gap(queue: list, gap: int, recs: list) -> tuple[list, int] | None:
+    """The pending payloads that fill one gap between records: the longest leading
+    run of the queue whose sizes add up to the gap exactly, allowing strings to be
+    skipped (a string shared by two records is written once). None if nothing fits."""
+    for cut in range(len(queue), 0, -1):
+        head = queue[:cut]
+        strings = [i for i, (k, _) in enumerate(head) if recs[k][1] == _T_STRING][-12:]
+        need = sum(n for _, n in head) - gap
+        if need < 0:
+            continue
+        best = None
+        for mask in range(1 << len(strings)):
+            drop = {strings[b] for b in range(len(strings)) if mask >> b & 1}
+            if sum(head[i][1] for i in drop) == need and (best is None or len(drop) < len(best)):
+                best = drop
+        if best is not None:
+            return [e for i, e in enumerate(head) if i not in best], cut
+    return None
+
+
+def settings(raw: bytes) -> list[list]:
+    """The settings saved with the acquisition (exposure, accumulations, grating,
+    objective, filter, hole, autofocus, the calibration's time stamp, ...) as
+    [name, value] in file order, repeats kept: a ParticleFinder project holds the
+    camera's settings, then a block per acquisition. Each is a name record (tag
+    "namm") beside a value record (tag "?al}"): an integer, a double, a short string
+    held in the record itself, or a string written into a gap between records.
+    Payloads fill the gaps in the order they were declared, so the gaps are filled
+    first (checked by exact byte accounting on the lab's files)."""
+    word = _pointer_word(raw)
+    if not word:
+        return []
+    recs = []
+    for p in sorted(set(_records(raw, word))):
+        if p + _RECORD <= len(raw):
+            typ, val, extra = struct.unpack_from("<I", raw, p)[0], *struct.unpack_from("<II", raw, p + 16)
+            recs.append((p, typ, raw[p + 8:p + 12], val, extra))
+    placed, queue = {}, []
+    for k, (p, typ, _tag, _val, extra) in enumerate(recs):
+        if typ == _T_ARRAY:
+            queue.append((k, 4 * extra))
+        elif typ == _T_STRING:
+            queue.append((k, extra))
+        end = p + _RECORD
+        gap = (recs[k + 1][0] if k + 1 < len(recs) else len(raw)) - end
+        if gap <= 0:
+            continue
+        fit = _fill_gap(queue, gap, recs) if queue else None
+        if fit is None:
+            queue = [e for e in queue if recs[e[0]][1] == _T_ARRAY]   # arrays keep waiting; strings are dropped
+            continue
+        used, cut = fit
+        for kk, n in used:
+            placed[kk] = (end, n)
+            end += n
+        queue = queue[cut:]
+
+    def value(k):
+        p, typ, _tag, val, extra = recs[k]
+        if typ == _T_INT:
+            return struct.unpack_from("<i", raw, p + 16)[0]
+        if typ == _T_DOUBLE:
+            v = struct.unpack_from("<d", raw, p + 16)[0]
+            return v if math.isfinite(v) else None
+        if typ == _T_INLINE:
+            return raw[p + 16:p + 24].split(b"\x00")[0].decode("latin-1")
+        if typ == _T_STRING and k in placed:
+            off, n = placed[k]
+            return raw[off:off + n].split(b"\x00")[0].decode("latin-1")
+        return None
+
+    out, used = [], set()
+    for k, rec in enumerate(recs):
+        if rec[2] != b"namm":
+            continue
+        name = value(k)
+        if not name or not isinstance(name, str) or not name.isprintable():
+            continue
+        for j in (k - 1, k + 1):
+            if 0 <= j < len(recs) and j not in used and recs[j][2][1:] == b"al}":
+                used.add(j)
+                out.append([name.strip(), value(j)])
+                break
+    return out
+
+
 # --------------------------------------------------------------------------
 # maps
 # --------------------------------------------------------------------------
@@ -232,6 +321,7 @@ def read_l6m(path: str) -> RamanMap:
             f"{os.path.basename(path)}: {n} spectra with no stage grid. This is a "
             f"ParticleFinder spectra list: open its .l6pf project, which holds the particle positions")
         err.spectra, err.wn = payload.reshape(n, wn.size), np.asarray(wn, np.float64)
+        err.settings = settings(raw)
         raise err
     K = wn.size
     _, cube, x, y = best
@@ -245,7 +335,7 @@ def read_l6m(path: str) -> RamanMap:
     return RamanMap(cube=np.ascontiguousarray(cube), wn=wn, x=x, y=y,
                     name=os.path.splitext(os.path.basename(path))[0], source=path,
                     meta={"format": "l6m", "version": int.from_bytes(raw[12:16], "little"),
-                          "laser_nm": laser_nm(raw)})
+                          "laser_nm": laser_nm(raw), "settings": settings(raw)})
 
 
 # --------------------------------------------------------------------------
@@ -459,7 +549,8 @@ def read_l6pf(path: str) -> tuple[RamanMap, VideoImage | None]:
         wn, cube = wn[::-1].copy(), np.ascontiguousarray(cube[..., ::-1])
     m = RamanMap(cube=cube, wn=wn, x=np.arange(1, P + 1, dtype=float), y=np.zeros(1),
                  name=os.path.splitext(name)[0], source=path,
-                 meta={"format": "l6pf", "kind": "particles", "points": pts, "laser_nm": laser_nm(raw)})
+                 meta={"format": "l6pf", "kind": "particles", "points": pts, "laser_nm": laser_nm(raw),
+                       "settings": settings(raw)})
     return m, video
 
 
@@ -632,7 +723,7 @@ def read_any(path: str) -> tuple[RamanMap, VideoImage | None]:
             wn, cube = wn[::-1].copy(), np.ascontiguousarray(cube[..., ::-1])
         m = RamanMap(cube=cube, wn=wn, x=pm.x, y=pm.y,
                      name=os.path.splitext(os.path.basename(path))[0], source=path,
-                     meta={**pm.meta, "format": "l6m", "project": pf})
+                     meta={**pm.meta, "format": "l6m", "project": pf, "settings": e.settings or pm.meta.get("settings")})
         return m, video
     video = None
     vp = find_video(path) if ext == ".l6m" else None

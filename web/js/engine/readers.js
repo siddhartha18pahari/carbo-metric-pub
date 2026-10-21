@@ -116,6 +116,81 @@ export function laserNm(raw) {
   return null;
 }
 
+const T_INT = 4, T_DOUBLE = 5, T_INLINE = 7, T_ARRAY = 0x1006, T_STRING = 0x1007;
+const latin1 = b => { let s = ""; for (const c of b) { if (!c) break; s += String.fromCharCode(c); } return s; };
+// Python's str.isprintable over latin-1: no control characters, no-break space or soft hyphen
+const printable = s => !/[\x00-\x1f\x7f-\xa0\xad]/.test(s);
+
+// The pending payloads that fill one gap between records: the longest leading
+// run of the queue whose sizes add up to the gap exactly, allowing strings to be
+// skipped (a string shared by two records is written once). null if nothing fits.
+function fillGap(queue, gap, recs) {
+  for (let cut = queue.length; cut > 0; cut--) {
+    const head = queue.slice(0, cut), strings = [];
+    head.forEach(([k], i) => { if (recs[k].typ === T_STRING) strings.push(i); });
+    const S = strings.slice(-12), need = head.reduce((t, e) => t + e[1], 0) - gap;
+    if (need < 0) continue;
+    let best = -1, nBest = Infinity;
+    for (let mask = 0; mask < 1 << S.length; mask++) {
+      let sum = 0, nd = 0;
+      for (let b = 0; b < S.length; b++) if (mask >> b & 1) { sum += head[S[b]][1]; nd++; }
+      if (sum === need && nd < nBest) { best = mask; nBest = nd; }
+    }
+    if (best >= 0) {
+      const drop = new Set(S.filter((_, b) => best >> b & 1));
+      return { used: head.filter((_, i) => !drop.has(i)), cut };
+    }
+  }
+  return null;
+}
+
+// The settings saved with the acquisition (exposure, accumulations, grating,
+// objective, filter, hole, autofocus, the calibration's time stamp, ...) as
+// [name, value] in file order, repeats kept: a ParticleFinder project holds the
+// camera's settings, then a block per acquisition. Each is a name record (tag
+// "namm") beside a value record (tag "?al}"): an integer, a double, a short string
+// held in the record itself, or a string written into a gap between records.
+// Payloads fill the gaps in the order they were declared, so the gaps are filled
+// first (checked by exact byte accounting on the lab's files).
+export function settings(raw) {
+  const dv = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
+  const recs = records(raw).filter(p => p + RECORD <= raw.length)
+    .map(p => ({ p, typ: dv.getUint32(p, true), tag: raw.subarray(p + 8, p + 12), extra: dv.getUint32(p + 20, true) }));
+  const placed = new Map();
+  let queue = [];
+  recs.forEach((r, k) => {
+    if (r.typ === T_ARRAY) queue.push([k, 4 * r.extra]); else if (r.typ === T_STRING) queue.push([k, r.extra]);
+    let end = r.p + RECORD;
+    const gap = (k + 1 < recs.length ? recs[k + 1].p : raw.length) - end;
+    if (gap <= 0) return;
+    const fit = queue.length ? fillGap(queue, gap, recs) : null;
+    if (!fit) { queue = queue.filter(e => recs[e[0]].typ === T_ARRAY); return; }   // arrays keep waiting; strings are dropped
+    for (const [kk, n] of fit.used) { placed.set(kk, [end, n]); end += n; }
+    queue = queue.slice(fit.cut);
+  });
+  const value = k => {
+    const { p, typ } = recs[k];
+    if (typ === T_INT) return dv.getInt32(p + 16, true);
+    if (typ === T_DOUBLE) { const v = dv.getFloat64(p + 16, true); return Number.isFinite(v) ? v : null; }
+    if (typ === T_INLINE) return latin1(raw.subarray(p + 16, p + 24));
+    if (typ === T_STRING && placed.has(k)) { const [o, n] = placed.get(k); return latin1(raw.subarray(o, o + n)); }
+    return null;
+  };
+  const isTag = (t, s) => t[0] === s.charCodeAt(0) && t[1] === s.charCodeAt(1) && t[2] === s.charCodeAt(2) && t[3] === s.charCodeAt(3);
+  const out = [], used = new Set();
+  recs.forEach((r, k) => {
+    if (!isTag(r.tag, "namm")) return;
+    const name = value(k);
+    if (!name || typeof name !== "string" || !printable(name)) return;
+    for (const j of [k - 1, k + 1]) {
+      if (j < 0 || j >= recs.length || used.has(j)) continue;
+      const t = recs[j].tag;
+      if (t[1] === 97 && t[2] === 108 && t[3] === 125) { used.add(j); out.push([name.trim(), value(j)]); break; }   // "?al}"
+    }
+  });
+  return out;
+}
+
 export function readL6m(buf, name) {
   const raw = new Uint8Array(buf);
   magic(raw, name);
@@ -168,7 +243,7 @@ export function readL6m(buf, name) {
     const n = payload.length / wn.length;
     const err = new Error(`${name}: ${n} spectra with no stage grid. This is a ParticleFinder spectra list: ` +
       "open its .l6pf project, which holds the particle positions");
-    Object.assign(err, { pointList: true, spectra: payload, wn, n });
+    Object.assign(err, { pointList: true, spectra: payload, wn, n, settings: settings(raw) });
     throw err;
   }
   const K = wn.length, n = payload.length / K;
@@ -180,7 +255,7 @@ export function readL6m(buf, name) {
     wnOut.reverse();
   }
   return { cube, wn: wnOut, x: Float64Array.from(best.x), y: Float64Array.from(best.y), nx: best.x.length, ny: best.y.length,
-           name: stem(name), format: "l6m", laser: laserNm(raw) };
+           name: stem(name), format: "l6m", laser: laserNm(raw), settings: settings(raw) };
 }
 
 // white-light camera frame: uint8 RGB (H, W, 3), X axis listed before Y
@@ -409,7 +484,7 @@ export function readL6pf(buf, name) {
     spectra = flipped; wnOut.reverse();
   }
   const map = { cube: spectra, wn: wnOut, x: Float64Array.from({ length: P }, (_, p) => p + 1), y: Float64Array.of(0),
-                nx: P, ny: 1, name: stem(name), format: "l6pf", kind: "particles", points, laser: laserNm(raw) };
+                nx: P, ny: 1, name: stem(name), format: "l6pf", kind: "particles", points, laser: laserNm(raw), settings: settings(raw) };
   return { map, video };
 }
 
@@ -424,7 +499,7 @@ export function placeSpectraList(err, pf, name) {
     for (let p = 0; p < err.n; p++) for (let k = 0; k < K; k++) cube[p * K + k] = err.spectra[p * K + K - 1 - k];
     wn.reverse();
   }
-  return { ...pf.map, cube, wn, name: stem(name), format: "l6m" };
+  return { ...pf.map, cube, wn, name: stem(name), format: "l6m", settings: err.settings && err.settings.length ? err.settings : pf.map.settings };
 }
 
 // --------------------------------------------------------------------------

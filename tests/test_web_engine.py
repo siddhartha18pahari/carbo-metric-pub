@@ -72,13 +72,15 @@ def _vendor_path(key):
 def test_browser_reader_matches_python_on_lab_files(key):
     from qcarbon.labspec import read_any
     p = _vendor_path(key)
-    out = subprocess.run([NODE, os.path.join(HERE, "js", "read_file.mjs"), p], capture_output=True, text=True, check=True)
+    out = subprocess.run([NODE, os.path.join(HERE, "js", "read_file.mjs"), p], capture_output=True, text=True, encoding="utf-8", check=True)
     js = json.loads(out.stdout)
     m, video = read_any(p)
     assert (js["ny"], js["nx"], js["k"]) == m.cube.shape
     assert np.allclose(js["wn"], m.wn[[0, -1]]) and np.allclose(js["x"], m.x[[0, -1]]) and np.allclose(js["y"], m.y[[0, -1]])
     flat = m.cube.reshape(-1)
     assert js["cube_probe"] == pytest.approx(float(flat[::997].astype(np.float64).sum()), rel=1e-9)
+    # the stored acquisition settings, pair for pair
+    assert js["settings"] == m.meta.get("settings") and len(js["settings"]) > 5
     if "points" in m.meta:
         for k, v in js["points"].items():
             np.testing.assert_allclose(v, m.meta["points"][k][:5], rtol=1e-6)

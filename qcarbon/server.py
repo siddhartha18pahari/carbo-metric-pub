@@ -75,6 +75,7 @@ class Dataset:
             "counts": [float(np.nanmin(m.cube)), float(np.nanpercentile(m.cube, 99.9))],
             "missing": int(m.meta.get("missing", 0)),
             "laser_nm": m.meta.get("laser_nm"),
+            "settings": m.meta.get("settings"),
         }
         if self.video is not None:
             v = self.video

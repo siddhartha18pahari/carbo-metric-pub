@@ -682,3 +682,212 @@ export function hexBins(xs, ys, s) {
   }
   return [...cells.values()];
 }
+
+// --------------------------------------------------------------------------
+// More uniformity measures, intervals, and checks on the measurement
+// --------------------------------------------------------------------------
+
+// 1.4826 x the median absolute deviation: the SD of a normal sample, robust to outliers
+export function robustSD(x) {
+  const s = Float64Array.from(x).filter(Number.isFinite).sort(); if (!s.length) return NaN;
+  const m = quantileSorted(s, 0.5);
+  return 1.4826 * quantileSorted(Float64Array.from(s, v => Math.abs(v - m)).sort(), 0.5);
+}
+
+// Coverage when some spectra cannot be judged (a band parameter on a fit bound, or the
+// coating band fitted with zero height): x of n judged are coated and e are left out. The
+// bounds count every left-out spectrum as uncoated (lo) or coated (hi); the exact lower
+// bound is taken on the worst case.
+export function boundedCoverage(x, n, e, alpha = 0.05) {
+  const N = n + e;
+  return { c: n ? x / n : NaN, lo: N ? x / N : NaN, hi: N ? (x + e) / N : NaN, lower: N ? binomLower(N, N - x, alpha) : NaN };
+}
+
+// share of the total held by the lowest q of the values (q itself if all are equal)
+export function lowShare(x, q = 0.1) {
+  const s = Float64Array.from(x).filter(Number.isFinite).map(v => Math.max(0, v)).sort(), n = s.length;
+  const tot = s.reduce((a, b) => a + b, 0); if (n < 2 || !(tot > 0)) return NaN;
+  const k = Math.max(Math.round(q * n), 1); let low = 0; for (let i = 0; i < k; i++) low += s[i];
+  return low / tot;
+}
+// quartile coefficient of dispersion (q3 - q1) / (q3 + q1): a spread that needs no mean
+export function qcd(x) {
+  const s = Float64Array.from(x).filter(Number.isFinite).sort(), a = quantileSorted(s, 0.25), b = quantileSorted(s, 0.75);
+  return a + b > 0 ? (b - a) / (b + a) : NaN;
+}
+export function qRatio(x, lo = 0.1, hi = 0.9) {
+  const s = Float64Array.from(x).filter(Number.isFinite).sort(), a = quantileSorted(s, lo);
+  return a > 0 ? quantileSorted(s, hi) / a : NaN;
+}
+// Shannon entropy of the histogram of the values over `bins` equal bins from 0 to their
+// 99.5th percentile, over ln(bins): 1 when the values spread evenly over the range
+export function evenness(x, bins = 32) {
+  const s = Float64Array.from(x).filter(Number.isFinite).sort(), hi = quantileSorted(s, 0.995);
+  if (!(hi > 0)) return NaN;
+  const h = new Float64Array(bins);
+  for (const v of s) h[Math.min(bins - 1, Math.floor(Math.min(Math.max(v, 0), hi) / hi * bins))]++;
+  let e = 0; for (const c of h) if (c) { const p = c / s.length; e -= p * Math.log(p); }
+  return e / Math.log(bins);
+}
+// skewness and excess kurtosis (the moment estimators, as scipy.stats gives them)
+export function moments(x) {
+  const v = Array.from(x).filter(Number.isFinite), n = v.length; if (n < 3) return { skew: NaN, kurt: NaN };
+  const m = v.reduce((a, b) => a + b, 0) / n; let m2 = 0, m3 = 0, m4 = 0;
+  for (const u of v) { const d = u - m; m2 += d * d; m3 += d ** 3; m4 += d ** 4; }
+  m2 /= n; m3 /= n; m4 /= n;
+  return m2 > 0 ? { skew: m3 / m2 ** 1.5, kurt: m4 / (m2 * m2) - 3 } : { skew: NaN, kurt: NaN };
+}
+
+// Geary's c on a grid with rook neighbours over a mask: 1 for no autocorrelation, below 1
+// when neighbours resemble each other
+export function gridGeary(img, ok, nx, ny) {
+  let s = 0, n = 0; for (let p = 0; p < nx * ny; p++) if (ok[p]) { s += img[p]; n++; }
+  if (n < 3) return NaN;
+  const m = s / n; let num = 0, den = 0, edges = 0;
+  for (let i = 0; i < ny; i++) for (let j = 0; j < nx; j++) {
+    const p = i * nx + j; if (!ok[p]) continue;
+    den += (img[p] - m) ** 2;
+    if (j + 1 < nx && ok[p + 1]) { num += (img[p] - img[p + 1]) ** 2; edges++; }
+    if (i + 1 < ny && ok[p + nx]) { num += (img[p] - img[p + nx]) ** 2; edges++; }
+  }
+  return edges && den ? (n - 1) * num / (2 * edges * den) : NaN;
+}
+// p-values for Moran's I and Geary's c by shuffling the values over the same mask
+// (clustering is a large I or a small c)
+export function spatialPermutation(img, ok, nx, ny, nPerm = 199, seed = 3) {
+  const I = gridMoran(img, ok, nx, ny), c = gridGeary(img, ok, nx, ny), idx = [];
+  for (let p = 0; p < nx * ny; p++) if (ok[p]) idx.push(p);
+  if (!Number.isFinite(I) || !Number.isFinite(c)) return { I, c, pI: NaN, pC: NaN };
+  const R = rng(seed), vals = idx.map(p => img[p]), work = new Float64Array(nx * ny);
+  let gi = 0, gc = 0;
+  for (let k = 0; k < nPerm; k++) {
+    for (let i = vals.length - 1; i > 0; i--) { const j = Math.floor(R() * (i + 1)); [vals[i], vals[j]] = [vals[j], vals[i]]; }
+    idx.forEach((p, i) => { work[p] = vals[i]; });
+    if (gridMoran(work, ok, nx, ny) >= I) gi++;
+    if (gridGeary(work, ok, nx, ny) <= c) gc++;
+  }
+  return { I, c, pI: (gi + 1) / (nPerm + 1), pC: (gc + 1) / (nPerm + 1) };
+}
+
+// The noise of a band-height image from differences between neighbouring pixels (rows and
+// columns, both in the mask): their robust SD over sqrt 2. Neighbours share the smooth
+// field, so the differences leave the noise plus any real change at one pixel, and the
+// estimate errs high (conservative for anything noise-corrected with it).
+export function neighbourNoise(img, ok, nx, ny) {
+  const d = [];
+  for (let i = 0; i < ny; i++) for (let j = 0; j < nx; j++) {
+    const p = i * nx + j; if (!ok[p]) continue;
+    if (j + 1 < nx && ok[p + 1]) d.push(img[p + 1] - img[p]);
+    if (i + 1 < ny && ok[p + nx]) d.push(img[p + nx] - img[p]);
+  }
+  return { sd: d.length >= 10 ? robustSD(d) / Math.SQRT2 : NaN, n: d.length };
+}
+
+// the median of a, reordering it (Hoare's selection, linear time on average): as quantileSorted at 0.5
+function medianSelect(a) {
+  const n = a.length; if (!n) return NaN;
+  const kth = k => {
+    let lo = 0, hi = n - 1;
+    while (lo < hi) {
+      const x = a[(lo + hi) >> 1]; let i = lo, j = hi;
+      while (i <= j) { while (a[i] < x) i++; while (a[j] > x) j--; if (i <= j) { const t = a[i]; a[i] = a[j]; a[j] = t; i++; j--; } }
+      if (k <= j) hi = j; else if (k >= i) lo = i; else return a[k];
+    }
+    return a[k];
+  };
+  const hi = kth(n >> 1);
+  if (n % 2) return hi;
+  let lo = -Infinity; for (let i = 0; i < n >> 1; i++) if (a[i] > lo) lo = a[i];   // the largest of the lower half
+  return 0.5 * (lo + hi);
+}
+
+// Intervals for a particle's within-particle measures by resampling whole b x b blocks of
+// pixels (8 x 8 by default), so that neighbours that share their noise or their patch move
+// together: the observed CV (robust SD over the median), the excess CV beyond the pixels'
+// own errors, Gini, QCD, the percentile uniformity U = (q95 - q5) / (q95 + q5) and, with a
+// threshold tau, the covered share (alone with coverOnly). Percentile 95 % intervals; null with
+// fewer than 4 blocks.
+export function blockBootstrap(img, sig, ok, nx, ny, { b = 8, B = 500, seed = 13, tau = NaN, coverOnly = false } = {}) {
+  const cells = [];
+  for (let bi = 0; bi < ny; bi += b) for (let bj = 0; bj < nx; bj += b) {
+    const v = [], s = [];
+    for (let i = bi; i < Math.min(ny, bi + b); i++) for (let j = bj; j < Math.min(nx, bj + b); j++) { const p = i * nx + j; if (ok[p]) { v.push(img[p]); s.push(sig[p]); } }
+    if (v.length) cells.push([Float64Array.from(v), Float64Array.from(s)]);
+  }
+  if (cells.length < 4) return null;
+  // the measures of one sample: v is sorted in place once, and every measure read from it
+  const measures = (v, s) => {
+    const n = v.length; let above = 0;
+    if (Number.isFinite(tau)) for (let i = 0; i < n; i++) if (v[i] > tau) above++;
+    if (coverOnly) return { cover: above / n };
+    let ss = 0; for (let i = 0; i < n; i++) ss += s[i] * s[i];
+    v.sort();
+    const med = quantileSorted(v, 0.5); if (!(med > 0)) return null;
+    const dev = DEV.subarray(0, n); for (let i = 0; i < n; i++) dev[i] = Math.abs(v[i] - med);
+    const cvObs = 1.4826 * medianSelect(dev) / med, cvNoise = Math.sqrt(ss / n) / med;
+    let tot = 0, wsum = 0; for (let i = 0; i < n; i++) { const x = Math.max(0, v[i]); tot += x; wsum += (i + 1) * x; }   // Gini, as gini()
+    const q = k => quantileSorted(v, k), [q5, q25, q75, q95] = [q(0.05), q(0.25), q(0.75), q(0.95)];
+    return { cvObs, cvExcess: Math.sqrt(Math.max(cvObs * cvObs - cvNoise * cvNoise, 0)), gini: n < 2 || !(tot > 0) ? NaN : 2 * wsum / (n * tot) - (n + 1) / n,
+             qcd: q25 + q75 > 0 ? (q75 - q25) / (q75 + q25) : NaN, U: q95 + q5 > 0 ? (q95 - q5) / (q95 + q5) : NaN, cover: Number.isFinite(tau) ? above / n : NaN };
+  };
+  // one set of buffers, as long as the largest resample can be, reused by every resample
+  const size = cells.length * b * b, V = new Float64Array(size), SG = new Float64Array(size), DEV = new Float64Array(size);
+  const fill = pick => { let o = 0; for (const c of pick) { V.set(c[0], o); SG.set(c[1], o); o += c[0].length; } return [V.subarray(0, o), SG.subarray(0, o)]; };
+  const est = measures(...fill(cells)); if (!est) return null;
+  const R = rng(seed), draws = Object.fromEntries(Object.keys(est).map(k => [k, []]));
+  for (let r = 0; r < B; r++) {
+    const m = measures(...fill(Array.from(cells, () => cells[Math.floor(R() * cells.length)])));
+    if (m) for (const k in m) draws[k].push(m[k]);
+  }
+  const ci = {};
+  for (const [k, d] of Object.entries(draws)) { const s = Float64Array.from(d).filter(Number.isFinite).sort(); ci[k] = s.length ? [quantileSorted(s, 0.025), quantileSorted(s, 0.975)] : [NaN, NaN]; }
+  return { est, ci, blocks: cells.length, b };
+}
+
+// Two-sample Kolmogorov-Smirnov distance with its asymptotic p-value (Stephens' correction)
+export function ksTest(a, b) {
+  const x = Float64Array.from(a).filter(Number.isFinite).sort(), y = Float64Array.from(b).filter(Number.isFinite).sort();
+  const n = x.length, m = y.length; if (!n || !m) return { d: NaN, p: NaN };
+  let i = 0, j = 0, d = 0;
+  while (i < n && j < m) { const v = Math.min(x[i], y[j]); while (i < n && x[i] <= v) i++; while (j < m && y[j] <= v) j++; d = Math.max(d, Math.abs(i / n - j / m)); }
+  const en = Math.sqrt(n * m / (n + m)), lam = (en + 0.12 + 0.11 / en) * d;
+  let p = 0; for (let k = 1; k <= 100; k++) { const t = 2 * (k % 2 ? 1 : -1) * Math.exp(-2 * k * k * lam * lam); p += t; if (Math.abs(t) < 1e-10) break; }
+  return { d, p: lam < 0.2 ? 1 : Math.max(0, Math.min(1, p)) };
+}
+
+// Band heights without a band fit, for a check on the fitted ratio: a straight baseline
+// through 1030-1090 and 1700-1740 cm-1; each height the mean of the residual over 7
+// channels at the band's position. The error of a height combines channel noise (robust SD
+// of successive channel differences in 1700-1790 cm-1, over sqrt 2) with baseline
+// variation (the spread over the spectra of the residual at 1765 cm-1, where no band lies).
+// Null when the spectra do not cover those windows. cube holds K channels per spectrum.
+export function fitFreeHeights(cube, K, wn, list, positions) {
+  const win = (lo, hi) => { const o = []; for (let k = 0; k < K; k++) if (wn[k] >= lo && wn[k] <= hi) o.push(k); return o; };
+  const base = [...win(1030, 1090), ...win(1700, 1740)], nwin = win(1700, 1790), HALF = 3;
+  const at = pos => { let best = 0; for (let k = 1; k < K; k++) if (Math.abs(wn[k] - pos) < Math.abs(wn[best] - pos)) best = k; return best; };
+  const centres = [...positions, 1765].map(at);
+  if (win(1030, 1090).length < 3 || win(1700, 1740).length < 3 || nwin.length < 8 || !(wn[0] <= 1030 && wn[K - 1] >= 1790)
+      || centres.some(c => c - HALF < 0 || c + HALF >= K)) return null;
+  const nb = base.length, mx = base.reduce((t, k) => t + wn[k], 0) / nb, sxx = base.reduce((t, k) => t + (wn[k] - mx) ** 2, 0);
+  const H = centres.map(() => new Float64Array(list.length)), sH = new Float64Array(list.length), sig = new Float64Array(list.length);
+  list.forEach((p, i) => {
+    const o = p * K; let my = 0, sxy = 0;
+    for (const k of base) my += cube[o + k] / nb;
+    for (const k of base) sxy += (wn[k] - mx) * (cube[o + k] - my);
+    const slope = sxy / sxx, res = k => cube[o + k] - (my + slope * (wn[k] - mx));
+    centres.forEach((c, j) => { let s = 0; for (let k = c - HALF; k <= c + HALF; k++) s += res(k); H[j][i] = s / (2 * HALF + 1); });
+    const d = []; for (let t = 1; t < nwin.length; t++) d.push(cube[o + nwin[t]] - cube[o + nwin[t - 1]]);
+    sig[i] = robustSD(d) / Math.SQRT2; sH[i] = sig[i] * Math.sqrt(1 / (2 * HALF + 1) + 1 / nb);
+  });
+  const nul = H.pop(), sBase = robustSD(nul);
+  return { heights: H, se: Float64Array.from(sH, s => Math.hypot(s, sBase)), sBase, sigma: median(sig) };
+}
+
+// How many particles, and maps, a mean needs to reach a relative standard error se, from
+// SE² = CVb² / np + (CVw² + CVn²) / (np k): one spectrum per particle (k = 1) or maps of k
+// independent pixels. No number of pixels removes the between-particle term, so the maps
+// needed never fall below (CVb / se)².
+export function nestedSize(se, cvB, cvW, cvN, k) {
+  const v = cvB * cvB, w = cvW * cvW + cvN * cvN;
+  return { population: Math.ceil((v + w) / (se * se)), maps: Math.ceil((v + w / Math.max(1, k)) / (se * se)), floor: Math.ceil(v / (se * se)) };
+}

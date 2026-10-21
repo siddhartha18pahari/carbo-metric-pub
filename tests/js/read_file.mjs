@@ -22,6 +22,6 @@ const pick = a => (a ? [a[0], a[a.length - 1]] : null);
 let sum = 0; for (let i = 0; i < map.cube.length; i += 997) sum += map.cube[i];
 let rgb = 0; if (video) for (let i = 0; i < video.rgb.length; i += 997) rgb += video.rgb[i] * (i % 7 + 1);
 const out = { nx: map.nx, ny: map.ny, k: map.wn.length, wn: pick(map.wn), x: pick(map.x), y: pick(map.y), kind: map.kind || null,
-              cube_probe: sum, video: video ? { w: video.w, h: video.h, x: pick(video.x), y: pick(video.y), rgb_probe: rgb } : null };
+              cube_probe: sum, settings: map.settings || null, video: video ? { w: video.w, h: video.h, x: pick(video.x), y: pick(video.y), rgb_probe: rgb } : null };
 if (map.points) out.points = Object.fromEntries(Object.entries(map.points).map(([k, v]) => [k, Array.from(v.slice(0, 5))]));
 process.stdout.write(JSON.stringify(out));

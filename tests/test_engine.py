@@ -552,3 +552,23 @@ def test_laser_wavelength_on_lab_files():
     assert labspec.laser_nm(open(grid, "rb").read()) == 532.12
     # this project saved only the laser's state
     assert labspec.laser_nm(open(small, "rb").read()) is None
+
+
+def test_settings_stored_with_the_spectra():
+    """The acquisition settings decoded from a project: the camera's block, then each
+    acquisition's, with its calibration time stamp (values as LabSpec shows them)."""
+    pf, small = vendor("pf_project", "pf_small_project")
+    s = labspec.settings(open(pf, "rb").read())
+    names = [k for k, _ in s]
+    first = names.index("Acq. time (s)")
+    cam = dict(s[:first])
+    assert cam["Laser"] == "Off" and cam["Filter"] == "100%" and cam["Objective"] == "x50_VIS_LWD"
+    acq = s[first:names.index("Acq. time (s)", first + 1)]
+    d = dict(acq)
+    assert d["Acq. time (s)"] == 25.0 and d["Accumulations"] == 3 and d["Grating"] == "1200 (750nm)"
+    assert d["Laser"] == "532nm_Edge" and d["Autofocus"] == "At all XY pixels" and d["Hole (\xb5m)"].strip() == "100"
+    assert d["AC"] == "Calibrated 2026-08-06 12:31" and d["Acquired"] == "06.08.2026 13:01:41"
+    # a repeated name inside one acquisition is kept: the laser's filter, then the camera's
+    assert [v for k, v in acq if k == "Filter"] == ["1.75%", "100%"]
+    # a project that saved the camera's settings only has no acquisition record
+    assert "Acq. time (s)" not in dict(labspec.settings(open(small, "rb").read()))

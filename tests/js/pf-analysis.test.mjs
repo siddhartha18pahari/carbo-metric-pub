@@ -418,3 +418,97 @@ test("hexagon bins: every point counted once, in the hexagon whose centre is nea
   near(counts.reduce((t, v) => t + v, 0) / counts.length, 3000 / (6000 / (1.5 * Math.sqrt(3) * s * s)), 4);
   assert.deepEqual(hexBins([1, NaN], [1, 2], 2).map(c => c.n), [1]);
 });
+
+import { robustSD, boundedCoverage, lowShare, qcd, qRatio, evenness, moments, gridGeary, spatialPermutation, neighbourNoise,
+         blockBootstrap, ksTest, fitFreeHeights, nestedSize } from "../../web/js/pf-analysis.js";
+
+const normal = R => () => Math.sqrt(-2 * Math.log(R() + 1e-12)) * Math.cos(2 * Math.PI * R());
+
+test("distribution measures match the reference implementation (numpy / scipy)", () => {
+  const x = [1, 2, 3, 4, 10, 0.5, 7, 2.2];
+  near(gini(x), 0.4347643097643099, 1e-12);
+  near(lowShare(x, 0.1), 0.016835016835016835, 1e-12);
+  near(qcd(x), 0.46153846153846156, 1e-12);
+  near(qRatio(x), 9.294117647058822, 1e-9);
+  near(evenness(x, 16), 0.6875, 1e-12);
+  const m = moments(x);
+  near(m.skew, 0.9905431095842289, 1e-12); near(m.kurt, -0.2783227148162033, 1e-12);
+  near(lowShare(Array(50).fill(3), 0.1), 0.1, 1e-12);            // equal values: the lowest tenth holds a tenth
+  assert.equal(evenness(Array(20).fill(2), 16), 0);                // all in one bin
+  near(robustSD([1, 2, 3, 4, 100]), 1.4826, 1e-12);                // MAD 1, the outlier ignored
+});
+
+test("Geary's c matches the reference value, and the permutation test tells clustering from noise", () => {
+  const img = [1, 2, 3, 2, 5, 4, 3, 4, 9], ok = [0, 1, 1, 1, 1, 1, 1, 1, 1];
+  near(gridGeary(img, ok, 3, 3), 0.7194444444444444, 1e-12);
+  const R = rng(8), g = normal(R), n = 30, noise = new Float64Array(n * n), smooth = new Float64Array(n * n), all = new Uint8Array(n * n).fill(1);
+  for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) { noise[i * n + j] = 5 + g(); smooth[i * n + j] = 5 + Math.sin(i / 5) + Math.cos(j / 6) + 0.3 * g(); }
+  const a = spatialPermutation(noise, all, n, n, 99), b = spatialPermutation(smooth, all, n, n, 99);
+  assert.ok(a.pI > 0.05 && a.pC > 0.05 && Math.abs(a.c - 1) < 0.15, `noise: ${JSON.stringify(a)}`);
+  assert.ok(b.pI <= 0.01 && b.pC <= 0.01 && b.c < 0.5, `smooth: ${JSON.stringify(b)}`);
+});
+
+test("neighbouring-pixel noise recovers the noise under a smooth field", () => {
+  const R = rng(4), g = normal(R), n = 40, img = new Float64Array(n * n), ok = new Uint8Array(n * n).fill(1);
+  for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) img[i * n + j] = 100 + 20 * Math.sin(i / 12) * Math.cos(j / 15) + 3 * g();
+  const r = neighbourNoise(img, ok, n, n);
+  near(r.sd, 3, 0.3); assert.equal(r.n, 2 * n * (n - 1));
+});
+
+test("block bootstrap: noise alone leaves no excess CV, real patches do, and coverage gets an interval", () => {
+  const R = rng(9), g = normal(R), n = 48, ok = new Uint8Array(n * n).fill(1), sig = new Float64Array(n * n).fill(0.02);
+  const flat = new Float64Array(n * n), patchy = new Float64Array(n * n);
+  for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) {
+    flat[i * n + j] = 0.2 + 0.02 * g();
+    patchy[i * n + j] = 0.2 * (1 + 0.3 * Math.sin(i / 4) * Math.sin(j / 5)) + 0.02 * g();   // patches of about 6 pixels
+  }
+  const a = blockBootstrap(flat, sig, ok, n, n, { tau: 0.15 }), b = blockBootstrap(patchy, sig, ok, n, n, { tau: 0.15 });
+  assert.equal(a.blocks, 36);
+  assert.ok(a.est.cvExcess < 0.03 && a.ci.cvExcess[0] === 0, `flat ${JSON.stringify(a.ci.cvExcess)}`);
+  assert.ok(b.ci.cvExcess[0] > 0.08, `patchy ${JSON.stringify(b.ci.cvExcess)}`);
+  assert.ok(a.ci.cover[0] > 0.98 && b.ci.cover[0] < b.est.cover && b.est.cover < b.ci.cover[1]);
+  assert.ok(b.est.U > a.est.U && b.ci.U[0] <= b.est.U && b.est.U <= b.ci.U[1]);
+  assert.equal(blockBootstrap(flat, sig, ok, 6, 6), null);        // one block of 8 x 8: fewer than 4
+});
+
+test("bounded coverage counts the spectra left out both ways and certifies on the worst case", () => {
+  const r = boundedCoverage(90, 100, 10);
+  near(r.c, 0.9, 1e-12); near(r.lo, 90 / 110, 1e-12); near(r.hi, 100 / 110, 1e-12);
+  near(r.lower, binomLower(110, 20), 1e-12);
+  assert.ok(r.lower < binomLower(100, 10));
+});
+
+test("KS distance: the exact statistic, a small p for shifted samples and a large one for the same", () => {
+  near(ksTest([0.1, 0.5, 0.9, 1.3, 2.0, 2.2, 3.1], [0.4, 1.1, 1.2, 2.5, 3.3, 3.9, 4.4, 5.0]).d, 0.5, 1e-12);
+  const R = rng(2), g = normal(R), a = [], b = [], c = [];
+  for (let i = 0; i < 400; i++) { a.push(g()); b.push(g()); c.push(g() + 0.5); }
+  assert.ok(ksTest(a, b).p > 0.05 && ksTest(a, c).p < 1e-6);
+});
+
+test("fit-free heights recover the band heights and the channel noise of synthetic spectra", () => {
+  const wn = Float64Array.from({ length: 801 }, (_, k) => 1000 + k), K = wn.length, R = rng(12), g = normal(R), n = 300;
+  const cube = new Float32Array(n * K), hG = [], hC = [];
+  for (let p = 0; p < n; p++) {
+    const G = 800 + 400 * R(), C = 0.2 * G;
+    hG.push(G); hC.push(C);
+    for (let k = 0; k < K; k++) {
+      const x = wn[k];
+      cube[p * K + k] = 300 + 0.1 * (x - 1000) + G / (1 + ((x - 1580) / 8) ** 2) + C * Math.exp(-0.5 * ((x - 1500) / 40) ** 2) + 5 * g();
+    }
+  }
+  const list = Array.from({ length: n }, (_, p) => p), r = fitFreeHeights(cube, K, wn, list, [1580, 1500]);
+  near(r.sigma, 5, 0.3);
+  // a 7-channel mean of a Lorentzian 8 cm-1 wide reads about 3 % low; D3 carries G's tail (1 % of G at 1500, less
+  // the 0.2 % the same tail adds to the baseline through 1700-1740)
+  for (let p = 0; p < n; p += 37) { near(r.heights[0][p] / hG[p], 0.97, 0.03); near((r.heights[1][p] - 0.0077 * hG[p]) / hC[p], 1, 0.03); }
+  assert.ok(r.se[0] >= 5 * Math.sqrt(1 / 7) && r.se[0] < 5);
+  assert.equal(fitFreeHeights(cube, K, Float64Array.from(wn, v => v + 300), list, [1580, 1500]), null);   // no 1030-1090 window
+});
+
+test("nested sample size: the between-particle term sets a floor no number of pixels removes", () => {
+  const s = nestedSize(0.05, 0.1, 0.2, 0.1, 25);
+  assert.equal(s.population, Math.ceil((0.01 + 0.04 + 0.01) / 0.0025));
+  assert.equal(s.maps, Math.ceil((0.01 + 0.05 / 25) / 0.0025));
+  assert.equal(s.floor, 4);
+  assert.equal(nestedSize(0.05, 0.1, 0.2, 0.1, Infinity).maps, s.floor);
+});

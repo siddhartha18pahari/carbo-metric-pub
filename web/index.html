@@ -344,9 +344,44 @@
           <div class="frow"><label>Thinnest coating</label><div class="kx"><input type="number" id="cov-rc" step="any" min="0" placeholder="2 &times; &tau;"><span>that must still be found</span></div></div>
           <div class="frow"><label>Detection power</label><div class="kx"><input type="number" id="cov-power" value="0.95" min="0.5" max="0.9999" step="0.01"><span>at the signal floor</span></div></div>
           <div class="frow"><label>Certify</label><div class="kx"><input type="number" id="cov-spec" value="0.99" min="0.5" max="0.9999" step="0.005"><span>coated, 95 % confidence</span></div></div>
+          <div class="frow"><label>Noise from</label><select id="cov-noise" title="The noise of the band heights that sets the signal floor: each spectrum's own fit, or an estimate that does not use the fit"><option value="fit">each spectrum's fit</option><option value="diff" id="cov-noise-diff">neighbouring pixels</option></select></div>
           <div class="verdict" id="cov-verdict"></div>
           <div class="cards" id="cov-cards"></div>
           <div class="muted small" id="cov-note"></div>
+        </div>
+      </div>
+      <div class="sec" data-sec="accept">
+        <div class="sec-h toggle">Acceptance</div>
+        <div class="sec-b">
+          <div class="muted small">Limits fixed before measuring, as the written method states them; the coverage limit is the one under Coverage. Leave a limit empty to leave it open.</div>
+          <div class="frow"><label>Between particles</label><div class="kx"><span>CV ≤</span><input type="number" id="acc-cvb" min="0" step="any" placeholder="no limit"><span>%</span></div></div>
+          <div class="frow"><label>Within particles</label><div class="kx"><span>CV ≤</span><input type="number" id="acc-cvw" min="0" step="any" placeholder="no limit"><span>%</span></div></div>
+          <div class="frow pf-only"><label>Run accepted</label><div class="kx"><span>≥</span><input type="number" id="acc-run" min="0" max="100" step="any" placeholder="no limit"><span>% of located</span></div></div>
+          <div class="verdict" id="acc-verdict"></div>
+          <div class="pf-scroll"><table class="stats" id="acc-table"></table></div>
+          <div class="sub-h">How many to measure</div>
+          <div class="frow"><label>Target error</label><div class="kx"><span>SE ≤</span><input type="number" id="acc-se" value="5" min="0.1" step="any"><span>% of the mean</span></div></div>
+          <div class="cards" id="acc-size-cards"></div>
+          <div class="muted small" id="acc-note"></div>
+        </div>
+      </div>
+      <div class="sec" data-sec="checks">
+        <div class="sec-h toggle">Checks on the measurement</div>
+        <div class="sec-b">
+          <div class="verdict" id="chk-verdict"></div>
+          <div class="cards" id="chk-cards"></div>
+          <div class="muted small" id="chk-note"></div>
+        </div>
+      </div>
+      <div class="sec" data-sec="acq">
+        <div class="sec-h toggle">Acquisition record</div>
+        <div class="sec-b">
+          <div class="verdict" id="acq-verdict"></div>
+          <div class="row2"><button id="acq-save" title="Keep this file's acquisition settings as the method every later file is checked against">Use as the method</button><button id="acq-load" title="Read a method file saved here before">Load method…</button></div>
+          <button class="wide" id="acq-download" title="Save the method and the acceptance limits to a file">Save method file</button>
+          <input type="file" id="acq-file" accept=".json,application/json" class="hidden">
+          <div class="pf-scroll"><table class="stats" id="acq-table"></table></div>
+          <div class="muted small" id="acq-note"></div>
         </div>
       </div>
       <div class="sec pf-only" data-sec="pf-detect">
@@ -382,6 +417,8 @@
         <div class="sec-b">
           <table class="stats" id="pf-size-table"></table>
           <table class="stats pf-sizes" id="pf-sizeclass-table"></table>
+          <div class="sub-h" id="pf-sizebin-h"></div>
+          <div class="pf-scroll"><table class="stats" id="pf-sizebin-table"></table></div>
           <div class="muted small" id="pf-size-note"></div>
         </div>
       </div>
