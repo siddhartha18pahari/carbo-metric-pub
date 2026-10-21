@@ -309,13 +309,25 @@
         <div class="sec-b">
           <div class="frow"><label>Coating band</label><select id="seg-coat-band" title="The band of the amorphous carbon coating, taken over G (D3 by default)"></select></div>
           <div class="frow"><label>Leave out the rim</label><div class="kx"><input type="number" id="seg-rim" value="1" min="0" step="0.25" title="Pixels this close to a particle's edge are left out: the laser spot (about 1 µm) lies partly off the particle there"><span>µm from the edge</span></div></div>
-          <div class="frow"><label>Colour pixels</label><select id="seg-colour"><option value="coat">by coating (against the noise band)</option><option value="value">by the map value</option></select></div>
+          <div class="frow"><label>Colour pixels</label><select id="seg-colour"><option value="coat">by coating (against the noise band)</option><option value="value">by the map value</option><option value="decomp">by the decomposition (cross-check)</option><option value="splat">by the splat ratio field (cross-check)</option></select></div>
           <div class="verdict" id="seg-verdict"></div>
           <div class="cards" id="seg-coat-cards"></div>
           <div class="sub-h" id="seg-more-cards-h"></div>
           <div class="cards" id="seg-more-cards"></div>
           <div class="pf-scroll"><table class="stats" id="seg-coat-table"></table></div>
           <div class="muted small" id="seg-coat-note"></div>
+        </div>
+      </div>
+      <div class="sec seg-only" data-sec="seg-xc">
+        <div class="sec-h toggle">Cross-checks on the map</div>
+        <div class="sec-b">
+          <div class="muted small">Two estimates that use no band fit's ratio, run on demand: a decomposition of the spectra into components, and Gaussian splats over the band maps. They check the coverage and the within-particle variation; neither replaces them.</div>
+          <div class="row2"><button id="xc-nmf" title="Split the particle pixels' spectra into components and compare the coating-like component's share with the fitted ratio and its coverage">Decompose the spectra</button><button id="xc-splat" title="Fit anisotropic Gaussian splats to the coating band and G maps on 80 % of the pixels and score them on the rest (takes some seconds)">Fit Gaussian splats</button></div>
+          <div class="muted small" id="xc-status"></div>
+          <div class="verdict" id="xc-verdict"></div>
+          <div class="cards" id="xc-cards"></div>
+          <div class="plot xc-plot hidden" id="xc-comp"><canvas></canvas></div>
+          <div class="muted small" id="xc-note"></div>
         </div>
       </div>
       <div class="sec pf-only">
@@ -357,6 +369,7 @@
           <div class="frow"><label>Between particles</label><div class="kx"><span>CV ≤</span><input type="number" id="acc-cvb" min="0" step="any" placeholder="no limit"><span>%</span></div></div>
           <div class="frow"><label>Within particles</label><div class="kx"><span>CV ≤</span><input type="number" id="acc-cvw" min="0" step="any" placeholder="no limit"><span>%</span></div></div>
           <div class="frow pf-only"><label>Run accepted</label><div class="kx"><span>≥</span><input type="number" id="acc-run" min="0" max="100" step="any" placeholder="no limit"><span>% of located</span></div></div>
+          <div class="frow pf-only"><label>Dispersion</label><div class="kx"><span>crowded ≤</span><input type="number" id="acc-disp" min="0" max="100" step="any" placeholder="no limit"><span>% of located</span></div></div>
           <div class="verdict" id="acc-verdict"></div>
           <div class="pf-scroll"><table class="stats" id="acc-table"></table></div>
           <div class="sub-h">How many to measure</div>

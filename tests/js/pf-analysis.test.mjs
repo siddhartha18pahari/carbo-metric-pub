@@ -512,3 +512,71 @@ test("nested sample size: the between-particle term sets a floor no number of pi
   assert.equal(s.floor, 4);
   assert.equal(nestedSize(0.05, 0.1, 0.2, 0.1, Infinity).maps, s.floor);
 });
+
+import { dispersion, nmf, nmfProject, fitSplats, splatScale, gaussSmooth } from "../../web/js/pf-analysis.js";
+
+test("dispersion: Clark-Evans 2 on a square lattice, about 1 at random, low when clumped; touching and merged objects", () => {
+  const xs = [], ys = [];
+  for (let i = 0; i < 20; i++) for (let j = 0; j < 20; j++) { xs.push(5 + 10 * j); ys.push(5 + 10 * i); }
+  const d4 = Array(400).fill(4), a = Array(400).fill(12.6);
+  const lat = dispersion(xs, ys, d4, a, 200 * 200);
+  near(lat.clarkEvans, 2, 1e-12); near(lat.nnMedian, 10, 1e-12); assert.equal(lat.touching, 0); assert.equal(lat.merged, 0);
+  const R = rng(5), rx = [], ry = [];
+  for (let i = 0; i < 2000; i++) { rx.push(1000 * R()); ry.push(1000 * R()); }
+  const ran = dispersion(rx, ry, Array(2000).fill(1), Array(2000).fill(1), 1e6);
+  assert.ok(ran.clarkEvans > 0.97 && ran.clarkEvans < 1.08, `random ${ran.clarkEvans}`);       // a few % high: no edge correction
+  const cx = [], cy = [];
+  for (let c = 0; c < 40; c++) { const x0 = 1000 * R(), y0 = 1000 * R(); for (let i = 0; i < 25; i++) { cx.push(x0 + 8 * R()); cy.push(y0 + 8 * R()); } }
+  assert.ok(dispersion(cx, cy, Array(1000).fill(1), Array(1000).fill(1), 1e6).clarkEvans < 0.3);
+  // two discs 6 across with centres 5 apart overlap; an object four times the median area counts as merged
+  const t = dispersion([0, 5, 100, 200], [0, 0, 0, 0], [6, 6, 6, 6], [28, 28, 28, 120], 1e4);
+  near(t.touching, 0.5, 1e-12); near(t.merged, 0.25, 1e-12); near(t.crowded, 0.75, 1e-12); near(t.gap[0], -1, 1e-12);
+});
+
+test("NMF recovers mixed component spectra and their amounts; projection onto fixed spectra is exact", () => {
+  const K = 120, g = (c, w) => Array.from({ length: K }, (_, x) => Math.exp(-0.5 * ((x - c) / w) ** 2));
+  // a narrow band and two broad ones that overlap it (a flat component would be absorbed by any other:
+  // NMF's rotational ambiguity, which no starting point removes)
+  const truth = [g(85, 3), g(40, 10), g(65, 16)];
+  const R = rng(9), n = 600, k = 3, V = new Float64Array(n * K), Wt = [];
+  for (let i = 0; i < n; i++) { const w = [R(), R() * 2, R() * 0.5]; Wt.push(w); for (let c = 0; c < K; c++) V[i * K + c] = w.reduce((t, a, j) => t + a * truth[j][c], 0) + 0.002 * R(); }
+  // start from blurred, partly mixed versions of the truth
+  const H0 = truth.map((h, j) => h.map((v, c) => 0.7 * v + 0.3 * truth[(j + 1) % 3][c] + 0.05));
+  const { W, H } = nmf(V, n, K, H0, { iters: 200 });
+  const cos = (a, b) => { let ab = 0, aa = 0, bb = 0; for (let c = 0; c < K; c++) { ab += a[c] * b[c]; aa += a[c] ** 2; bb += b[c] ** 2; } return ab / Math.sqrt(aa * bb); };
+  for (let j = 0; j < k; j++) assert.ok(cos(H.subarray(j * K, (j + 1) * K), truth[j]) > 0.98, `component ${j}: ${cos(H.subarray(j * K, (j + 1) * K), truth[j])}`);
+  // amounts: share of component 1 against the truth's share, in units of each component's sum
+  const sum = truth.map(h => h.reduce((t, v) => t + v, 0)), share = (w, i) => w[i * k + 1] / (w[i * k] + w[i * k + 1] + w[i * k + 2]);
+  const tShare = Wt.map(w => (w[1] * sum[1]) / (w[0] * sum[0] + w[1] * sum[1] + w[2] * sum[2]));
+  const est = Array.from({ length: n }, (_, i) => share(W, i)), mE = est.reduce((a, b) => a + b) / n, mT = tShare.reduce((a, b) => a + b) / n;
+  let sxy = 0, sxx = 0, syy = 0; for (let i = 0; i < n; i++) { sxy += (est[i] - mE) * (tShare[i] - mT); sxx += (est[i] - mE) ** 2; syy += (tShare[i] - mT) ** 2; }
+  assert.ok(sxy / Math.sqrt(sxx * syy) > 0.98, `share r ${sxy / Math.sqrt(sxx * syy)}`);
+  // with the true spectra fixed, the amounts come back
+  const Ht = new Float64Array(k * K); truth.forEach((h, j) => h.forEach((v, c) => { Ht[j * K + c] = v; }));
+  const Wp = nmfProject(V, n, K, Ht, k, { iters: 200 });
+  for (let i = 0; i < n; i += 50) for (let j = 0; j < k; j++) near(Wp[i * k + j], Wt[i][j], 0.005, `pixel ${i} component ${j}`);
+});
+
+test("2-D splats: a field of two anisotropic Gaussians is recovered on points the fit never saw", async () => {
+  const R = rng(17), gauss = () => Math.sqrt(-2 * Math.log(R() + 1e-12)) * Math.cos(2 * Math.PI * R());
+  const truth = (x, y) => {
+    const u1 = Math.cos(0.5) * (x - 0.35) + Math.sin(0.5) * (y - 0.4), u2 = -Math.sin(0.5) * (x - 0.35) + Math.cos(0.5) * (y - 0.4);
+    return 0.5 + 2 * Math.exp(-0.5 * ((u1 / 0.12) ** 2 + (u2 / 0.05) ** 2)) + 1.2 * Math.exp(-0.5 * (((x - 0.75) / 0.08) ** 2 + ((y - 0.7) / 0.08) ** 2));
+  };
+  const mk = m => { const X = new Float64Array(2 * m), y = new Float64Array(m); for (let i = 0; i < m; i++) { X[2 * i] = R(); X[2 * i + 1] = R(); y[i] = truth(X[2 * i], X[2 * i + 1]) + 0.05 * gauss(); } return { X, y }; };
+  const train = mk(1500), hold = mk(400);
+  const { field, hist } = await fitSplats(train.X, train.y, { iters: 400, nMax: 32, seed: 2 });
+  const p = field.predict(hold.X); let se = 0; for (let i = 0; i < 400; i++) se += (p[i] - hold.y[i]) ** 2;
+  const rmse = Math.sqrt(se / 400);
+  assert.ok(rmse < 0.075, `held-out RMSE ${rmse} against noise 0.05`);
+  assert.ok(hist[hist.length - 1].rmse < 0.06 && hist[hist.length - 1].rmse < hist[0].rmse / 3, JSON.stringify(hist));
+  const sc = splatScale(field, 101);
+  assert.ok(sc.radius > 2 && sc.radius < 12, `scale ${sc.radius} px`);    // the true primitives: 7.7 and 8 px
+});
+
+test("Gaussian smoothing over a mask ignores the pixels outside it", () => {
+  const nx = 12, ny = 10, img = new Float64Array(nx * ny).fill(3), ok = new Uint8Array(nx * ny).fill(1);
+  for (let j = 0; j < 4; j++) { img[j] = 1000; ok[j] = 0; }
+  const s = gaussSmooth(img, ok, nx, ny, 1);
+  for (let p = 0; p < nx * ny; p++) near(s[p], 3, 1e-9);
+});

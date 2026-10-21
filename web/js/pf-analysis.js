@@ -891,3 +891,241 @@ export function nestedSize(se, cvB, cvW, cvN, k) {
   const v = cvB * cvB, w = cvW * cvW + cvN * cvN;
   return { population: Math.ceil((v + w) / (se * se)), maps: Math.ceil((v + w / Math.max(1, k)) / (se * se)), floor: Math.ceil(v / (se * se)) };
 }
+
+// --------------------------------------------------------------------------
+// Dispersion, decomposition and Gaussian splats: cross-checks on the sample and the maps
+// --------------------------------------------------------------------------
+
+// How well the particles are spread on the slide (population mode). For each particle: the distance to
+// its nearest neighbour, centre to centre, and the smallest gap to any neighbour between their equivalent
+// circles. The Clark-Evans ratio, the mean nearest-neighbour distance over 0.5 / sqrt(density), is about 1
+// for particles dropped at random, below 1 when they clump and up to 2.15 for a regular lattice (no edge
+// correction, so it reads a little high). Also the share touching a neighbour (gap <= 0), and the share of
+// objects so large (area above 3 x the median) that they are likely touching particles segmented as one,
+// and the share that is either (crowded).
+export function dispersion(xs, ys, ds, areas, fieldArea) {
+  const n = xs.length; if (n < 3) return null;
+  const nn = new Float64Array(n), gap = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    let best = Infinity, bg = Infinity;
+    for (let j = 0; j < n; j++) {
+      if (j === i) continue;
+      const d = Math.hypot(xs[i] - xs[j], ys[i] - ys[j]), g = d - 0.5 * (ds[i] + ds[j]);
+      if (d < best) best = d;
+      if (g < bg) bg = g;
+    }
+    nn[i] = best; gap[i] = bg;
+  }
+  const s = Float64Array.from(nn).sort(), mean = nn.reduce((t, v) => t + v, 0) / n, medA = median(areas);
+  let touching = 0, merged = 0, crowded = 0;
+  for (let i = 0; i < n; i++) { const t = gap[i] <= 0, m = areas[i] > 3 * medA; if (t) touching++; if (m) merged++; if (t || m) crowded++; }
+  return { n, nnMedian: quantileSorted(s, 0.5), nnP10: quantileSorted(s, 0.1), clarkEvans: 2 * mean * Math.sqrt(n / fieldArea),
+           touching: touching / n, merged: merged / n, crowded: crowded / n, nn, gap };
+}
+
+// Non-negative matrix factorisation V ~ W H (V: n spectra of K channels, row by row; H: k component spectra)
+// by hierarchical alternating least squares (Cichocki and Phan 2009): each component's amounts, then its
+// spectrum, solved in turn with the others held, clipped at zero. From the starting spectra H0, so the
+// result is the same every time. Rows of H come back scaled to unit sum, W carrying the amounts.
+export function nmf(V, n, K, H0, { iters = 200, eps = 1e-12 } = {}) {
+  const k = H0.length, H = new Float64Array(k * K), W = new Float64Array(n * k);
+  H0.forEach((r, a) => { for (let c = 0; c < K; c++) H[a * K + c] = Math.max(r[c], 0); });
+  W.set(nmfProject(V, n, K, H, k, { iters: 20 }));
+  const VHt = new Float64Array(n * k), HHt = new Float64Array(k * k), WtV = new Float64Array(k * K), WtW = new Float64Array(k * k);
+  for (let it = 0; it < iters; it++) {
+    // the amounts, one component at a time
+    for (let a = 0; a < k; a++) for (let b = 0; b < k; b++) { let t = 0; for (let c = 0; c < K; c++) t += H[a * K + c] * H[b * K + c]; HHt[a * k + b] = t; }
+    for (let i = 0; i < n; i++) for (let a = 0; a < k; a++) { let t = 0; for (let c = 0; c < K; c++) t += V[i * K + c] * H[a * K + c]; VHt[i * k + a] = t; }
+    for (let a = 0; a < k; a++) {
+      const d = HHt[a * k + a]; if (!(d > eps)) continue;
+      for (let i = 0; i < n; i++) { let t = VHt[i * k + a]; for (let b = 0; b < k; b++) t -= W[i * k + b] * HHt[b * k + a]; W[i * k + a] = Math.max(0, W[i * k + a] + t / d); }
+    }
+    // then the spectra
+    WtV.fill(0); WtW.fill(0);
+    for (let i = 0; i < n; i++) for (let a = 0; a < k; a++) {
+      const w = W[i * k + a]; if (!w) continue;
+      for (let c = 0; c < K; c++) WtV[a * K + c] += w * V[i * K + c];
+      for (let b = 0; b < k; b++) WtW[a * k + b] += w * W[i * k + b];
+    }
+    for (let a = 0; a < k; a++) {
+      const d = WtW[a * k + a]; if (!(d > eps)) continue;
+      for (let c = 0; c < K; c++) { let t = WtV[a * K + c]; for (let b = 0; b < k; b++) t -= WtW[a * k + b] * H[b * K + c]; H[a * K + c] = Math.max(0, H[a * K + c] + t / d); }
+    }
+  }
+  for (let a = 0; a < k; a++) {
+    let t = 0; for (let c = 0; c < K; c++) t += H[a * K + c];
+    if (t > 0) { for (let c = 0; c < K; c++) H[a * K + c] /= t; for (let i = 0; i < n; i++) W[i * k + a] *= t; }
+  }
+  return { W, H, k };
+}
+// the amounts of fixed component spectra H (k rows of K channels) in each of n spectra: non-negative
+// least squares by the same component-wise updates with H held
+export function nmfProject(V, n, K, H, k, { iters = 100, eps = 1e-12 } = {}) {
+  const W = new Float64Array(n * k), HHt = new Float64Array(k * k), VHt = new Float64Array(n * k);
+  for (let a = 0; a < k; a++) for (let b = 0; b < k; b++) { let t = 0; for (let c = 0; c < K; c++) t += H[a * K + c] * H[b * K + c]; HHt[a * k + b] = t; }
+  for (let i = 0; i < n; i++) for (let a = 0; a < k; a++) { let t = 0; for (let c = 0; c < K; c++) t += V[i * K + c] * H[a * K + c]; VHt[i * k + a] = t; }
+  for (let it = 0; it < iters; it++) for (let i = 0; i < n; i++) for (let a = 0; a < k; a++) {
+    const d = HHt[a * k + a]; if (!(d > eps)) continue;
+    let t = VHt[i * k + a]; for (let b = 0; b < k; b++) t -= W[i * k + b] * HHt[b * k + a];
+    W[i * k + a] = Math.max(0, W[i * k + a] + t / d);
+  }
+  return W;
+}
+
+// let the page draw and take input: a message on a fresh channel, which a hidden tab does not slow down
+// as it does timers
+const yieldToPage = () => (typeof MessageChannel === "undefined" ? new Promise(res => setTimeout(res, 0))
+  : new Promise(res => { const ch = new MessageChannel(); ch.port1.onmessage = () => { ch.port1.close(); res(); }; ch.port2.postMessage(0); }));
+
+// Two-dimensional anisotropic Gaussian splatting of a field sampled at points X (pairs in [0, 1]²):
+// f(x) = b + sum_i a_i exp(-q_i / 2), q_i = (u1 / s1)² + (u2 / s2)², u = R(-theta_i)(x - mu_i). Centres,
+// log widths and orientations follow Adam on the analytic gradient of the mean squared error; amplitudes
+// and offset are re-solved by ridge least squares at intervals (the field is linear in them); primitives
+// are added where the residual is largest and dropped where their amplitude vanishes. A port of the
+// fitter used for the coating maps; it yields to the page every `yieldEvery` iterations.
+export async function fitSplats(X0, y0, { nInit = 16, nMax = 64, iters = 600, seed = 0, lrMu = 3e-3, lrS = 1e-2, lrTheta = 1e-2,
+  densifyEvery = 100, densifyUntil = 0.6, lstsqEvery = 25, sMin = 0.01, sMax = 0.6, ridge = 1e-8, yieldEvery = 25, onTick = null } = {}) {
+  const N = y0.length, R = rng(seed + 1), lo = Math.log(sMin), hi = Math.log(sMax);
+  const width = Math.min(Math.max(0.5 / Math.sqrt(nInit), sMin), sMax), Q_MAX = 40, REACH = Math.sqrt(Q_MAX);   // exp(-20): a primitive's reach
+  // the points sorted by x, so that each primitive is evaluated only over the points within its reach
+  const order = Array.from({ length: N }, (_, i) => i).sort((p, q) => X0[2 * p] - X0[2 * q]);
+  const px = Float64Array.from(order, i => X0[2 * i]), py = Float64Array.from(order, i => X0[2 * i + 1]), y = Float64Array.from(order, i => y0[i]);
+  const first = v => { let l = 0, h = N; while (l < h) { const m = (l + h) >> 1; if (px[m] < v) l = m + 1; else h = m; } return l; };
+  // the field's parameters, in typed arrays of capacity nMax
+  const mu = new Float64Array(2 * nMax), ls = new Float64Array(2 * nMax), th = new Float64Array(nMax), a = new Float64Array(nMax);
+  let n = 0, b = y.reduce((t, v) => t + v, 0) / N;
+  const add = (x, yy, w) => { mu[2 * n] = x; mu[2 * n + 1] = yy; ls[2 * n] = ls[2 * n + 1] = w; th[n] = R() * Math.PI; a[n] = 0; n++; };
+  { const pick = Array.from({ length: N }, (_, i) => i); for (let i = 0; i < Math.min(nInit, N, nMax); i++) { const j = i + Math.floor(R() * (N - i)); [pick[i], pick[j]] = [pick[j], pick[i]]; add(px[pick[i]], py[pick[i]], Math.log(width)); } }
+  // per primitive (row) and point: the Gaussian and the rotated offsets, over [from, to) of the sorted points
+  const Gm = new Float64Array(nMax * N), U1 = new Float64Array(nMax * N), U2 = new Float64Array(nMax * N), from = new Int32Array(nMax), to = new Int32Array(nMax), r = new Float64Array(N);
+  const basis = () => {
+    for (let j = 0; j < n; j++) {
+      const c = Math.cos(th[j]), s = Math.sin(th[j]), s1 = Math.exp(ls[2 * j]), s2 = Math.exp(ls[2 * j + 1]), i1 = 1 / (s1 * s1), i2 = 1 / (s2 * s2), mx = mu[2 * j], my = mu[2 * j + 1];
+      const ex = REACH * Math.hypot(s1 * c, s2 * s), o = j * N, f0 = first(mx - ex), t0 = first(mx + ex);
+      Gm.fill(0, o + from[j], o + to[j]); from[j] = f0; to[j] = t0;
+      for (let i = f0; i < t0; i++) {
+        const d0 = px[i] - mx, d1 = py[i] - my, u1 = c * d0 + s * d1, u2 = c * d1 - s * d0, q = u1 * u1 * i1 + u2 * u2 * i2;
+        U1[o + i] = u1; U2[o + i] = u2; Gm[o + i] = q < Q_MAX ? Math.exp(-0.5 * q) : 0;
+      }
+    }
+  };
+  const solveAmplitudes = () => {
+    const m = n + 1, M = new Float64Array(m * m), rhs = new Float64Array(m);
+    for (let p = 0; p < n; p++) {
+      const op = p * N;
+      let t = 0, u = 0; for (let i = from[p]; i < to[p]; i++) { t += Gm[op + i] * y[i]; u += Gm[op + i]; }
+      rhs[p] = t; M[p * m + n] = u;
+      for (let q = p; q < n; q++) {
+        const oq = q * N, i0 = Math.max(from[p], from[q]), i9 = Math.min(to[p], to[q]);
+        let v = 0; for (let i = i0; i < i9; i++) v += Gm[op + i] * Gm[oq + i];
+        M[p * m + q] = v;
+      }
+    }
+    rhs[n] = y.reduce((t, v) => t + v, 0); M[n * m + n] = N;
+    let tr = 0; for (let p = 0; p < m; p++) { for (let q = 0; q < p; q++) M[p * m + q] = M[q * m + p]; tr += M[p * m + p]; }
+    for (let p = 0; p < m; p++) M[p * m + p] += ridge * Math.max(tr / m, 1e-12);
+    const Mi = pinvSym(M, m);
+    for (let p = 0; p < m; p++) { let t = 0; for (let q = 0; q < m; q++) t += Mi[p * m + q] * rhs[q]; if (p < n) a[p] = t; else b = t; }
+  };
+  const residual = () => {
+    for (let i = 0; i < N; i++) r[i] = b - y[i];
+    for (let j = 0; j < n; j++) { const o = j * N, aj = a[j]; for (let i = from[j]; i < to[j]; i++) r[i] += aj * Gm[o + i]; }
+    let ss = 0; for (let i = 0; i < N; i++) ss += r[i] * r[i];
+    return Math.sqrt(ss / N);
+  };
+  // Adam's moments, reset whenever primitives are added or dropped
+  let M1 = new Float64Array(5 * nMax), M2 = new Float64Array(5 * nMax), step = 0;
+  const grad = new Float64Array(5 * nMax), hist = [];
+  for (let it = 1; it <= iters; it++) {
+    basis();
+    if (it === 1 || it % lstsqEvery === 0) solveAmplitudes();
+    const rmse = residual();
+    for (let j = 0; j < n; j++) {
+      const c = Math.cos(th[j]), s = Math.sin(th[j]), i1 = Math.exp(-2 * ls[2 * j]), i2 = Math.exp(-2 * ls[2 * j + 1]), aj = a[j], o = j * N;
+      let gx = 0, gy = 0, g1 = 0, g2 = 0, gt = 0;
+      for (let i = from[j]; i < to[j]; i++) {
+        const G = Gm[o + i]; if (!G) continue;
+        const gq = -(r[i] * aj * G) / N, u1 = U1[o + i], u2 = U2[o + i], gu1 = 2 * gq * u1 * i1, gu2 = 2 * gq * u2 * i2;
+        gx += -gu1 * c + gu2 * s; gy += -gu1 * s - gu2 * c;
+        g1 -= gu1 * u1; g2 -= gu2 * u2; gt += 2 * gq * u1 * u2 * (i1 - i2);
+      }
+      grad[5 * j] = gx; grad[5 * j + 1] = gy; grad[5 * j + 2] = g1; grad[5 * j + 3] = g2; grad[5 * j + 4] = gt;
+    }
+    step++;
+    const c1 = 1 - 0.9 ** step, c2 = 1 - 0.999 ** step;
+    for (let j = 0; j < n; j++) for (let q = 0; q < 5; q++) {
+      const z = 5 * j + q, gz = grad[z];
+      M1[z] = 0.9 * M1[z] + 0.1 * gz; M2[z] = 0.999 * M2[z] + 0.001 * gz * gz;
+      const d = (q < 2 ? lrMu : q < 4 ? lrS : lrTheta) * (M1[z] / c1) / (Math.sqrt(M2[z] / c2) + 1e-8);
+      if (q < 2) mu[2 * j + q] = Math.min(1.05, Math.max(-0.05, mu[2 * j + q] - d));
+      else if (q < 4) ls[2 * j + q - 2] = Math.min(hi, Math.max(lo, ls[2 * j + q - 2] - d));
+      else th[j] -= d;
+    }
+    if (it % densifyEvery === 0 && it <= densifyUntil * iters) {
+      // drop primitives whose amplitude has vanished, then add some where the residual is largest
+      const medA = median(Array.from(a.subarray(0, n), Math.abs));
+      let k = 0;
+      for (let j = 0; j < n; j++) {
+        Gm.fill(0, j * N + from[j], j * N + to[j]);
+        if (Math.abs(a[j]) > 1e-3 * medA) { mu[2 * k] = mu[2 * j]; mu[2 * k + 1] = mu[2 * j + 1]; ls[2 * k] = ls[2 * j]; ls[2 * k + 1] = ls[2 * j + 1]; th[k] = th[j]; a[k] = a[j]; k++; }
+      }
+      from.fill(0); to.fill(0); n = k;
+      const more = Math.min(Math.max(Math.floor(n / 2), 1), nMax - n);
+      if (more > 0) {
+        const worst = Array.from({ length: N }, (_, i) => i).sort((p, q) => Math.abs(r[q]) - Math.abs(r[p])), taken = [];
+        for (const j of worst) {
+          if (taken.every(t => Math.hypot(px[j] - px[t], py[j] - py[t]) > 0.03)) taken.push(j);
+          if (taken.length === more) break;
+        }
+        const w = Math.log(Math.min(Math.max(width / 2, sMin), sMax));
+        for (const j of taken) add(px[j], py[j], w);
+      }
+      basis(); solveAmplitudes();
+      M1 = new Float64Array(5 * nMax); M2 = new Float64Array(5 * nMax); step = 0;
+    }
+    if (it === 1 || it % 50 === 0 || it === iters) hist.push({ it, rmse, n });
+    if (it % yieldEvery === 0) { if (onTick) onTick(it / iters); await yieldToPage(); }
+  }
+  basis(); solveAmplitudes();
+  const field = { mu: mu.slice(0, 2 * n), ls: ls.slice(0, 2 * n), th: th.slice(0, n), a: a.slice(0, n), b, n,
+    predict(P) {
+      const m = P.length / 2, out = new Float64Array(m).fill(this.b);
+      for (let j = 0; j < this.n; j++) {
+        const c = Math.cos(this.th[j]), s = Math.sin(this.th[j]), i1 = Math.exp(-2 * this.ls[2 * j]), i2 = Math.exp(-2 * this.ls[2 * j + 1]);
+        for (let i = 0; i < m; i++) {
+          const d0 = P[2 * i] - this.mu[2 * j], d1 = P[2 * i + 1] - this.mu[2 * j + 1], u1 = c * d0 + s * d1, u2 = c * d1 - s * d0, q = u1 * u1 * i1 + u2 * u2 * i2;
+          if (q < Q_MAX) out[i] += this.a[j] * Math.exp(-0.5 * q);
+        }
+      }
+      return out;
+    } };
+  return { field, hist };
+}
+// the spatial scale of a splat field in pixels (S pixels span 0 to 1): the median radius sqrt(s1 s2)
+// weighted by each primitive's amplitude times its area, and the median elongation
+export function splatScale(field, S) {
+  if (!field.n) return { radius: NaN, elongation: NaN };
+  const rows = Array.from({ length: field.n }, (_, j) => {
+    const s1 = Math.exp(field.ls[2 * j]) * (S - 1), s2 = Math.exp(field.ls[2 * j + 1]) * (S - 1);
+    return { r: Math.sqrt(s1 * s2), w: Math.abs(field.a[j]) * s1 * s2, e: Math.max(s1, s2) / Math.min(s1, s2) };
+  }).sort((p, q) => p.r - q.r);
+  const tot = rows.reduce((t, q) => t + q.w, 0); let cum = 0, radius = rows[rows.length - 1].r;
+  for (const q of rows) { cum += q.w; if (cum / tot >= 0.5) { radius = q.r; break; } }
+  return { radius, elongation: median(rows.map(q => q.e)) };
+}
+// normalised Gaussian smoothing of an image over a mask (the masked pixels only), evaluated everywhere:
+// the local smoother the splats are compared with (scipy's gaussian_filter, truncated at 4 sigma)
+export function gaussSmooth(img, ok, nx, ny, sigma = 1) {
+  const R = Math.ceil(4 * sigma), w = Array.from({ length: 2 * R + 1 }, (_, i) => Math.exp(-0.5 * ((i - R) / sigma) ** 2));
+  const pass = (src, horiz) => {
+    const out = new Float64Array(nx * ny);
+    for (let i = 0; i < ny; i++) for (let j = 0; j < nx; j++) {
+      let t = 0;
+      for (let k = -R; k <= R; k++) { const ii = horiz ? i : i + k, jj = horiz ? j + k : j; if (ii >= 0 && ii < ny && jj >= 0 && jj < nx) t += w[k + R] * src[ii * nx + jj]; }
+      out[i * nx + j] = t;
+    }
+    return out;
+  };
+  const num = pass(pass(Float64Array.from(img, (v, p) => (ok[p] ? v : 0)), true), false), den = pass(pass(Float64Array.from(ok, v => (v ? 1 : 0)), true), false);
+  return Float64Array.from(num, (v, p) => (den[p] > 1e-6 ? v / den[p] : NaN));
+}

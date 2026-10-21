@@ -10,12 +10,12 @@ import { SpectrumPlot, HistogramPlot, DensityPlot, PEAK_COLOURS } from "./plots.
 import { SplatView, sliceField } from "./splat3d.js";
 import { segment, outlineOverlay, distance, PARTICLE_COLOURS } from "./particles.js";
 import { buildReport } from "./report.js";
-import { wilson, weightedQuantile, laCancado, robustScale, bestGmm, bootstrapShares, median, quantileSorted,
+import { rng, wilson, weightedQuantile, laCancado, robustScale, bestGmm, bootstrapShares, median, quantileSorted,
          heightCovariances, ratioVariance, heterogeneity, moranI, spearmanCI, coverage, pairRatio,
          binomLower, certifyCount, detectionPower, signalFloor, gini, noiseGini, logCV, lognormalPreferred,
          gridMoran, effectiveN, variogram, fitVariogram, hotSpots, blockShuffle, floorWithReference, hexBins,
          boundedCoverage, lowShare, qcd, qRatio, evenness, moments, spatialPermutation, neighbourNoise, blockBootstrap,
-         ksTest, fitFreeHeights, nestedSize, robustSD } from "./pf-analysis.js";
+         ksTest, fitFreeHeights, nestedSize, robustSD, dispersion, nmf, nmfProject, fitSplats, splatScale, gaussSmooth } from "./pf-analysis.js";
 import { T, font, setTheme, currentTheme } from "./theme.js";
 import { lut } from "./colormaps.js";
 
@@ -1580,7 +1580,7 @@ function renderParticles() {
   drawStrip();
   renderSegCoating(card);
   renderCoverage(card);
-  renderChecks(card); renderAcq(); renderAccept(card);
+  renderChecks(card); renderAcq(); renderAccept(card); renderXc(card);
 }
 
 function drawStrip() {
@@ -1788,6 +1788,20 @@ function renderSegCoating(card) {
     pmap.setCategories({ index: A.cat, colours: [...COAT_COLOURS(), T.label], names: ["below", "within", "above", ...(A.rim ? ["rim, left out"] : [])] });
     pmap.setTitle(`Coating <u>${escHTML(A.band)}/G</u> against each particle's mean`);
   }
+  // the cross-checks, once run: the decomposition against the ratio, or the splat ratio field
+  const Xc = A && A.C ? xcNow() : null, col = $("#seg-colour").value;
+  if (col === "decomp" && Xc && Xc.dec) {
+    if (Xc.dec.ref) {
+      pmap.setCategories({ index: Xc.dec.ref.cat, colours: XC_CAT(), names: ["coated both ways", "by the ratio only", "by the decomposition only", "neither"] });
+      pmap.setTitle(`Coverage by <u>${escHTML(A.band)}/G</u> against the decomposition`);
+    } else {
+      const v = new Float64Array(P()).fill(NaN); Xc.dec.used.forEach((p, i) => { v[p] = Xc.dec.share[i]; });
+      pmap.setData(v, { valid: null, label: "Coating-like share", unit: "" }); pmap.setTitle("Share of the coating-like component");
+    }
+  } else if (col === "splat" && Xc && Xc.splat) {
+    pmap.setData(Xc.splat.ratioMap, { valid: null, label: `${A.band}/G (splats)`, unit: "" });
+    pmap.setTitle(`<u>${escHTML(A.band)}/G</u> from the Gaussian splats`);
+  }
   if (!A || !A.C) {
     box.className = "verdict"; box.textContent = ""; t.textContent = "";
     $("#seg-coat-cards").replaceChildren(); $("#seg-more-cards").replaceChildren(); $("#seg-more-cards-h").textContent = "";
@@ -1910,6 +1924,196 @@ $("#seg-colour").onchange = () => { if (S.seg) renderParticles(); };
 $("#seg-rim").onchange = () => { if (S.seg) renderParticles(); };
 
 // =========================================================================
+// Cross-checks on a map: a decomposition of the spectra, and Gaussian splats
+// =========================================================================
+// Both run on demand (a decomposition takes a second or two, the splats a few seconds a band) and are kept
+// until the map's analysis changes. Neither is used for coverage itself: the decomposition gives a fit-free
+// abundance of a coating-like component to compare with it, the splats a smooth ratio field and a spatial
+// scale to compare with the within-particle variation.
+const XC_LO = 1100, XC_HI = 1700, XC_BIN = 8;
+const xcKey = () => (S.segCoat && S.segCoat.C && S.segCoat.seg === S.seg && S.fit ? `${S.segCoat.key}|${S.fit.seconds}` : null);
+const xcNow = () => (S.xc && S.xc.key === xcKey() ? S.xc : null);
+const xcTick = () => new Promise(res => setTimeout(res, 0));
+
+// the spectra of chosen pixels prepared for decomposition: a straight baseline through 1030-1090 and
+// 1700-1740 cm-1 taken off, the band region 1100-1700 cm-1 binned to 8 cm-1, negatives set to 0
+function xcSpectra(cube, K, wn, list) {
+  const nb = Math.round((XC_HI - XC_LO) / XC_BIN), bin = new Int32Array(K).fill(-1), cnt = new Float64Array(nb), base = [];
+  for (let k = 0; k < K; k++) {
+    if ((wn[k] >= 1030 && wn[k] <= 1090) || (wn[k] >= 1700 && wn[k] <= 1740)) base.push(k);
+    if (wn[k] >= XC_LO && wn[k] < XC_HI) { bin[k] = Math.floor((wn[k] - XC_LO) / XC_BIN); cnt[bin[k]]++; }
+  }
+  if (base.length < 6 || !(wn[0] <= 1030 && wn[K - 1] >= 1740) || cnt.some(c => !c)) return null;
+  const mx = base.reduce((t, k) => t + wn[k], 0) / base.length, sxx = base.reduce((t, k) => t + (wn[k] - mx) ** 2, 0), V = new Float64Array(list.length * nb);
+  list.forEach((p, i) => {
+    const o = p * K; let my = 0, sxy = 0;
+    for (const k of base) my += cube[o + k] / base.length;
+    for (const k of base) sxy += (wn[k] - mx) * (cube[o + k] - my);
+    const slope = sxy / sxx;
+    for (let k = 0; k < K; k++) if (bin[k] >= 0) V[i * nb + bin[k]] += (cube[o + k] - my - slope * (wn[k] - mx)) / cnt[bin[k]];
+  });
+  for (let q = 0; q < V.length; q++) if (V[q] < 0) V[q] = 0;
+  return { V, K: nb, axis: Array.from({ length: nb }, (_, j) => XC_LO + (j + 0.5) * XC_BIN) };
+}
+
+async function runDecomposition() {
+  const key = xcKey(); if (!key) return;
+  const A = S.segCoat, f = S.fit, m = f.m, used = A.px.groups.flat(), y = A.px.y, status = $("#xc-status");
+  status.textContent = "Decomposing the spectra…"; await xcTick();
+  const sp = xcSpectra(S.cube, S.k, S.wn, used);
+  if (!sp) { status.textContent = "The decomposition needs spectra covering 1030 to 1740 cm⁻¹."; return; }
+  // components learnt on up to 3 000 pixels spread through the list, starting from the mean spectra of the
+  // fifth with the lowest and the fifth with the highest coating ratio, and a flat one for what the
+  // straight baseline leaves; then every pixel's amounts with the components held
+  const ord = used.map((_, i) => i).sort((p, q) => y[used[p]] - y[used[q]]), fifth = Math.max(1, Math.floor(used.length / 5));
+  const meanOf = ids => { const h = new Float64Array(sp.K); for (const i of ids) for (let c = 0; c < sp.K; c++) h[c] += sp.V[i * sp.K + c] / ids.length; return h; };
+  const level = sp.V.reduce((t, v) => t + v, 0) / sp.V.length;
+  const H0 = [meanOf(ord.slice(0, fifth)), meanOf(ord.slice(-fifth)), new Float64Array(sp.K).fill(level)];
+  const stride = Math.max(1, Math.ceil(used.length / 3000)), learn = []; for (let i = 0; i < used.length; i += stride) learn.push(i);
+  const VL = new Float64Array(learn.length * sp.K); learn.forEach((i, r) => VL.set(sp.V.subarray(i * sp.K, (i + 1) * sp.K), r * sp.K));
+  const { H, k } = nmf(VL, learn.length, sp.K, H0, { iters: 200 });
+  const W = nmfProject(sp.V, used.length, sp.K, H, k);
+  // the coating-like component: one with a G band (its 1570-1610 peak at least twice its level at the window's
+  // ends) and, of those, the most signal in the D3 valley (1480-1530) against that peak
+  const at = (lo, hi) => sp.axis.flatMap((v, j) => (v >= lo && v < hi ? [j] : []));
+  const val = at(1480, 1530), gw = at(1570, 1610), ends = [0, 1, 2, 3, sp.K - 4, sp.K - 3, sp.K - 2, sp.K - 1];
+  const comps = Array.from({ length: k }, (_, a) => {
+    const h = j => H[a * sp.K + j], g = Math.max(...gw.map(h)), edge = ends.reduce((t, j) => t + h(j), 0) / ends.length;
+    return { g, hasG: g > 2 * edge, valley: val.reduce((t, j) => t + h(j), 0) / val.length / (g || 1) };
+  });
+  const cand = comps.map((c, a) => [c, a]).filter(([c]) => c.hasG).sort((p, q) => q[0].valley - p[0].valley);
+  if (!cand.length) { status.textContent = "No component of the decomposition has a G band: it found no carbon component to compare."; return; }
+  const jc = cand[0][1], share = Float64Array.from(used, (_, i) => { let t = 0; for (let a = 0; a < k; a++) t += W[i * k + a]; return t > 0 ? W[i * k + jc] / t : NaN; });
+  const dec = { H, k, jc, axis: sp.axis, comps, used, share, rho: spearman(Array.from(share), used.map(p => y[p])) };
+  // the coverage cross-check: a threshold from the uncoated reference projected on the same components (its
+  // 99th percentile, over its spectra above the signal floor), then each judged pixel called both ways
+  const R = S.covR && S.covR.mode === "map" ? S.covR : null, rf = $("#cov-ref").value ? fileOf($("#cov-ref").value) : null;
+  if (R && rf) {
+    const rs = refSpectra(rf, A.band), rIdx = rs ? rs.idx.filter((_, i) => rs.g[i] >= R.gmin) : [];
+    if (rIdx.length >= 100) {
+      status.textContent = `Projecting the ${fmt(rIdx.length)} spectra of ${rf.name} above the floor…`; await xcTick();
+      const cube = new Float32Array(await api(`/api/ds/${rf.id}/cube`)), rsp = xcSpectra(cube, rf.info.k, f32(rf.info.wn), rIdx);
+      if (rsp && rsp.K === sp.K) {
+        const Wr = nmfProject(rsp.V, rIdx.length, rsp.K, H, k), rShare = [];
+        for (let i = 0; i < rIdx.length; i++) { let t = 0; for (let a = 0; a < k; a++) t += Wr[i * k + a]; if (t > 0) rShare.push(Wr[i * k + jc] / t); }
+        const tauD = quantileSorted(Float64Array.from(rShare).sort(), 0.99), G = p => f.intensity[p * m + f.names.findIndex(q => q.toLowerCase() === "g")];
+        const pos = new Map(used.map((p, i) => [p, i])), cat = new Int16Array(P()).fill(-1), parts = [];
+        let both = 0, rOnly = 0, dOnly = 0, none = 0;
+        A.px.groups.forEach((g, gi) => {
+          const out = new Set(A.px.left[gi]); let nJ = 0, cR = 0, cD = 0;
+          for (const p of g) {
+            if (G(p) < R.gmin || out.has(p)) continue;
+            const r1 = y[p] > R.F.tau, d1 = share[pos.get(p)] > tauD; nJ++; if (r1) cR++; if (d1) cD++;
+            if (r1 && d1) { both++; cat[p] = 0; } else if (r1) { rOnly++; cat[p] = 1; } else if (d1) { dOnly++; cat[p] = 2; } else { none++; cat[p] = 3; }
+          }
+          if (nJ >= 10) parts.push({ id: A.rows[gi].id, n: nJ, ratio: cR / nJ, dec: cD / nJ });
+        });
+        const N = both + rOnly + dOnly + none, po = (both + none) / N, pr = (both + rOnly) / N, pd = (both + dOnly) / N, pe = pr * pd + (1 - pr) * (1 - pd);
+        dec.ref = { name: rf.name, n: rShare.length, tau: tauD, N, agree: po, kappa: pe < 1 ? (po - pe) / (1 - pe) : NaN, both, rOnly, dOnly, none, parts, cat };
+      }
+    }
+  }
+  S.xc = { ...(xcNow() || {}), key, dec };
+  status.textContent = "";
+  renderParticles();
+}
+
+async function runSplats() {
+  const key = xcKey(); if (!key) return;
+  const A = S.segCoat, f = S.fit, m = f.m, used = A.px.groups.flat(), status = $("#xc-status");
+  const jG = f.names.findIndex(q => q.toLowerCase() === "g"), jC = f.names.indexOf(A.band);
+  // the particles' pixels in their bounding box, scaled to [0, 1] by its longer side; a fifth held out at random
+  let i0 = Infinity, i1 = -1, j0 = Infinity, j1 = -1;
+  for (const p of used) { const i = (p / S.nx) | 0, j = p - i * S.nx; i0 = Math.min(i0, i); i1 = Math.max(i1, i); j0 = Math.min(j0, j); j1 = Math.max(j1, j); }
+  const w = j1 - j0 + 1, hh = i1 - i0 + 1, side = Math.max(w, hh, 2), Rg = rng(1000);
+  const X = new Float64Array(2 * used.length), loc = used.map(p => { const i = (p / S.nx) | 0, j = p - i * S.nx; return (i - i0) * w + (j - j0); });
+  used.forEach((p, q) => { const i = (p / S.nx) | 0, j = p - i * S.nx; X[2 * q] = (j - j0) / (side - 1); X[2 * q + 1] = (i - i0) / (side - 1); });
+  const hold = used.map(() => Rg() < 0.2), trainAll = used.map((_, q) => q).filter(q => !hold[q]);
+  let train = trainAll;
+  if (train.length > 4000) { train = [...trainAll]; for (let i = 0; i < 4000; i++) { const j = i + Math.floor(Rg() * (train.length - i)); [train[i], train[j]] = [train[j], train[i]]; } train = train.slice(0, 4000); }
+  const heldIdx = used.map((_, q) => q).filter(q => hold[q]), trainMask = new Uint8Array(w * hh);
+  for (const q of trainAll) trainMask[loc[q]] = 1;
+  const out = {};
+  for (const [name, j] of [[A.band, jC], ["G", jG]]) {
+    const v = used.map(p => f.intensity[p * m + j]), img = new Float64Array(w * hh); used.forEach((_, q) => { img[loc[q]] = v[q]; });
+    const Xt = new Float64Array(2 * train.length), yt = new Float64Array(train.length); train.forEach((q, i) => { Xt[2 * i] = X[2 * q]; Xt[2 * i + 1] = X[2 * q + 1]; yt[i] = v[q]; });
+    const { field } = await fitSplats(Xt, yt, { nMax: 64, iters: 600, seed: 1000, sMin: 0.6 / (side - 1), sMax: 0.5,
+      onTick: t => { status.textContent = `Fitting Gaussian splats to ${name} (${Math.round(100 * t)} %)…`; } });
+    if (xcKey() !== key) { status.textContent = ""; return; }                     // the map changed meanwhile
+    const pred = field.predict(X), sm = gaussSmooth(img, trainMask, w, hh, 1), rm = a => Math.sqrt(a.reduce((t, e) => t + e * e, 0) / a.length);
+    const sc = splatScale(field, side);
+    out[name === "G" ? "G" : "C"] = { pred, n: field.n, rmse: rm(heldIdx.map(q => pred[q] - v[q])), smooth: rm(heldIdx.map(q => sm[loc[q]] - v[q]).filter(Number.isFinite)),
+                                    noise: neighbourNoise(img, trainMask, w, hh).sd, radius: sc.radius * A.step, elongation: sc.elongation };
+  }
+  // the splat ratio field on the particles' pixels, and its robust CV per particle against the excess CV
+  const ratioMap = new Float64Array(P()).fill(NaN), pos = new Map(used.map((p, q) => [p, q]));
+  used.forEach((p, q) => { if (out.G.pred[q] > 0) ratioMap[p] = out.C.pred[q] / out.G.pred[q]; });
+  const parts = A.rows.map((r, gi) => {
+    const vals = A.px.groups[gi].map(p => ratioMap[p]).filter(Number.isFinite);
+    return vals.length >= 100 ? { id: r.id, cv: robustSD(vals) / median(vals), excess: r.u && r.u.boot ? r.u.boot.est.cvExcess : NaN } : null;
+  }).filter(Boolean);
+  const splat = { ...out, ratioMap, parts, pixels: used.length, held: heldIdx.length, train: train.length,
+                  compression: 2 * used.length / (6 * out.C.n + 1 + 6 * out.G.n + 1) };
+  S.xc = { ...(xcNow() || {}), key, splat };
+  status.textContent = "";
+  renderParticles();
+}
+$("#xc-nmf").onclick = () => runDecomposition().catch(e => { $("#xc-status").textContent = ""; toast(e.message, "error"); });
+$("#xc-splat").onclick = () => runSplats().catch(e => { $("#xc-status").textContent = ""; toast(e.message, "error"); });
+
+const XC_CAT = () => [PARTICLE_COLOURS[3], COAT_COLOURS()[2], PARTICLE_COLOURS[4], T.label];
+function renderXc(card) {
+  const X = xcNow(), box = $("#xc-verdict"), cards = $("#xc-cards"), note = $("#xc-note"), plot = $("#xc-comp");
+  const ready = !!xcKey();
+  $("#xc-nmf").disabled = $("#xc-splat").disabled = !ready;
+  const items = [], out = [], b = S.segCoat ? S.segCoat.band : "";
+  const D = X && X.dec, Sp = X && X.splat;
+  if (D) {
+    const c = D.comps[D.jc];
+    out.push(card("Coating-like component", `${pct(median(Array.from(D.share)))} of the signal`, `median share · ${b} valley ${fmt(c.valley, 2)} × its G peak · ρ ${fmt(D.rho, 2)} with the fitted ${b}/G`));
+    items.push(`The spectra split into ${D.k} components without any band fit; the coating-like one (a G band with the most signal in the ${b} valley) carries a median ${pct(median(Array.from(D.share)))} of the signal, and its share ranks the pixels as the fitted ${b}/G does at ρ = ${fmt(D.rho, 2)}.`);
+    if (D.ref) {
+      const Rf = D.ref;
+      out.push(card("Coverage, decomposed", pct((Rf.both + Rf.dOnly) / Rf.N), `against ${pct((Rf.both + Rf.rOnly) / Rf.N)} from the ratio · agree on ${pct(Rf.agree)} of ${fmt(Rf.N)} judged pixels · κ ${fmt(Rf.kappa, 2)}`));
+      const thr = Rf.tau > 0 ? `the 99th percentile of its share, ${fmt(Rf.tau, 3)}, over ${fmt(Rf.n)} spectra above the floor` : `the coating-like component is absent from at least 99 % of its ${fmt(Rf.n)} spectra above the floor, so any share above 0 counts`;
+      const prev = Math.max(Rf.both + Rf.rOnly, Rf.both + Rf.dOnly) / Rf.N > 0.9 || Math.min(Rf.both + Rf.rOnly, Rf.both + Rf.dOnly) / Rf.N < 0.1;
+      items.push(`Against a threshold from ${Rf.name} projected on the same components (${thr}), the decomposition calls ${pct((Rf.both + Rf.dOnly) / Rf.N)} of the judged pixels coated and the ratio ${pct((Rf.both + Rf.rOnly) / Rf.N)}; they agree on ${pct(Rf.agree)} (Cohen's κ ${fmt(Rf.kappa, 2)}${prev ? "; κ runs low when nearly every pixel falls on one side, so the agreement says more here" : ""}). ` +
+        Rf.parts.map(q => `Particle ${q.id}: ${pct(q.dec)} decomposed, ${pct(q.ratio)} by the ratio`).join("; ") + ".");
+    } else items.push("Choose an uncoated reference under Coverage, and set the floor, to compare the decomposition's coverage with the ratio's.");
+  }
+  if (Sp) {
+    out.push(card(`Splats, ${b}`, `${fmt(Sp.C.rmse, 3)} held out`, `noise ${fmt(Sp.C.noise, 3)} · a 1-pixel smoother ${fmt(Sp.C.smooth, 3)} · ${Sp.C.n} splats, ${fmt(Sp.C.radius, 2)} µm`));
+    out.push(card("Splats, G", `${fmt(Sp.G.rmse, 3)} held out`, `noise ${fmt(Sp.G.noise, 3)} · a 1-pixel smoother ${fmt(Sp.G.smooth, 3)} · ${Sp.G.n} splats, ${fmt(Sp.G.radius, 2)} µm`));
+    const cvS = median(Sp.parts.map(q => q.cv)), cvE = median(Sp.parts.map(q => q.excess));
+    out.push(card("Splat ratio field", `CV ${pct(cvS)}`, `against the excess CV ${pct(cvE)} from the pixels · ${fmt(Sp.compression, 3)} pixels per parameter`));
+    const fitsNoise = Sp.C.rmse <= 1.2 * Sp.C.noise;
+    items.push(`Gaussian splats fitted to ${fmt(Sp.train)} of the pixels predict the ${fmt(Sp.held)} held out to ${fmt(Sp.C.rmse, 3)} counts in ${b} (pixel noise ${fmt(Sp.C.noise, 3)}, a 1-pixel smoother ${fmt(Sp.C.smooth, 3)})${fitsNoise ? ", about the noise: the field carries no structure the splats miss" : ", above the noise: there is structure finer than the splats"}. ${b} varies on a scale of about ${fmt(Sp.C.radius, 2)} µm (G ${fmt(Sp.G.radius, 2)} µm).`);
+    if (Number.isFinite(cvS) && Number.isFinite(cvE)) {
+      const k2 = cvE > 0 ? cvS / cvE : Infinity;
+      items.push(`The splat ratio field has a CV of ${pct(cvS)} inside the particles, against an excess CV of ${pct(cvE)} from the pixels with their noise taken out (${Number.isFinite(k2) ? `${fmt(k2, 2)} ×` : "the pixels show no excess"}; median over the particles with 100 pixels or more)${k2 >= 2 / 3 && k2 <= 1.5 ? ": two independent routes to the within-particle variation roughly agree" : ": they differ by more than half, so read the within-particle variation with care"}. Coverage is never taken from the splat field: it fills gaps smaller than its splats and cannot rescue weak signal.`);
+    }
+  }
+  box.className = "verdict"; box.replaceChildren(...(items.length ? [el("b", {}, "Cross-checks"), ...items.map(t => el("p", {}, t))] : []));
+  cards.replaceChildren(...out);
+  plot.classList.toggle("hidden", !D);
+  if (D) {
+    const ax = pfAxes(plot, [XC_LO, XC_HI], [0, 1.05], { xlabel: "Raman shift (cm⁻¹)", yticks: false });
+    if (ax) {
+      for (let a = 0; a < D.k; a++) {
+        const row = Array.from({ length: D.axis.length }, (_, j) => D.H[a * D.axis.length + j]), mx = Math.max(...row) || 1;
+        ax.ctx.beginPath(); row.forEach((v, j) => { const x = ax.X(D.axis[j]), yy = ax.Y(v / mx); if (j) ax.ctx.lineTo(x, yy); else ax.ctx.moveTo(x, yy); });
+        ax.ctx.strokeStyle = a === D.jc ? COAT_COLOURS()[2] : PARTICLE_COLOURS[a % PARTICLE_COLOURS.length]; ax.ctx.lineWidth = a === D.jc ? 2.4 : 1.2; ax.ctx.stroke();
+      }
+      ax.ctx.font = font(10); ax.ctx.fillStyle = T.label; ax.ctx.textAlign = "left"; ax.ctx.textBaseline = "top";
+      ax.ctx.fillText(`${D.k} components, each scaled to its peak · thick: coating-like`, ax.L + 4, ax.Tp + 2);
+    }
+  }
+  note.textContent = ready ? "Decomposition: non-negative matrix factorisation (hierarchical alternating least squares, Cichocki and Phan 2009) of the particle pixels' spectra, a straight baseline through 1030–1090 and 1700–1740 cm⁻¹ taken off and 1100–1700 cm⁻¹ binned to 8 cm⁻¹, into 3 components started from the mean spectra of the pixels with the lowest and highest fitted ratio and a flat one; each pixel's share is the coating-like component's part of its signal. The reference is projected on the same components, so the threshold means the same on both. " +
+    "Splats: a port of the 2-D Gaussian splatting used for the coating maps (anisotropic Gaussians, Adam on the analytic gradient, amplitudes by least squares, splats added where the residual is largest), fitted to 80 % of the pixels (at most 4 000) and scored on the other 20 %; noise from neighbouring training pixels; the scale is the median splat radius weighted by amplitude and area."
+    : "Find the particles and analyse the coating first.";
+}
+
+// =========================================================================
 // Coverage: the share of particles (or of a particle's area) that carries the coating
 // =========================================================================
 // A spectrum is judged only above a signal floor: the G height at which a coating of the
@@ -1940,9 +2144,9 @@ function refSpectra(f, band) {
       const x = X[p * m + jG], w = Wd[p * m + jG], sx = gp.pos_max - gp.pos_min, sw = gp.width_max - gp.width_min;
       if (near(x, gp.pos_min, sx) || near(x, gp.pos_max, sx) || near(w, gp.width_min, sw) || near(w, gp.width_max, sw)) continue;
     }
-    vals.push([g, I[p * m + jC] / g]);
+    vals.push([g, I[p * m + jC] / g, p]);
   }
-  return vals.length ? { g: vals.map(v => v[0]), r: vals.map(v => v[1]), n: vals.length, name: f.name, median: median(vals.map(v => v[1])) } : null;
+  return vals.length ? { g: vals.map(v => v[0]), r: vals.map(v => v[1]), idx: vals.map(v => v[2]), n: vals.length, name: f.name, median: median(vals.map(v => v[1])) } : null;
 }
 
 function covSettings(band) {
@@ -2172,6 +2376,13 @@ function renderChecks(card) {
       if (Fl.above && (warn = true)) items.push(`The run's own filter removed ${fmt(Fl.above)} objects larger than the largest it kept (${f2(Fl.kmax)} µm): an upper size limit that leaves the big particles out of every result. The Size section reads coverage by size class.`);
     }
   }
+  if (S.points && A.disp) {
+    const Dp = A.disp, limD = parseFloat($("#acc-disp").value) / 100;
+    out.push(card("Dispersion", `Clark–Evans ${fmt(Dp.clarkEvans, 2)}`, `1 at random, below 1 clumped · nearest neighbour ${fmt(Dp.nnMedian, 3)} µm (median) · ${pct(Dp.touching)} touch one · ${pct(Dp.merged)} likely merged`));
+    const crowd = `${pct(Dp.crowded)} of the ${fmt(Dp.n)} located particles touch a neighbour (their equivalent circles overlap) or are so large, over 3 × the median area, that they are likely touching particles segmented as one; the Clark–Evans ratio is ${fmt(Dp.clarkEvans, 2)} (1 for particles dropped at random, below 1 when they clump)`;
+    if (Dp.crowded > limD && (warn = true)) items.push(`The slide is more crowded than the method allows: ${crowd}. A spectrum may then sample two particles and sizes read high; redisperse the powder (a dry disperser, or less of it) and measure again.`);
+    else items.push(`Dispersion: ${crowd}.`);
+  }
   box.className = `verdict ${warn ? "warn" : "good"}`;
   box.replaceChildren(...(items.length ? [el("b", {}, "What the checks found"), ...items.map(t => el("p", {}, t))] : []));
   cards.replaceChildren(...out);
@@ -2180,7 +2391,7 @@ function renderChecks(card) {
     : "Neighbouring pixels: the robust SD of the differences between horizontally and vertically adjacent pixels used, over √2. ") +
     "Left out: spectra whose G or coating band sits on a fit bound, or whose coating band is fitted with zero height; coverage counts them both ways for its bounds. " +
     "Ratios without a fit use the same baseline and heights, at each band's median fitted position. The check is that the fitted D1/G ranks the spectra as the fit-free one does (Spearman ρ), with the spread the fit adds of its own (robust CV: 1.4826 × MAD over the median); a weak band such as D3 sits on the tails of D1 and G, so its fit-free height is reported, and how far it follows D1/G, but it cannot check its fit." +
-    (S.points ? " Measured vs selected: two-sample Kolmogorov–Smirnov tests on the stage positions of the measured particles against all selected ones (status measured or not measured, off the seams)." : "");
+    (S.points ? " Measured vs selected: two-sample Kolmogorov–Smirnov tests on the stage positions of the measured particles against all selected ones (status measured or not measured, off the seams). Dispersion: over the located particles, in the field the mosaic images; the Clark–Evans ratio has no edge correction, so it reads a little high." : "");
 }
 
 // =========================================================================
@@ -2273,7 +2484,7 @@ $("#acq-file").onchange = async e => {
 // =========================================================================
 // Acceptance: limits fixed in advance, the decision on the bound of every interval, and how many to measure
 // =========================================================================
-const LIMIT_IDS = { cvb: "#acc-cvb", cvw: "#acc-cvw", run: "#acc-run" };
+const LIMIT_IDS = { cvb: "#acc-cvb", cvw: "#acc-cvw", run: "#acc-run", disp: "#acc-disp" };
 function showLimits() {
   const L = store.get(LIMITS_KEY); if (!L) return;
   for (const [k, id] of Object.entries(LIMIT_IDS)) $(id).value = Number.isFinite(L[k]) ? L[k] : "";
@@ -2302,6 +2513,8 @@ function renderAccept(card) {
   if (S.points) {
     const A = S.pfa, C = A && A.coat, share = A ? A.Q.length / Math.max(1, A.located) : NaN;
     rows.push(["Run: spectra accepted", pct(share), Number.isFinite(lim("run")) ? `≥ ${pct(lim("run"))}` : "no limit", judge(share, lim("run"))]);
+    const crowded = A && A.disp ? A.disp.crowded : NaN;
+    rows.push(["Dispersion: crowded particles", Number.isFinite(crowded) ? pct(crowded) : "–", Number.isFinite(lim("disp")) ? `≤ ${pct(lim("disp"))}` : "no limit", judge(crowded, lim("disp"), true)]);
     rows.push(["Particles coated", R && R.mode === "pf" ? (R.n ? `≥ ${pct(R.certified)} certified` : "no particle above the floor") : "needs τ (Coverage)", `≥ ${pct(spec)}`, R && R.mode === "pf" ? (R.pass ? "pass" : "fail") : "open"]);
     const cvb = C ? C.H.tauHi / C.H.mu : NaN;
     rows.push(["Between particles: CV", C ? `≤ ${pct(cvb)}` : "–", Number.isFinite(lim("cvb")) ? `≤ ${pct(lim("cvb"))}` : "no limit", judge(cvb, lim("cvb"), true)]);
@@ -2711,8 +2924,14 @@ function pfAnalysis() {
   }
   // located particles the run counts (the run's filter honoured unless included), off the seams
   let located = 0; for (let p = 0; p < n; p++) if ((!status || status[p] !== 0 || inclExcl) && !(seam && seam[p])) located++;
+  // how the particles lie on the slide: nearest neighbours, Clark-Evans, touching and likely merged objects,
+  // over the located particles and the field the mosaic images (or the particles' own extent)
+  const dIdx = []; for (let p = 0; p < n; p++) if ((!status || status[p] !== 0 || inclExcl) && !(seam && seam[p]) && Number.isFinite(pts.x[p]) && Number.isFinite(pts.y[p])) dIdx.push(p);
+  let fieldArea = S.ds.video ? Math.abs((S.ds.video.x[1] - S.ds.video.x[0]) * (S.ds.video.y[1] - S.ds.video.y[0])) : NaN;
+  if (!(fieldArea > 0)) { const xs = dIdx.map(p => pts.x[p]), ys = dIdx.map(p => pts.y[p]); fieldArea = (Math.max(...xs) - Math.min(...xs)) * (Math.max(...ys) - Math.min(...ys)); }
+  const disp = dIdx.length >= 3 && fieldArea > 0 ? dispersion(dIdx.map(p => pts.x[p]), dIdx.map(p => pts.y[p]), dIdx.map(p => pts.ecd[p]), dIdx.map(p => pts.area[p]), fieldArea) : null;
 
-  return (S.pfa = { key, n, fitted, gate, inclExcl, cOut, ff, run, located, filt, sizeBins, norm: { NS, K2, wn: ks.map(q => S.wn[q]) }, kd, kq, snr, zG, atBound, det, quant, Q, Qd, label, k: cats, how, pops, la, laQ, noD, lambda, size, classes, coat,
+  return (S.pfa = { key, n, fitted, gate, inclExcl, cOut, ff, run, located, disp, filt, sizeBins, norm: { NS, K2, wn: ks.map(q => S.wn[q]) }, kd, kq, snr, zG, atBound, det, quant, Q, Qd, label, k: cats, how, pops, la, laQ, noD, lambda, size, classes, coat,
                     vwRatio: sw > 0 ? swr / sw : NaN, nwRatio: Qd.length ? sr / Qd.length : NaN, rho, spectra, jD, ratio, rlab, nNd, popBand });
 }
 

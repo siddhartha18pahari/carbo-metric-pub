@@ -399,6 +399,7 @@ table.stats tr.click:hover td { background: var(--accent-soft); }
 table.stats tr.on td { background: var(--accent-soft-2); }
 table.stats tr.on td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
 table.stats tr.warn td { background: color-mix(in srgb, var(--warn) 13%, transparent); }
+.xc-plot { height: 170px; margin: 4px 0 8px; }
 table.stats .sub { color: var(--dim); }
 
 /* popover */
