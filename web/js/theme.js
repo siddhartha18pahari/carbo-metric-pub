@@ -14,6 +14,7 @@ const VARS = {
   tipBg: "--cv-tip-bg", tipInk: "--cv-tip-ink", pin: "--cv-pin", hover: "--cv-hover", strong: "--cv-strong",
   mean: "--cv-mean", residBg: "--cv-resid-bg", resid: "--cv-resid", tagBg: "--cv-tag-bg", tagInk: "--cv-tag-ink",
   accent: "--accent", accent2: "--accent-2", paper: "--cv-paper",
+  viz1: "--viz-1", viz2: "--viz-2", viz3: "--viz-3", good: "--good", warn: "--warn", bad: "--bad", muted: "--muted",
 };
 
 // band and particle colours, readable on either background (arrays mutated

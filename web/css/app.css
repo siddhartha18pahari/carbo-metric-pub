@@ -73,6 +73,8 @@
   --cv-tag-bg: rgba(0, 0, 0, 0.5);
   --cv-tag-ink: #cfe0ff;
   --band-0: #38d6ff; --band-1: #ff9f40; --band-2: #b18cff; --band-3: #ffd84d; --band-4: #ff6b9a;
+  /* the coating overview's chart colours: checked for lightness, chroma, colour-blind separation and contrast on --cv-paper */
+  --viz-1: #139fcc; --viz-2: #d9741a; --viz-3: #956ee6;
 }
 
 :root[data-theme="light"] {
@@ -140,6 +142,7 @@
   --cv-tag-bg: rgba(255, 255, 255, 0.88);
   --cv-tag-ink: #26364f;
   --band-0: #0a86b8; --band-1: #d9700b; --band-2: #7346d1; --band-3: #a8820a; --band-4: #d02f68;
+  --viz-1: #0a86b8; --viz-2: #d9700b; --viz-3: #7346d1;
 }
 
 /* ---------------------------------------------------------------- base */
@@ -400,6 +403,48 @@ table.stats tr.on td { background: var(--accent-soft-2); }
 table.stats tr.on td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
 table.stats tr.warn td { background: color-mix(in srgb, var(--warn) 13%, transparent); }
 .xc-plot { height: 170px; margin: 4px 0 8px; }
+
+/* coating overview: the verdict and its meter, three tiles, where the spread comes from, the distribution */
+.ov { border: 1px solid var(--line-2); border-radius: var(--r); padding: 12px 12px 10px; margin: 8px 0 10px;
+      background: linear-gradient(180deg, var(--accent-soft-2), var(--accent-soft)); box-shadow: var(--shadow); }
+.ov:empty { display: none; }
+.ov-head { display: flex; align-items: center; gap: 9px; font-weight: 700; font-size: 16px; color: var(--heading); line-height: 1.25; }
+.ov-head .ic { width: 22px; height: 22px; border-radius: 50%; display: inline-grid; place-items: center; flex: none;
+               font-size: 13px; font-weight: 800; color: var(--accent-ink); background: var(--muted); }
+.ov-head.good .ic { background: var(--good); } .ov-head.warn .ic { background: var(--warn); } .ov-head.bad .ic { background: var(--bad); }
+.ov-sub { color: var(--text-2); font-size: 12.5px; line-height: 1.45; margin: 4px 0 10px 31px; }
+.ov-meter { margin: 0 0 12px; }
+.ov-meter .lbl { display: flex; justify-content: space-between; font-size: 11.5px; color: var(--muted); margin-bottom: 4px; }
+.ov-meter .lbl b { color: var(--heading); font-weight: 600; }
+.ov-track { position: relative; height: 8px; border-radius: 4px; background: var(--line); }
+.ov-fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 4px; background: var(--good); transition: width 0.7s cubic-bezier(.2, .8, .2, 1); }
+.ov-fill.warn { background: var(--warn); } .ov-fill.bad { background: var(--bad); }
+.ov-zone { position: absolute; top: -2px; bottom: -2px; width: 1px; background: var(--line-2); }
+.ov-scale { display: grid; grid-template-columns: 25fr 50fr 25fr; font-size: 11px; color: var(--muted); margin-top: 4px; }
+.ov-scale span:nth-child(2) { text-align: center; } .ov-scale span:last-child { text-align: right; }
+.ov-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(112px, 1fr)); gap: 6px; }
+.ov-tile { background: var(--input); border: 1px solid var(--line); border-radius: 9px; padding: 8px 10px 7px; min-width: 0; }
+.ov-tile .k { color: var(--muted); font-size: 11.5px; }
+.ov-tile .v { font-weight: 700; font-size: 21px; color: var(--heading); line-height: 1.2; letter-spacing: -0.01em; }
+.ov-tile .s { color: var(--dim); font-size: 11px; line-height: 1.35; }
+.ov-tile svg { display: block; width: 100%; height: 14px; margin: 5px 0 2px; overflow: visible; }
+.ov-h { font-size: 12px; font-weight: 600; color: var(--muted); margin: 12px 0 5px; }
+.ov-bar { display: flex; gap: 2px; height: 18px; }
+.ov-bar span { height: 100%; min-width: 3px; display: flex; align-items: center; padding: 0 6px; font-size: 11px; font-weight: 600;
+               white-space: nowrap; overflow: hidden; transition: flex-grow 0.7s cubic-bezier(.2, .8, .2, 1); }
+.ov-bar span:first-child { border-radius: 4px 0 0 4px; } .ov-bar span:last-child { border-radius: 0 4px 4px 0; }
+.ov-bar span:only-child { border-radius: 4px; }
+.ov-legend { display: flex; flex-wrap: wrap; gap: 3px 14px; font-size: 11.5px; color: var(--text-2); margin-top: 6px; }
+.ov-legend .sw { width: 10px; height: 10px; border-radius: 3px; display: inline-block; margin-right: 5px; vertical-align: -1px; }
+.ov-plot { position: relative; height: 196px; margin-top: 4px; }
+.ov-plot canvas { position: absolute; inset: 0; }
+.ov-tip { position: absolute; pointer-events: none; display: none; z-index: 3; transform: translate(-50%, calc(-100% - 8px));
+          background: var(--cv-tip-bg); color: var(--cv-tip-ink); font-size: 11.5px; padding: 4px 8px; border-radius: 6px; white-space: nowrap; }
+details.ov-more { margin-top: 2px; }
+details.ov-more > summary { cursor: pointer; color: var(--accent); font-size: 12.5px; font-weight: 600; list-style: none; }
+details.ov-more > summary::-webkit-details-marker { display: none; }
+details.ov-more > summary::before { content: "▸ "; } details.ov-more[open] > summary::before { content: "▾ "; }
+.verdict:has(> details.ov-more:only-child) { background: transparent; border-style: dashed; padding: 7px 12px; }
 .bm-group { width: 7em; }
 table.stats .sub { color: var(--dim); }
 

@@ -310,6 +310,7 @@
           <div class="frow"><label>Coating band</label><select id="seg-coat-band" title="The band of the amorphous carbon coating, taken over G (D3 by default)"></select></div>
           <div class="frow"><label>Leave out the rim</label><div class="kx"><input type="number" id="seg-rim" value="1" min="0" step="0.25" title="Pixels this close to a particle's edge are left out: the laser spot (about 1 µm) lies partly off the particle there"><span>µm from the edge</span></div></div>
           <div class="frow"><label>Colour pixels</label><select id="seg-colour"><option value="coat">by coating (against the noise band)</option><option value="value">by the map value</option><option value="decomp">by the decomposition (cross-check)</option><option value="splat">by the splat ratio field (cross-check)</option></select></div>
+          <div class="ov" id="seg-ov"></div>
           <div class="verdict" id="seg-verdict"></div>
           <div class="cards" id="seg-coat-cards"></div>
           <div class="sub-h" id="seg-more-cards-h"></div>
@@ -351,6 +352,7 @@
         <div class="sec-h toggle">Coating uniformity</div>
         <div class="sec-b">
           <div class="frow"><label>Coating band</label><select id="pf-coat-band" title="The band of the amorphous carbon coating, taken over G (D3 by default)"></select></div>
+          <div class="ov" id="pf-ov"></div>
           <div class="verdict" id="pf-verdict"></div>
           <div class="cards" id="pf-coat-cards"></div>
           <div class="sub-h" id="pf-more-cards-h"></div>

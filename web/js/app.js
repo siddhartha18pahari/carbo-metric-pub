@@ -1804,7 +1804,7 @@ function renderSegCoating(card) {
     pmap.setTitle(`<u>${escHTML(A.band)}/G</u> from the Gaussian splats`);
   }
   if (!A || !A.C) {
-    box.className = "verdict"; box.textContent = ""; t.textContent = "";
+    box.className = "verdict"; box.textContent = ""; t.textContent = ""; $("#seg-ov").replaceChildren();
     $("#seg-coat-cards").replaceChildren(); $("#seg-more-cards").replaceChildren(); $("#seg-more-cards-h").textContent = "";
     $("#seg-coat-note").textContent = A ? A.why : "";
     return;
@@ -1919,6 +1919,37 @@ function renderSegCoating(card) {
     `Limits: neighbouring pixels are not independent samples. ${spot}` +
     `Each spectrum still carries its own noise, so the test of one common value holds. But patches smaller than the spot are averaged away, so the CV describes the coating on the scale of the spot; and the intervals and the particle means' errors count the pixels as more independent than they are, so they are too narrow and the between-particle part is somewhat overstated. ` +
     `${b}/G rises with the amount of amorphous carbon in the probed volume but not in proportion to its thickness, so compare maps measured the same way.`;
+
+  // the overview at the top, and the verdict's notes folded under it
+  const lvl = ["good", "good", "warn", "bad"][Math.max(gw, gb === 2 ? 2 : 0)];
+  const noise2 = W.noise ** 2, within2 = W.tau ** 2, between2 = B ? B.tau ** 2 : 0, tot = noise2 + within2 + between2;
+  const rowsP = A.rows.filter(r => r.h).map(r => ({ id: r.id, est: r.h.tau / r.h.mu, lo: r.h.tauLo / r.h.mu, hi: r.h.tauHi / r.h.mu, patchy: r.h.p < 0.05, n: r.used }));
+  // every pixel over its own particle's mean, for the distribution; the noise curve from at most 1 500 of them
+  const vals = [], rel = [];
+  A.px.groups.forEach((g, k) => { const h = C.parts[k]; if (!h || !(h.mu > 0)) return; for (const p of g) { vals.push(A.px.y[p] / h.mu); rel.push(A.px.se[p] / h.mu); } });
+  const relS = rel.filter((_, i) => i % Math.max(1, Math.ceil(rel.length / 1500)) === 0).filter(e => e > 0), wRel = W.tau / mu;
+  ovRender($("#seg-ov"), {
+    level: lvl, head, sub: body,
+    meter: { share: W.p >= 0.05 ? 0 : W.I2, title: "Real share of the spread inside the particles (I²)", label: W.p >= 0.05 ? `${pct(W.I2)} · within the noise` : pct(W.I2) },
+    tiles: [
+      { k: `Mean ${b}/G`, v: fmt(mu, 3), s: `${C.particles} particle${C.particles === 1 ? "" : "s"} · ${fmt(W.n)} pixels` },
+      low(W) ? { k: "CV inside", v: `≤ ${pct(W.sd / mu)}`, s: "within particles · plain scatter" }
+             : { k: "CV inside", v: pct(wRel), ci: [wRel, W.tauLo / mu, W.tauHi / mu, Math.max(0.2, 1.3 * W.tauHi / mu)], s: `within particles · 95 % CI ${cvs(W)}` },
+      B ? { k: "CV between", v: pct(B.tau / mu), ci: [B.tau / mu, B.tauLo / mu, B.tauHi / mu, Math.max(0.2, 1.3 * B.tauHi / mu)], s: `particle to particle · 95 % CI ${cvs(B)}` }
+        : { k: "CV between", v: "–", s: "particle to particle · needs 3 particles" }],
+    splitTitle: "Where the spread comes from (share of the variance)",
+    split: [{ name: "pixel noise", share: noise2 / tot, colour: T.muted }, { name: "real, within particles", share: within2 / tot, colour: T.viz1 },
+            ...(between2 > 0 ? [{ name: "real, between particles", share: between2 / tot, colour: T.viz2 }] : [])],
+    plots: [
+      ...(rowsP.length ? [{ title: "Each particle: how patchy inside", height: 52 + 26 * rowsP.length, draw: h => drawPartStrip(h, rowsP),
+                            legend: [[T.viz2, "patchy (p < 0.05)", "box"], [T.viz1, "even within the noise", "box"]] }] : []),
+      { title: `${b}/G of every pixel over its particle's mean`,
+        draw: h => drawDistPlot(h, { values: vals, xlabel: `${b}/G over the particle's mean`, unit: "pixels",
+          curves: [{ name: "noise", f: x => { let s = 0; for (const e of relS) s += npdfAt(x, 1, e); return s / relS.length; }, colour: T.muted },
+                   ...(wRel > 1e-6 ? [{ name: "true", f: x => npdfAt(x, 1, wRel), colour: T.viz1, wash: true }] : [])] }),
+        legend: [[T.label, "measured", "box"], [T.muted, "noise alone (an even coating)", "line"], ...(wRel > 1e-6 ? [[T.viz1, "real spread, noise taken out", "line"]] : [])] }],
+  });
+  foldNotes(box);
 }
 $("#seg-coat-band").onchange = () => { if (S.seg) renderParticles(); };
 $("#seg-colour").onchange = () => { if (S.seg) renderParticles(); };
@@ -3318,10 +3349,157 @@ function drawPfDist() {
 const COAT_COLOURS = () => [PARTICLE_COLOURS[2], PARTICLE_COLOURS[0], PARTICLE_COLOURS[1]];
 const pFmt = p => (!Number.isFinite(p) ? "–" : p < 0.001 ? "< 0.001" : `= ${p.toFixed(3)}`);
 
+// =========================================================================
+// Coating overview: the verdict at a glance, above the numbers
+// =========================================================================
+// A headline with its status (an icon and words, never colour alone), a meter of the real share of the
+// spread, three tiles with their intervals drawn, where the spread comes from (one stacked bar), and the
+// distribution: measured values, what noise alone would give, and the true values with the noise taken
+// out. Every number in it is also in the cards and notes below.
+const OV_ICON = { good: "✓", warn: "!", bad: "✕" };
+// text on a fill: dark or white by the fill's luminance
+function inkOn(hex) {
+  const m = /^#?([0-9a-f]{6})$/i.exec((hex || "").trim()); if (!m) return "#ffffff";
+  const lin = i => { const v = parseInt(m[1].slice(i, i + 2), 16) / 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; };
+  return 0.2126 * lin(0) + 0.7152 * lin(2) + 0.0722 * lin(4) > 0.36 ? "#0b1226" : "#ffffff";
+}
+// a value and its 95 % interval on a scale from 0 to max: the interval a band, the value a ringed dot
+function ciGlyph(est, lo, hi, max, colour) {
+  const f = v => 100 * Math.max(0, Math.min(1, v / max)), P = v => `${f(v).toFixed(2)}%`;
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("role", "img"); svg.setAttribute("aria-label", `${fmt(est, 3)}, 95 % interval ${fmt(lo, 3)} to ${fmt(hi, 3)}`);
+  svg.innerHTML = `<line x1="0" y1="7" x2="100%" y2="7" style="stroke: var(--line-2); stroke-width: 1"/>` +
+    (Number.isFinite(lo) && Number.isFinite(hi) ? `<rect x="${P(lo)}" y="3.5" width="${Math.max(0, f(hi) - f(lo)).toFixed(2)}%" height="7" rx="3.5" style="fill: ${colour}; opacity: 0.28"/>` : "") +
+    `<circle cx="${P(est)}" cy="7" r="4.5" style="fill: ${colour}; stroke: var(--input); stroke-width: 2"/>`;
+  return svg;
+}
+
+function ovRender(host, o) {
+  host.replaceChildren();
+  if (!o) return;
+  host.append(el("div", { class: `ov-head ${o.level}` }, el("span", { class: "ic", "aria-hidden": "true" }, OV_ICON[o.level] || "·"), el("span", {}, o.head)));
+  if (o.sub) host.append(el("div", { class: "ov-sub" }, o.sub));
+  if (o.meter) {
+    const m = o.meter, fill = el("div", { class: `ov-fill ${o.level === "good" ? "" : o.level}`, style: "width:0%" });
+    host.append(el("div", { class: "ov-meter", role: "img", "aria-label": `${m.title}: ${m.label}` },
+      el("div", { class: "lbl" }, el("span", {}, m.title), el("b", {}, m.label)),
+      el("div", { class: "ov-track" }, fill, el("div", { class: "ov-zone", style: "left:25%" }), el("div", { class: "ov-zone", style: "left:75%" })),
+      el("div", { class: "ov-scale" }, el("span", {}, "nearly even"), el("span", {}, "moderately patchy"), el("span", {}, "strongly"))));
+    requestAnimationFrame(() => { fill.style.width = `${Math.max(1.2, 100 * Math.min(1, m.share))}%`; });
+  }
+  host.append(el("div", { class: "ov-tiles" }, ...o.tiles.map(t => el("div", { class: "ov-tile" },
+    el("div", { class: "k" }, t.k), el("div", { class: "v" }, t.v), t.ci ? ciGlyph(...t.ci, T.viz1) : "", el("div", { class: "s" }, t.s)))));
+  if (o.split && o.split.some(q => q.share > 0)) {
+    const parts = o.split.filter(q => q.share > 0), width = Math.max(100, host.clientWidth - 24 - 2 * (parts.length - 1));
+    const segs = parts.map(q => el("span", { style: `flex-grow:0.0001; background:${q.colour}; color:${inkOn(q.colour)}`, title: `${q.name}: ${pct(q.share)} of the variance` },
+      q.share * width >= 48 ? pct(q.share) : ""));
+    host.append(el("div", { class: "ov-h" }, o.splitTitle),
+      el("div", { class: "ov-bar", role: "img", "aria-label": `${o.splitTitle}: ${parts.map(q => `${q.name} ${pct(q.share)}`).join(", ")}` }, ...segs),
+      el("div", { class: "ov-legend" }, ...parts.map(q => el("span", {}, el("span", { class: "sw", style: `background:${q.colour}` }), `${q.name} · ${pct(q.share)}`))));
+    requestAnimationFrame(() => segs.forEach((s, i) => { s.style.flexGrow = String(parts[i].share); }));
+  }
+  for (const pl of o.plots || []) {
+    const box = el("div", { class: "ov-plot", style: pl.height ? `height:${pl.height}px` : "" }, el("canvas"), el("div", { class: "ov-tip" }));
+    host.append(el("div", { class: "ov-h" }, pl.title), box);
+    if (pl.legend) host.append(el("div", { class: "ov-legend" }, ...pl.legend.map(([c, n, kind]) => el("span", {}, el("span", { class: "sw", style: kind === "line" ? `background:${c}; height:3px; border-radius:2px; vertical-align:3px` : `background:${c}` }), n))));
+    // drawn once laid out, and again whenever the box changes width (a narrower window, a panel opened)
+    let lastW = -1;
+    new ResizeObserver(() => { const w = box.clientWidth; if (w && w !== lastW) { lastW = w; pl.draw(box); } }).observe(box);
+  }
+}
+
+// Histogram of values with smooth curves over it (densities scaled to counts), a shaded lower tail under
+// one of them and labelled vertical lines; a tooltip per bin.
+function drawDistPlot(host, { values, curves = [], tail = null, lines = [], xlabel = "", unit = "particles" }) {
+  const v = Float64Array.from(values).filter(Number.isFinite).sort(); if (v.length < 5) return;
+  let lo = quantileSorted(v, 0.005), hi = quantileSorted(v, 0.995);
+  for (const ln of lines) if (Number.isFinite(ln.x)) { lo = Math.min(lo, ln.x); hi = Math.max(hi, ln.x); }
+  const pad = 0.04 * (hi - lo || 1); lo -= pad; hi += pad;
+  const iqr = quantileSorted(v, 0.75) - quantileSorted(v, 0.25), fd = 2 * iqr / Math.cbrt(v.length);
+  const nb = Math.max(12, Math.min(48, Math.round((hi - lo) / (fd || (hi - lo) / 24)))), bw = (hi - lo) / nb, cnt = new Float64Array(nb);
+  for (const x of v) { const b = Math.floor((x - lo) / bw); if (b >= 0 && b < nb) cnt[b]++; }
+  const xs = Array.from({ length: 160 }, (_, i) => lo + (i + 0.5) * (hi - lo) / 160);
+  const cur = curves.map(c => ({ ...c, y: xs.map(x => c.f(x) * v.length * bw) }));
+  const ymax = Math.max(...cnt, ...cur.flatMap(c => c.y)) * 1.12 || 1;
+  const ax = pfAxes(host, [lo, hi], [0, ymax], { xlabel, ylabel: unit }); if (!ax) return;
+  const { ctx, X, Y } = ax;
+  // the bars: neutral, since the curves carry the meaning; 2 px of surface between them
+  ctx.fillStyle = T.label; ctx.globalAlpha = 0.3;
+  for (let b = 0; b < nb; b++) {
+    if (!cnt[b]) continue;
+    const x0 = X(lo + b * bw) + 1, x1 = X(lo + (b + 1) * bw) - 1, y0 = Y(cnt[b]), r = Math.min(2, (x1 - x0) / 2);
+    ctx.beginPath(); ctx.moveTo(x0, Y(0)); ctx.lineTo(x0, y0 + r); ctx.quadraticCurveTo(x0, y0, x0 + r, y0); ctx.lineTo(x1 - r, y0); ctx.quadraticCurveTo(x1, y0, x1, y0 + r); ctx.lineTo(x1, Y(0)); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  // the shaded tail under its curve, then the curves (a wash under the main one)
+  if (tail) {
+    const c = cur.find(q => q.name === tail.curve);
+    if (c) {
+      ctx.beginPath(); ctx.moveTo(X(xs[0]), Y(0));
+      xs.forEach((x, i) => { if (x <= tail.x) ctx.lineTo(X(x), Y(c.y[i])); });
+      ctx.lineTo(X(Math.min(tail.x, xs[xs.length - 1])), Y(0)); ctx.closePath();
+      ctx.fillStyle = tail.colour; ctx.globalAlpha = 0.3; ctx.fill(); ctx.globalAlpha = 1;
+    }
+  }
+  for (const c of cur) {
+    if (c.wash) { ctx.beginPath(); ctx.moveTo(X(xs[0]), Y(0)); xs.forEach((x, i) => ctx.lineTo(X(x), Y(c.y[i]))); ctx.lineTo(X(xs[xs.length - 1]), Y(0)); ctx.closePath(); ctx.fillStyle = c.colour; ctx.globalAlpha = 0.1; ctx.fill(); ctx.globalAlpha = 1; }
+    ctx.beginPath(); xs.forEach((x, i) => (i ? ctx.lineTo(X(x), Y(c.y[i])) : ctx.moveTo(X(x), Y(c.y[i]))));
+    ctx.strokeStyle = c.colour; ctx.lineWidth = 2; ctx.lineJoin = "round"; ctx.lineCap = "round"; ctx.stroke();
+  }
+  // labelled lines, the labels in text colour on a small surface backing
+  ctx.font = font(10.5); ctx.textBaseline = "top";
+  lines.forEach((ln, k) => {
+    if (!Number.isFinite(ln.x)) return;
+    const x = X(ln.x); ctx.strokeStyle = ln.colour; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(x, ax.Tp); ctx.lineTo(x, Y(0)); ctx.stroke();
+    const w = ctx.measureText(ln.label).width, right = x + 4 + w < ax.W - ax.R, tx = right ? x + 4 : x - 4 - w, ty = ax.Tp + 2 + 14 * k;
+    ctx.fillStyle = T.paper; ctx.globalAlpha = 0.85; ctx.fillRect(tx - 2, ty - 1, w + 4, 13); ctx.globalAlpha = 1;
+    ctx.fillStyle = T.ink; ctx.textAlign = "left"; ctx.fillText(ln.label, tx, ty);
+  });
+  // a tooltip per bin
+  const tip = host.querySelector(".ov-tip"), cv = host.querySelector("canvas");
+  cv.onmousemove = e => {
+    const r = cv.getBoundingClientRect(), mx = e.clientX - r.left, b = Math.floor(((mx - ax.L) / (ax.W - ax.L - ax.R)) * nb);
+    if (b < 0 || b >= nb) { tip.style.display = "none"; return; }
+    tip.textContent = `${fmt(lo + b * bw, 3)} to ${fmt(lo + (b + 1) * bw, 3)}: ${fmt(cnt[b])} ${unit} (${pct(cnt[b] / v.length)})`;
+    tip.style.left = `${Math.min(Math.max(mx, 70), ax.W - 70)}px`; tip.style.top = `${Y(cnt[b])}px`; tip.style.display = "block";
+  };
+  cv.onmouseleave = () => { tip.style.display = "none"; };
+}
+
+// One row per particle: its within-particle CV with its 95 % interval, patchy ones (p < 0.05) apart
+function drawPartStrip(host, rows) {
+  const max = Math.max(0.05, ...rows.map(r => (Number.isFinite(r.hi) ? r.hi : r.est))) * 1.08;
+  const ax = pfAxes(host, [0, 100 * max], [0, rows.length], { xlabel: "Within-particle CV (%), noise taken out", yticks: false }); if (!ax) return;
+  const { ctx, X, Y } = ax;
+  ctx.font = font(11); ctx.textBaseline = "middle"; ctx.textAlign = "right";
+  rows.forEach((r, i) => {
+    const y = Y(rows.length - i - 0.5), c = r.patchy ? T.viz2 : T.viz1;
+    ctx.fillStyle = T.ink; ctx.fillText(`#${r.id}`, ax.L - 6, y);
+    if (Number.isFinite(r.lo) && Number.isFinite(r.hi)) { ctx.strokeStyle = c; ctx.lineWidth = 2; ctx.lineCap = "round"; ctx.beginPath(); ctx.moveTo(X(100 * r.lo), y); ctx.lineTo(X(100 * r.hi), y); ctx.stroke(); }
+    ctx.beginPath(); ctx.arc(X(100 * r.est), y, 4.5, 0, 2 * Math.PI); ctx.fillStyle = c; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = T.paper; ctx.stroke();
+  });
+  const tip = host.querySelector(".ov-tip"), cv = host.querySelector("canvas");
+  cv.onmousemove = e => {
+    const rr = cv.getBoundingClientRect(), my = e.clientY - rr.top, i = rows.length - 1 - Math.floor((Y(0) - my) / ((Y(0) - Y(rows.length)) / rows.length));
+    const r = rows[i]; if (!r) { tip.style.display = "none"; return; }
+    tip.textContent = `particle ${r.id}: CV ${pct(r.est)} (${pct(r.lo)}–${pct(r.hi)}) · ${r.patchy ? "patchy" : "even within the noise"} · ${fmt(r.n)} pixels`;
+    tip.style.left = `${Math.min(Math.max(X(100 * r.est), 120), ax.W - 120)}px`; tip.style.top = `${Y(rows.length - i - 0.5) - 6}px`; tip.style.display = "block";
+  };
+  cv.onmouseleave = () => { tip.style.display = "none"; };
+}
+
+// the notes of a verdict folded away: the overview carries its headline
+function foldNotes(box) {
+  const notes = [...box.children].filter(c => c.tagName === "P");
+  box.className = "verdict";
+  box.replaceChildren(...(notes.length ? [el("details", { class: "ov-more" }, el("summary", {}, `What this means · ${notes.length} note${notes.length > 1 ? "s" : ""}`), ...notes)] : []));
+}
+const npdfAt = (x, m, s) => Math.exp(-0.5 * ((x - m) / s) ** 2) / (s * Math.sqrt(2 * Math.PI));
+
 function renderCoating(A, card) {
   const C = A.coat, box = $("#pf-verdict");
   if (!C) {
-    box.className = "verdict"; box.textContent = "";
+    box.className = "verdict"; box.textContent = ""; $("#pf-ov").replaceChildren();
     $("#pf-coat-cards").replaceChildren(); $("#pf-more-cards").replaceChildren(); $("#pf-more-cards-h").textContent = "";
     $("#pf-coat-note").textContent = A.Q.length < 10 ? "Too few quantified particles to judge the coating." : "Choose a coating band other than G.";
     return;
@@ -3391,6 +3569,33 @@ function renderCoating(A, card) {
     });
     const dirs = [1, 2, 3].filter(k => M.holm[k] < 0.05).map(k => `${["larger", "more convex", "more elongated"][k - 1]} particles carry ${M.beta[k] > 0 ? "more" : "less"}`);
     box.append(el("p", {}, dirs.length ? `Against morphology, ${dirs.join(", and ")} coating index, each with the other two held (Holm-adjusted p < 0.05; R² ${fmt(M.r2, 2)}).` : `The coating index does not follow particle size, convexity or elongation once the three are taken together (no Holm-adjusted p < 0.05; R² ${fmt(M.r2, 2)}).`));
+  }
+  // the overview at the top, and the verdict's notes folded under it
+  {
+    const noise2 = H.noise ** 2, real2 = H.tau ** 2, drift2 = C.drift ? Math.max(0, C.raw.sd ** 2 - H.sd ** 2) : 0, tot = noise2 + real2 + drift2;
+    const trueCurve = Tn && Tn.tau > 1e-9 ? (Tn.log ? (x => (x > 0 ? npdfAt(Math.log(x), Math.log(Tn.mu), Tn.tau) / x : 0)) : (x => npdfAt(x, Tn.mu, Tn.tau))) : null;
+    const sRs = C.sR.filter(e => e > 0), noiseCurve = x => { let s = 0; for (const e of sRs) s += npdfAt(x, H.mu, e); return s / sRs.length; };
+    const hiCI = H.tauHi / H.mu;
+    ovRender($("#pf-ov"), {
+      level, head, sub: body,
+      meter: { share: H.p >= 0.05 ? 0 : H.I2, title: "Real share of the spread between particles (I²)", label: H.p >= 0.05 ? `${pct(H.I2)} · within the noise` : pct(H.I2) },
+      tiles: [
+        { k: `Mean ${b}/G`, v: fmt(H.mu, 3), s: `${fmt(C.n)} particles · median ${fmt(median(C.use), 3)}` },
+        { k: "Spread (CV)", v: pct(cv), ci: [cv, H.tauLo / H.mu, hiCI, Math.max(0.2, 1.3 * hiCI)], s: `particle to particle · 95 % CI ${pct(H.tauLo / H.mu)}–${pct(hiCI)}` },
+        Tn ? { k: "Thinnest 5 %", v: `≤ ${fmt(Tn.value, 3)}`, ci: [Tn.value, Tn.ci[0], Tn.ci[1], 1.6 * H.mu],
+               s: bl ? `${pct(bl.share)} below ${fmt(L, 3)} · Cpk ${fmt(bl.cpk, 2)}` : `95 % CI ${fmt(Tn.ci[0], 3)}–${fmt(Tn.ci[1], 3)}` }
+           : { k: `${b} detected`, v: pct(C.nC / C.n), s: `${fmt(C.nC)} of ${fmt(C.n)} particles` }],
+      splitTitle: "Where the spread between particles comes from (share of the variance)",
+      split: [{ name: "measurement noise", share: noise2 / tot, colour: T.muted }, { name: "real, between particles", share: real2 / tot, colour: T.viz1 },
+              ...(drift2 > 0 ? [{ name: "drift along the order, removed", share: drift2 / tot, colour: T.viz2 }] : [])],
+      plots: [{ title: `${b}/G over the particles`,
+        draw: h => drawDistPlot(h, { values: C.use, xlabel: `${b}/G${C.drift ? ", drift removed" : ""}`, unit: "particles",
+          curves: [{ name: "noise", f: noiseCurve, colour: T.muted }, ...(trueCurve ? [{ name: "true", f: trueCurve, colour: T.viz1, wash: true }] : [])],
+          tail: trueCurve ? { curve: "true", x: Tn.value, colour: T.warn } : null,
+          lines: [...(Tn ? [{ x: Tn.value, colour: T.warn, label: "thinnest 5 %" }] : []), ...(Number.isFinite(L) ? [{ x: L, colour: T.bad, label: `limit ${fmt(L, 3)}` }] : [])] }),
+        legend: [[T.label, "measured", "box"], [T.muted, "noise alone (one coating for all)", "line"], ...(trueCurve ? [[T.viz1, "true values, noise taken out", "line"]] : []), ...(Tn ? [[T.warn, "thinnest 5 %", "box"]] : [])] }],
+    });
+    foldNotes(box);
   }
   $("#pf-morph-note").textContent = M ? `Least squares of ${b}/G (drift removed) on the three together, each scaled to its standard deviation (diameter on a log scale), with heteroscedasticity-robust (HC3) errors, t p-values on ${M.df} df and Holm's adjustment over the three. Particles that cluster on the slide (Moran's I above) are not independent, which this does not allow for. Thinnest particles: the particles' true values modelled as ${Tn && Tn.log ? "lognormal" : "normal"} about a mean with each particle's error taken out (Paule-Mandel), intervals from 400 resamples of the particles; the equivalent Cpk is z(1 − share below the limit) / 3.` : "";
 
