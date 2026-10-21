@@ -664,3 +664,21 @@ export function blockShuffle(img, ok, nx, ny, b = 8, seed = 5) {
   });
   return { img: v, ok: m, nx: W, ny: Hh };
 }
+
+// Points counted on a grid of pointy-top hexagons of size s (centre to corner), in
+// the points' own units: [{ x, y, n }], each hexagon's centre and its count. A
+// density for scatter plots too crowded for one dot per point.
+export function hexBins(xs, ys, s) {
+  const cells = new Map(), r3 = Math.sqrt(3);
+  for (let i = 0; i < xs.length; i++) {
+    const x = xs[i], y = ys[i]; if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+    // axial coordinates, rounded through cube coordinates to the nearest hexagon
+    const qf = (r3 / 3 * x - y / 3) / s, rf = (2 / 3 * y) / s, sf = -qf - rf;
+    let q = Math.round(qf), r = Math.round(rf); const t = Math.round(sf);
+    const dq = Math.abs(q - qf), dr = Math.abs(r - rf), dt = Math.abs(t - sf);
+    if (dq > dr && dq > dt) q = -r - t; else if (dr > dt) r = -q - t;
+    const key = q * 100003 + r, c = cells.get(key);
+    if (c) c.n++; else cells.set(key, { x: s * r3 * (q + r / 2), y: s * 1.5 * r, n: 1 });
+  }
+  return [...cells.values()];
+}

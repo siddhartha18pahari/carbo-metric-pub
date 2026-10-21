@@ -401,3 +401,20 @@ test("floor and threshold together: the reference's scatter at the brightness of
   assert.equal(floorWithReference(G, r, 0.011, 1, 2, 0.95), null); // a coating barely above uncoated is never found
 });
 
+import { hexBins } from "../../web/js/pf-analysis.js";
+
+test("hexagon bins: every point counted once, in the hexagon whose centre is nearest", () => {
+  const R = rng(6), xs = [], ys = [];
+  for (let i = 0; i < 3000; i++) { xs.push(R() * 100); ys.push(R() * 60); }
+  const s = 4, cells = hexBins(xs, ys, s);
+  assert.equal(cells.reduce((t, c) => t + c.n, 0), 3000);
+  // each point lies within its hexagon: no centre is nearer than the one it was counted in
+  for (let i = 0; i < 300; i++) {
+    const d = cells.map(c => Math.hypot(c.x - xs[i], c.y - ys[i])), best = Math.min(...d);
+    assert.ok(best <= s + 1e-9, `point ${i} is ${best} from the nearest centre`);
+  }
+  // a uniform cloud fills its hexagons evenly: about 3000 / (6000 / (2.598 s²)) points each
+  const counts = cells.filter(c => c.x > 8 && c.x < 92 && c.y > 8 && c.y < 52).map(c => c.n);
+  near(counts.reduce((t, v) => t + v, 0) / counts.length, 3000 / (6000 / (1.5 * Math.sqrt(3) * s * s)), 4);
+  assert.deepEqual(hexBins([1, NaN], [1, 2], 2).map(c => c.n), [1]);
+});
