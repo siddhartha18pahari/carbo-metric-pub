@@ -1211,3 +1211,183 @@ export function groupGap(d, labels, { nPerm = 4999, seed = 7 } = {}) {
   const groupings = Math.round(Math.exp(lf(m) - sizes.reduce((t, s) => t + lf(s), 0) - Object.values(bySize).reduce((t, c) => t + lf(c), 0)));
   return { ...obs, p: (ge + 1) / (nPerm + 1), groupings, pMin: 1 / groupings };
 }
+
+// --------------------------------------------------------------------------
+// The thinnest particles, coverage without a threshold, coating against morphology, power
+// --------------------------------------------------------------------------
+
+// Student's t: the two-sided tail P(|T| > t), and the quantile
+export function tTail2(t, df) { return betaInc(df / (df + t * t), df / 2, 0.5); }
+export function tQuantile(p, df) {
+  if (p < 0.5) return -tQuantile(1 - p, df);
+  if (!(df > 0)) return NaN;
+  const cdf = t => 1 - tTail2(t, df) / 2;
+  let lo = 0, hi = 1; while (cdf(hi) < p && hi < 1e6) hi *= 2;
+  for (let i = 0; i < 100; i++) { const m = 0.5 * (lo + hi); if (cdf(m) < p) lo = m; else hi = m; }
+  return 0.5 * (lo + hi);
+}
+
+// the Paule-Mandel random-effects fit alone (mean, true spread, error of the mean), for resampling
+function pmFit(y, se) {
+  const n = y.length; if (n < 3) return null;
+  const Qat = t2 => { let sw = 0, swy = 0; for (let i = 0; i < n; i++) { const w = 1 / (se[i] * se[i] + t2); sw += w; swy += w * y[i]; } const mu = swy / sw; let Q = 0; for (let i = 0; i < n; i++) Q += (y[i] - mu) ** 2 / (se[i] * se[i] + t2); return { Q, mu, sw }; };
+  let m0 = 0; for (const v of y) m0 += v / n; let vy = 0; for (const v of y) vy += (v - m0) ** 2;
+  const tau2 = solveTau2(t2 => Qat(t2).Q, n - 1, 10 * vy / n), r = Qat(tau2);
+  return { mu: r.mu, tau: Math.sqrt(tau2), seMu: Math.sqrt(1 / r.sw) };
+}
+
+// The thinnest particles: the particles' true coating index modelled as normal (or lognormal, on the
+// log scale) about a mean, with each particle's own error taken out (random effects). Gives the qth
+// quantile of the true values with a bootstrap interval over particles, a 95 % prediction interval for
+// the next particle (Higgins et al. 2009), and, for a lower limit L, the share of particles below it and
+// the equivalent Cpk, z(1 - share) / 3 ((mean - L) / 3 tau for a normal), each with its interval.
+export function thinTail(y0, se0, { q = 0.05, B = 400, seed = 23, log = false } = {}) {
+  const idx = []; for (let i = 0; i < y0.length; i++) if (Number.isFinite(y0[i]) && se0[i] > 0 && (!log || y0[i] > 0)) idx.push(i);
+  const y = idx.map(i => (log ? Math.log(y0[i]) : y0[i])), se = idx.map(i => (log ? se0[i] / y0[i] : se0[i]));
+  const F = pmFit(y, se); if (!F) return null;
+  const k = y.length, z = normInv(q), back = v => (log ? Math.exp(v) : v), to = v => (log ? Math.log(v) : v);
+  const R = rng(seed), draws = [];
+  for (let b = 0; b < B; b++) {
+    const yy = new Array(k), ss = new Array(k);
+    for (let i = 0; i < k; i++) { const j = Math.floor(R() * k); yy[i] = y[j]; ss[i] = se[j]; }
+    const f = pmFit(yy, ss); if (f) draws.push(f);
+  }
+  const ci = vals => { const s = Float64Array.from(vals).filter(Number.isFinite).sort(); return [quantileSorted(s, 0.025), quantileSorted(s, 0.975)]; };
+  const qd = draws.map(f => f.mu + z * f.tau), tq = tQuantile(0.975, Math.max(1, k - 2)), h = tq * Math.sqrt(F.tau * F.tau + F.seMu * F.seMu);
+  const share = (f, L) => (f.tau > 0 ? normCdf((to(L) - f.mu) / f.tau) : (to(L) > f.mu ? 1 : 0));
+  return { n: k, log, q, mu: back(F.mu), tau: F.tau, value: back(F.mu + z * F.tau), ci: ci(qd).map(back), pred: [back(F.mu - h), back(F.mu + h)],
+           below: L => { const s = share(F, L), c = ci(draws.map(f => share(f, L))); return { share: s, ci: c, cpk: -normInv(Math.min(Math.max(s, 1e-12), 1 - 1e-12)) / 3, cpkCI: [-normInv(Math.min(Math.max(c[1], 1e-12), 1 - 1e-12)) / 3, -normInv(Math.min(Math.max(c[0], 1e-12), 1 - 1e-12)) / 3] }; } };
+}
+
+// one normal component with known per-value errors, weighted by w: the maximum-likelihood mean and true
+// variance (the iterative solution of the random-effects likelihood, a few steps from the last values)
+function mlComponent(y, se, w, m, t2, steps = 3) {
+  for (let s = 0; s < steps; s++) {
+    let a = 0, b = 0; for (let i = 0; i < y.length; i++) { const c = w[i] / (t2 + se[i] * se[i]); a += c; b += c * y[i]; }
+    if (!(a > 0)) return { m, t2 };
+    m = b / a;
+    let num = 0, den = 0; for (let i = 0; i < y.length; i++) { const v = t2 + se[i] * se[i], c = w[i] / (v * v); num += c * ((y[i] - m) ** 2 - se[i] * se[i]); den += c; }
+    t2 = Math.max(0, num / den);
+  }
+  return { m, t2 };
+}
+const npdf = (x, m, v) => Math.exp(-0.5 * (x - m) ** 2 / v) / Math.sqrt(2 * Math.PI * v);
+
+// Coverage without a threshold: the particles as a mixture of an uncoated and a coated population, each
+// particle observed with its own error. With an uncoated reference (its values, noise included), the
+// uncoated population is the reference's own distribution (a kernel density) and only the coated one,
+// normal about a mean, is fitted; without one, both are normal and free, and two populations are claimed
+// only when the BIC prefers them and they separate (Ashman's D above 2). A right-skewed coated population
+// would split into a bulk and a tail and pass for two, so every model is fitted twice, on the index and
+// on asinh(index / c) (c the median error: linear near the noise, where uncoated particles lie, and
+// logarithmic above it), and the scale whose best model has the lower BIC is kept, its likelihood carried
+// back to the index's scale by the Jacobian. The uncoated share has a bootstrap interval over particles;
+// with a reference, a likelihood-ratio test against no uncoated particles (half a chi-square on 1 df).
+export function mixtureCoverage(y0, se0, { ref = null, iters = 400, B = 200, seed = 29 } = {}) {
+  const idx = []; for (let i = 0; i < y0.length; i++) if (Number.isFinite(y0[i]) && se0[i] > 0) idx.push(i);
+  const n = idx.length; if (n < 20) return null;
+  const raw = idx.map(i => y0[i]), rawSe = idx.map(i => se0[i]), c = median(rawSe), ln = Math.log(n);
+  const refRaw = ref ? Array.from(ref).filter(Number.isFinite) : null; if (ref && refRaw.length < 30) return null;
+  const onScale = asinh => {
+    const T = v => (asinh ? Math.asinh(v / c) : v), inv = v => (asinh ? c * Math.sinh(v) : v);
+    const y = raw.map(T), se = rawSe.map((s, k) => (asinh ? s / Math.sqrt(c * c + raw[k] * raw[k]) : s));
+    // log |dT/dy| summed: what turns a likelihood on this scale into one on the index's
+    const jac = asinh ? raw.reduce((t, v) => t - 0.5 * Math.log(c * c + v * v), 0) : 0;
+    const back = (m, t2) => ({ m: inv(m), tau: asinh ? Math.sqrt(t2) * Math.sqrt(c * c + inv(m) ** 2) : Math.sqrt(t2) });
+    const sorted = Float64Array.from(y).sort(), q = p => quantileSorted(sorted, p);
+    // the coated population alone
+    const one = mlComponent(y, se, new Array(n).fill(1), q(0.5), robustSD(y) ** 2, 200);
+    let ll1 = 0; for (let i = 0; i < n; i++) ll1 += Math.log(Math.max(npdf(y[i], one.m, one.t2 + se[i] * se[i]), 1e-300));
+    if (refRaw) {
+      const r = Float64Array.from(refRaw, T).sort();
+      const sd = Math.min(robustSD(r), (quantileSorted(r, 0.75) - quantileSorted(r, 0.25)) / 1.349) || robustSD(r), h = 0.9 * sd * r.length ** -0.2;
+      const kde = v => { let s = 0; for (const x of r) { const u = (v - x) / h; if (u * u < 50) s += Math.exp(-0.5 * u * u); } return s / (r.length * h * Math.sqrt(2 * Math.PI)); };
+      const f0all = y.map(kde);
+      const fit = (yy, ss, f0, start) => {
+        let pi = start ? start.pi : 0.1, m = start ? start.m : q(0.5), t2 = start ? start.t2 : robustSD(yy) ** 2; const w = new Float64Array(yy.length);
+        for (let it = 0; it < iters; it++) {
+          let sp = 0; for (let i = 0; i < yy.length; i++) { const a = pi * f0[i], b = (1 - pi) * npdf(yy[i], m, t2 + ss[i] * ss[i]); w[i] = a + b > 0 ? a / (a + b) : 0; sp += w[i]; }
+          pi = sp / yy.length; ({ m, t2 } = mlComponent(yy, ss, w.map(v => 1 - v), m, t2, 2));
+        }
+        let ll = 0; for (let i = 0; i < yy.length; i++) ll += Math.log(Math.max(pi * f0[i] + (1 - pi) * npdf(yy[i], m, t2 + ss[i] * ss[i]), 1e-300));
+        return { pi, m, t2, ll };
+      };
+      const F = fit(y, se, f0all);
+      return { asinh, bic: -2 * (F.ll + jac) + 3 * ln, F, ll1,
+        finish: () => {
+          const LR = Math.max(0, 2 * (F.ll - ll1)), R = rng(seed), pis = [];
+          for (let b = 0; b < B; b++) { const pick = Array.from({ length: n }, () => Math.floor(R() * n)); pis.push(fit(pick.map(j => y[j]), pick.map(j => se[j]), pick.map(j => f0all[j]), F).pi); }
+          const s = Float64Array.from(pis).sort();
+          return { mode: "reference", n, scale: asinh ? "asinh" : "linear", uncoated: F.pi, ci: [quantileSorted(s, 0.025), quantileSorted(s, 0.975)], coated: back(F.m, F.t2), LR, p: LR > 0 ? 0.5 * gammaQ(0.5, LR / 2) : 1, refN: r.length };
+        } };
+    }
+    // both populations free
+    const fit2 = (yy, ss, start) => {
+      let pi = start.pi, c0 = { m: start.m0, t2: start.t0 }, c1 = { m: start.m1, t2: start.t1 }; const w = new Float64Array(yy.length);
+      for (let it = 0; it < iters; it++) {
+        let sp = 0; for (let i = 0; i < yy.length; i++) { const a = pi * npdf(yy[i], c0.m, c0.t2 + ss[i] * ss[i]), b = (1 - pi) * npdf(yy[i], c1.m, c1.t2 + ss[i] * ss[i]); w[i] = a + b > 0 ? a / (a + b) : 0.5; sp += w[i]; }
+        pi = sp / yy.length; if (pi < 1e-6 || pi > 1 - 1e-6) break;
+        c0 = mlComponent(yy, ss, w, c0.m, c0.t2, 2); c1 = mlComponent(yy, ss, w.map(v => 1 - v), c1.m, c1.t2, 2);
+      }
+      let ll = 0; for (let i = 0; i < yy.length; i++) ll += Math.log(Math.max(pi * npdf(yy[i], c0.m, c0.t2 + ss[i] * ss[i]) + (1 - pi) * npdf(yy[i], c1.m, c1.t2 + ss[i] * ss[i]), 1e-300));
+      return c0.m <= c1.m ? { pi, lo: c0, hi: c1, ll } : { pi: 1 - pi, lo: c1, hi: c0, ll };     // the lower population first
+    };
+    const v = robustSD(y) ** 2 / 4, starts = [{ pi: 0.3, m0: q(0.1), t0: v, m1: q(0.75), t1: v }, { pi: 0.1, m0: q(0.02), t0: v / 4, m1: q(0.6), t1: v }, { pi: 0.5, m0: q(0.25), t0: v, m1: q(0.9), t1: v }];
+    const F = starts.map(s => fit2(y, se, s)).reduce((a, b) => (b.ll > a.ll ? b : a));
+    const bic1 = -2 * (ll1 + jac) + 2 * ln, bic2 = -2 * (F.ll + jac) + 5 * ln;
+    const D = Math.abs(F.hi.m - F.lo.m) / Math.sqrt((F.lo.t2 + F.hi.t2) / 2 + median(se.map(s => s * s)));
+    const two = bic2 < bic1 && D > 2 && F.pi > 0.005 && F.pi < 0.995;
+    return { asinh, bic: Math.min(bic1, bic2), F, bic1, bic2, D, two,
+      finish: () => {
+        const out = { mode: "free", n, scale: asinh ? "asinh" : "linear", two, D, bic1, bic2, uncoated: two ? F.pi : 0, lo: back(F.lo.m, F.lo.t2), hi: back(F.hi.m, F.hi.t2), one: back(one.m, one.t2) };
+        if (two) {
+          const R = rng(seed), pis = [];
+          for (let b = 0; b < B; b++) { const pick = Array.from({ length: n }, () => Math.floor(R() * n)); pis.push(fit2(pick.map(j => y[j]), pick.map(j => se[j]), { pi: F.pi, m0: F.lo.m, t0: F.lo.t2, m1: F.hi.m, t1: F.hi.t2 }).pi); }
+          const s = Float64Array.from(pis).sort(); out.ci = [quantileSorted(s, 0.025), quantileSorted(s, 0.975)];
+        }
+        return out;
+      } };
+  };
+  const lin = onScale(false), as = onScale(true);
+  return (as.bic < lin.bic ? as : lin).finish();
+}
+
+// Ordinary least squares with heteroscedasticity-robust (HC3) errors: X holds the predictors by column,
+// an intercept is added. Coefficients, errors, two-sided t p-values on n - p df, Holm-adjusted p-values
+// (the intercept left out of the adjustment) and R².
+export function olsHC3(X, y) {
+  const n = y.length, p = X.length + 1, row = i => [1, ...X.map(c => c[i])];
+  const XtX = new Float64Array(p * p), Xty = new Float64Array(p);
+  for (let i = 0; i < n; i++) { const r = row(i); for (let a = 0; a < p; a++) { Xty[a] += r[a] * y[i]; for (let b = 0; b < p; b++) XtX[a * p + b] += r[a] * r[b]; } }
+  const inv = pinvSym(XtX, p), beta = new Float64Array(p);
+  for (let a = 0; a < p; a++) for (let b = 0; b < p; b++) beta[a] += inv[a * p + b] * Xty[b];
+  const meat = new Float64Array(p * p); let sse = 0, my = 0; for (const v of y) my += v / n; let sst = 0;
+  for (let i = 0; i < n; i++) {
+    const r = row(i); let fit = 0; for (let a = 0; a < p; a++) fit += r[a] * beta[a];
+    const e = y[i] - fit; sse += e * e; sst += (y[i] - my) ** 2;
+    let h = 0; for (let a = 0; a < p; a++) for (let b = 0; b < p; b++) h += r[a] * inv[a * p + b] * r[b];
+    const w = (e / (1 - Math.min(h, 0.999))) ** 2;
+    for (let a = 0; a < p; a++) for (let b = 0; b < p; b++) meat[a * p + b] += w * r[a] * r[b];
+  }
+  const cov = new Float64Array(p * p);
+  for (let a = 0; a < p; a++) for (let b = 0; b < p; b++) { let s = 0; for (let c = 0; c < p; c++) for (let d = 0; d < p; d++) s += inv[a * p + c] * meat[c * p + d] * inv[d * p + b]; cov[a * p + b] = s; }
+  const se = Array.from({ length: p }, (_, a) => Math.sqrt(cov[a * p + a])), df = n - p;
+  const pv = Array.from(beta, (b, a) => tTail2(Math.abs(b / se[a]), df));
+  // Holm: the k-th smallest of m p-values times (m - k + 1), kept non-decreasing
+  const order = pv.slice(1).map((v, i) => [v, i + 1]).sort((u, v) => u[0] - v[0]), holm = new Array(p).fill(NaN); let run = 0;
+  order.forEach(([v, a], k) => { run = Math.max(run, Math.min(1, (order.length - k) * v)); holm[a] = run; });
+  return { beta: Array.from(beta), se, p: pv, holm, df, r2: sst > 0 ? 1 - sse / sst : NaN, n };
+}
+
+// How many values per sample a two-sample comparison needs, at significance alpha (two-sided) and the
+// given power: to find a relative difference delta in the mean when the values scatter with a CV of cv,
+// 2 ((z(1 - alpha/2) + z(power)) cv / delta)²; to find a ratio of spreads, from the error of the log of
+// a variance ratio (4 / (n - 1) for two samples of n), 1 + ((z + z) / ln ratio)².
+export function nForMean(cv, delta, { alpha = 0.05, power = 0.8 } = {}) {
+  const z = normInv(1 - alpha / 2) + normInv(power);
+  return Math.ceil(2 * (z * cv / delta) ** 2);
+}
+export function nForSpread(ratio, { alpha = 0.05, power = 0.8 } = {}) {
+  const z = normInv(1 - alpha / 2) + normInv(power);
+  return Math.ceil(1 + (z / Math.log(ratio)) ** 2);
+}
