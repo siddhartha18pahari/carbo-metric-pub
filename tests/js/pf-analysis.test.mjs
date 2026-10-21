@@ -580,3 +580,43 @@ test("Gaussian smoothing over a mask ignores the pixels outside it", () => {
   const s = gaussSmooth(img, ok, nx, ny, 1);
   for (let p = 0; p < nx * ny; p++) near(s[p], 3, 1e-9);
 });
+
+import { gammaQ, kruskalWallis, brownForsythe, groupGap } from "../../web/js/pf-analysis.js";
+
+test("between-map tests match the reference values (scipy)", () => {
+  near(gammaQ(0.5, 1.6), 0.07363827012030257, 1e-10);           // chi-square, df 1
+  near(gammaQ(1, 3.75), 0.023517745856009114, 1e-10);           // df 2
+  near(gammaQ(12.5, 20), 0.029164395623152116, 1e-10);          // df 25
+  near(gammaQ(2, 0.15), 0.9898141728888165, 1e-10);             // df 4
+  const kw = kruskalWallis([[1.1, 2.5, 3.3, 4.0], [2.2, 5.1, 6.3, 7.7, 8.0], [0.5, 0.7, 1.9]]);
+  near(kw.H, 7.317948717948717, 1e-12); near(kw.p, 0.025758918586256785, 1e-10); assert.equal(kw.df, 2);
+  const bf = brownForsythe([[1, 2, 3, 4, 10], [2, 2.5, 3, 3.5, 4, 4.1], [0, 5, 10, 15]]);
+  near(bf.F, 4.761898584905661, 1e-10); near(bf.p, 0.030031299933042023, 1e-9);
+  // ties: KS-like data with repeats still gives a finite, corrected H
+  assert.ok(Number.isFinite(kruskalWallis([[1, 1, 2, 2], [2, 3, 3, 3]]).H));
+});
+
+test("group gap: replicates closer than different samples give a small p; p never below one over the groupings", () => {
+  // 3 samples x 3 replicate maps: distance 0.1 within a sample, 0.5 between samples
+  const labels = ["A", "A", "A", "B", "B", "B", "C", "C", "C"], m = labels.length;
+  const d = labels.map((a, i) => labels.map((b, j) => (i === j ? 0 : a === b ? 0.1 : 0.5)));
+  const g = groupGap(d, labels, { nPerm: 2999 });
+  near(g.within, 0.1, 1e-12); near(g.between, 0.5, 1e-12); near(g.gap, 0.4, 1e-12);
+  assert.equal(g.groupings, 280);                                // 9! / (3!^3 3!)
+  assert.ok(g.p < 0.01 && g.p >= 1 / 3000, `p ${g.p}`);
+  // two maps of each of two samples: only 3 groupings, so even a perfect separation cannot reach p < 1/3
+  const l2 = ["A", "A", "B", "B"], d2 = l2.map((a, i) => l2.map((b, j) => (i === j ? 0 : a === b ? 0.1 : 0.5)));
+  const g2 = groupGap(d2, l2, { nPerm: 999 });
+  assert.equal(g2.groupings, 3); assert.ok(g2.p > 0.25, `p ${g2.p}`);
+  // no difference: p well above 0.05
+  const R = rng(4), dn = labels.map(() => labels.map(() => 0)); for (let i = 0; i < m; i++) for (let j = i + 1; j < m; j++) dn[i][j] = dn[j][i] = 0.3 + 0.05 * R();
+  assert.ok(groupGap(dn, labels, { nPerm: 999 }).p > 0.05);
+});
+
+test("KS at the effective sample sizes: correlated pixels no longer look like a difference", () => {
+  const R = rng(14), a = [], b = [];
+  for (let i = 0; i < 2000; i++) { a.push(R()); b.push(R() * 1.03); }
+  const raw = ksTest(a, b), eff = ksTest(a, b, 120, 120);
+  near(raw.d, eff.d, 1e-15);
+  assert.ok(eff.p > raw.p);
+});

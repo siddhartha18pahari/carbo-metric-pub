@@ -844,13 +844,14 @@ export function blockBootstrap(img, sig, ok, nx, ny, { b = 8, B = 500, seed = 13
   return { est, ci, blocks: cells.length, b };
 }
 
-// Two-sample Kolmogorov-Smirnov distance with its asymptotic p-value (Stephens' correction)
-export function ksTest(a, b) {
+// Two-sample Kolmogorov-Smirnov distance with its asymptotic p-value (Stephens' correction). The p-value
+// can be taken at sizes other than the sample counts: the effective numbers of correlated pixels.
+export function ksTest(a, b, nA = NaN, nB = NaN) {
   const x = Float64Array.from(a).filter(Number.isFinite).sort(), y = Float64Array.from(b).filter(Number.isFinite).sort();
   const n = x.length, m = y.length; if (!n || !m) return { d: NaN, p: NaN };
   let i = 0, j = 0, d = 0;
   while (i < n && j < m) { const v = Math.min(x[i], y[j]); while (i < n && x[i] <= v) i++; while (j < m && y[j] <= v) j++; d = Math.max(d, Math.abs(i / n - j / m)); }
-  const en = Math.sqrt(n * m / (n + m)), lam = (en + 0.12 + 0.11 / en) * d;
+  const ea = Number.isFinite(nA) ? nA : n, eb = Number.isFinite(nB) ? nB : m, en = Math.sqrt(ea * eb / (ea + eb)), lam = (en + 0.12 + 0.11 / en) * d;
   let p = 0; for (let k = 1; k <= 100; k++) { const t = 2 * (k % 2 ? 1 : -1) * Math.exp(-2 * k * k * lam * lam); p += t; if (Math.abs(t) < 1e-10) break; }
   return { d, p: lam < 0.2 ? 1 : Math.max(0, Math.min(1, p)) };
 }
@@ -1128,4 +1129,85 @@ export function gaussSmooth(img, ok, nx, ny, sigma = 1) {
   };
   const num = pass(pass(Float64Array.from(img, (v, p) => (ok[p] ? v : 0)), true), false), den = pass(pass(Float64Array.from(ok, v => (v ? 1 : 0)), true), false);
   return Float64Array.from(num, (v, p) => (den[p] > 1e-6 ? v / den[p] : NaN));
+}
+
+// --------------------------------------------------------------------------
+// Between maps: do samples differ, with the particle (or map) as the unit?
+// --------------------------------------------------------------------------
+
+// the regularised upper incomplete gamma Q(a, x), by its series below a + 1 and its continued fraction
+// above (Numerical Recipes): the chi-square upper tail is Q(df / 2, x / 2), exact at any df
+export function gammaQ(a, x) {
+  if (!(x > 0)) return 1;
+  const lg = lnGamma(a);
+  if (x < a + 1) {
+    let sum = 1 / a, del = sum, ap = a;
+    for (let n = 0; n < 500; n++) { ap++; del *= x / ap; sum += del; if (Math.abs(del) < Math.abs(sum) * 1e-15) break; }
+    return Math.max(0, 1 - sum * Math.exp(-x + a * Math.log(x) - lg));
+  }
+  let b = x + 1 - a, c = 1e300, d = 1 / b, h = d;
+  for (let i = 1; i < 500; i++) {
+    const an = -i * (i - a); b += 2;
+    d = an * d + b; if (Math.abs(d) < 1e-300) d = 1e-300;
+    c = b + an / c; if (Math.abs(c) < 1e-300) c = 1e-300;
+    d = 1 / d; const del = d * c; h *= del;
+    if (Math.abs(del - 1) < 1e-15) break;
+  }
+  return Math.min(1, Math.exp(-x + a * Math.log(x) - lg) * h);
+}
+
+// Kruskal-Wallis H over groups of values (ranks over all of them, ties averaged and corrected), with its
+// chi-square p on groups - 1 degrees of freedom
+export function kruskalWallis(groups) {
+  const all = []; groups.forEach((g, k) => { for (const v of g) if (Number.isFinite(v)) all.push([v, k]); });
+  const N = all.length, k = groups.filter(g => g.some(Number.isFinite)).length;
+  if (k < 2 || N <= k) return null;
+  all.sort((p, q) => p[0] - q[0]);
+  const R = new Float64Array(groups.length), cnt = new Float64Array(groups.length); let ties = 0;
+  for (let i = 0; i < N;) {
+    let j = i; while (j + 1 < N && all[j + 1][0] === all[i][0]) j++;
+    const r = (i + j) / 2 + 1, t = j - i + 1; ties += t * t * t - t;
+    for (let q = i; q <= j; q++) { R[all[q][1]] += r; cnt[all[q][1]]++; }
+    i = j + 1;
+  }
+  let H = 0; for (let g = 0; g < groups.length; g++) if (cnt[g]) H += R[g] * R[g] / cnt[g];
+  H = 12 / (N * (N + 1)) * H - 3 * (N + 1);
+  const C = 1 - ties / (N * N * N - N); if (C > 0) H /= C;
+  return { H, df: k - 1, p: gammaQ((k - 1) / 2, H / 2), n: N };
+}
+
+// Brown-Forsythe test of equal spread (Levene's, about each group's median), with its F p-value
+export function brownForsythe(groups) {
+  const z = groups.map(g => { const v = Array.from(g).filter(Number.isFinite), m = median(v); return v.map(x => Math.abs(x - m)); }).filter(g => g.length);
+  const k = z.length, N = z.reduce((t, g) => t + g.length, 0); if (k < 2 || N <= k) return null;
+  const means = z.map(g => g.reduce((t, v) => t + v, 0) / g.length), all = z.reduce((t, g, i) => t + means[i] * g.length, 0) / N;
+  let between = 0, within = 0;
+  z.forEach((g, i) => { between += g.length * (means[i] - all) ** 2; for (const v of g) within += (v - means[i]) ** 2; });
+  const d1 = k - 1, d2 = N - k, F = (between / d1) / (within / d2);
+  return { F, df1: d1, df2: d2, p: within > 0 ? betaInc(d2 / (d2 + d1 * F), d2 / 2, d1 / 2) : NaN, n: N };
+}
+
+// Distances between maps against their sample labels: the mean distance between maps of different samples
+// minus the mean between maps of the same sample, and the share of relabellings (the labels shuffled over
+// the maps) that give a gap at least as large. With few maps there are few distinct relabellings, and p can
+// fall no lower than one over their number (also returned).
+export function groupGap(d, labels, { nPerm = 4999, seed = 7 } = {}) {
+  const m = labels.length;
+  const gap = lab => {
+    let s = 0, ns = 0, t = 0, nt = 0;
+    for (let i = 0; i < m; i++) for (let j = i + 1; j < m; j++) { if (lab[i] === lab[j]) { s += d[i][j]; ns++; } else { t += d[i][j]; nt++; } }
+    return ns && nt ? { gap: t / nt - s / ns, within: s / ns, between: t / nt } : null;
+  };
+  const obs = gap(labels); if (!obs) return null;
+  const R = rng(seed), lab = [...labels]; let ge = 0;
+  for (let k = 0; k < nPerm; k++) {
+    for (let i = m - 1; i > 0; i--) { const j = Math.floor(R() * (i + 1)); [lab[i], lab[j]] = [lab[j], lab[i]]; }
+    const g = gap(lab); if (g && g.gap >= obs.gap - 1e-12) ge++;
+  }
+  // distinct groupings of the maps into groups of these sizes: m! / (prod size! x prod over sizes of count!)
+  const sizes = Object.values(labels.reduce((t, l) => ({ ...t, [l]: (t[l] || 0) + 1 }), {}));
+  const lf = n => { let s = 0; for (let i = 2; i <= n; i++) s += Math.log(i); return s; };
+  const bySize = sizes.reduce((t, s) => ({ ...t, [s]: (t[s] || 0) + 1 }), {});
+  const groupings = Math.round(Math.exp(lf(m) - sizes.reduce((t, s) => t + lf(s), 0) - Object.values(bySize).reduce((t, c) => t + lf(c), 0)));
+  return { ...obs, p: (ge + 1) / (nPerm + 1), groupings, pMin: 1 / groupings };
 }

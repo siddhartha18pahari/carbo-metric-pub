@@ -15,7 +15,8 @@ import { rng, wilson, weightedQuantile, laCancado, robustScale, bestGmm, bootstr
          binomLower, certifyCount, detectionPower, signalFloor, gini, noiseGini, logCV, lognormalPreferred,
          gridMoran, effectiveN, variogram, fitVariogram, hotSpots, blockShuffle, floorWithReference, hexBins,
          boundedCoverage, lowShare, qcd, qRatio, evenness, moments, spatialPermutation, neighbourNoise, blockBootstrap,
-         ksTest, fitFreeHeights, nestedSize, robustSD, dispersion, nmf, nmfProject, fitSplats, splatScale, gaussSmooth } from "./pf-analysis.js";
+         ksTest, fitFreeHeights, nestedSize, robustSD, dispersion, nmf, nmfProject, fitSplats, splatScale, gaussSmooth,
+         kruskalWallis, brownForsythe, groupGap } from "./pf-analysis.js";
 import { T, font, setTheme, currentTheme } from "./theme.js";
 import { lut } from "./colormaps.js";
 
@@ -1580,7 +1581,7 @@ function renderParticles() {
   drawStrip();
   renderSegCoating(card);
   renderCoverage(card);
-  renderChecks(card); renderAcq(); renderAccept(card); renderXc(card);
+  renderChecks(card); renderAcq(); renderAccept(card); renderXc(card); renderBetween(card);
 }
 
 function drawStrip() {
@@ -2111,6 +2112,78 @@ function renderXc(card) {
   note.textContent = ready ? "Decomposition: non-negative matrix factorisation (hierarchical alternating least squares, Cichocki and Phan 2009) of the particle pixels' spectra, a straight baseline through 1030–1090 and 1700–1740 cm⁻¹ taken off and 1100–1700 cm⁻¹ binned to 8 cm⁻¹, into 3 components started from the mean spectra of the pixels with the lowest and highest fitted ratio and a flat one; each pixel's share is the coating-like component's part of its signal. The reference is projected on the same components, so the threshold means the same on both. " +
     "Splats: a port of the 2-D Gaussian splatting used for the coating maps (anisotropic Gaussians, Adam on the analytic gradient, amplitudes by least squares, splats added where the residual is largest), fitted to 80 % of the pixels (at most 4 000) and scored on the other 20 %; noise from neighbouring training pixels; the scale is the median splat radius weighted by amplitude and area."
     : "Find the particles and analyse the coating first.";
+}
+
+// =========================================================================
+// Between maps: whether samples differ, with the particle or the map as the unit
+// =========================================================================
+// Each map's coating analysis is kept when it is drawn (the latest per open file). Pixels of one map are
+// not independent, so samples are compared through what does not pretend they are: the shape of each map's
+// distribution against the others (a KS distance, with maps relabelled at random as the null), and the
+// particles' excess CVs; the same questions asked of pooled pixels are shown beside them, to see how far
+// counting every pixel overstates the evidence.
+const MAPSTORE = new Map();
+// a first guess at a map's sample: its name before the first underscore, less a replicate number ("-2")
+const sampleOf = name => name.split("_")[0].replace(/[-\s]+\d{1,2}$/, "").trim() || name;
+function keepMap(A) {
+  const used = A.px.groups.flat(), U = A.rows.filter(r => r.u);
+  const infl = U.length ? median(U.map(u => u.u.n / u.u.neff)) : 1;
+  const inU = U.reduce((t, r) => t + r.u.n, 0), neff = U.reduce((t, r) => t + r.u.neff, 0) + (used.length - inU) / infl;
+  const old = MAPSTORE.get(S.ds.id);
+  MAPSTORE.set(S.ds.id, { id: S.ds.id, name: S.ds.name, band: A.band, rim: A.rim, group: old ? old.group : sampleOf(S.ds.name),
+                          pixels: Float64Array.from(used, p => A.px.y[p]), neff, particles: U.filter(r => r.u.boot).map(r => r.u.boot.est.cvExcess) });
+}
+
+function renderBetween(card) {
+  const A = S.segCoat && S.segCoat.seg === S.seg ? S.segCoat : null, t = $("#bm-table"), box = $("#bm-verdict"), cards = $("#bm-cards"), note = $("#bm-note");
+  if (A && A.C) keepMap(A);
+  const open = new Set(F.files.map(f => f.id)), all = [...MAPSTORE.values()].filter(e => open.has(e.id));
+  const band = A ? A.band : $("#seg-coat-band").value, rim = A ? A.rim : Math.max(0, +$("#seg-rim").value || 0);
+  const maps = all.filter(e => e.band === band && e.rim === rim), other = all.filter(e => !maps.includes(e));
+  t.textContent = ""; box.className = "verdict"; box.textContent = ""; cards.replaceChildren();
+  if (maps.length) {
+    t.append(el("tr", {}, ...["Map", "Sample", "Particles", "Pixels", "Independent", `${band}/G`, "Excess CV"].map(h => el("th", {}, h))));
+    for (const e of maps) {
+      const inp = el("input", { type: "text", value: e.group, class: "bm-group", title: "Maps with the same label are replicates of one sample" });
+      inp.onchange = () => { e.group = inp.value.trim() || sampleOf(e.name); renderParticles(); };
+      t.append(el("tr", { class: S.ds && e.id === S.ds.id ? "on" : "" }, el("td", {}, e.name), el("td", {}, inp), el("td", {}, fmt(e.particles.length)),
+        el("td", {}, fmt(e.pixels.length)), el("td", {}, fmt(Math.round(e.neff))), el("td", {}, fmt(median(e.pixels), 3)),
+        el("td", {}, e.particles.length ? pct(median(e.particles)) : "–")));
+    }
+  }
+  note.textContent = (other.length ? `${other.map(e => e.name).join(", ")} ${other.length > 1 ? "were" : "was"} analysed with another coating band or rim: open ${other.length > 1 ? "them" : "it"} and analyse again to compare. ` : "") +
+    "KS distance: the largest gap between two maps' cumulative distributions of the coating index, each divided by its own median, so it compares the shape of the spread and not its level. Relabelling: the sample labels shuffled over the maps 4 999 times; the gap between samples is the mean distance between maps of different samples minus the mean between replicates. " +
+    "By pixels, KS p-values count every pixel as an independent value; by independent pixels, at each map's effective number (from its pixels' correlation). Uniformity: the excess CVs of the particles (each particle with 100 pixels or more is one value) by Kruskal–Wallis, beside a Brown–Forsythe test of the pooled pixels' spread.";
+  if (maps.length < 2) { if (!maps.length) note.textContent = "Analyse two or more maps (open each, find its particles) to compare them here. " + note.textContent; return; }
+  // the distance between every pair of maps, on the index over each map's median
+  const norm = maps.map(e => { const m = median(e.pixels); return Float64Array.from(e.pixels, v => v / m); });
+  const d = maps.map(() => new Array(maps.length).fill(0)), pairs = [];
+  for (let i = 0; i < maps.length; i++) for (let j = i + 1; j < maps.length; j++) {
+    const k = ksTest(norm[i], norm[j]); d[i][j] = d[j][i] = k.d;
+    pairs.push({ i, j, same: maps[i].group === maps[j].group, d: k.d, pRaw: ksTest(maps[i].pixels, maps[j].pixels).p, pEff: ksTest(maps[i].pixels, maps[j].pixels, maps[i].neff, maps[j].neff).p });
+  }
+  const labels = maps.map(e => e.group), groups = [...new Set(labels)], reps = pairs.filter(q => q.same);
+  const G = groups.length >= 2 && reps.length ? groupGap(d, labels) : null;
+  const items = [];
+  if (G) {
+    cards.append(card("Shape distance (KS)", `${fmt(G.within, 2)} within · ${fmt(G.between, 2)} between`, `replicates against different samples · relabelling p ${pFmt(G.p)}${G.pMin > 0.05 ? ` (no lower than ${fmt(G.pMin, 2)} with ${G.groupings} groupings)` : ""}`));
+    items.push(G.p < 0.05
+      ? `Maps of different samples differ more in the shape of their coating index (KS ${fmt(G.between, 2)}) than replicate maps of one sample (${fmt(G.within, 2)}); shuffling the sample labels over the maps gives a gap this large in ${pct(G.p)} of ${fmt(4999)} tries.`
+      : `Maps of different samples differ in the shape of their coating index by KS ${fmt(G.between, 2)}, replicates by ${fmt(G.within, 2)}; shuffling the labels gives a gap as large in ${pct(G.p)} of tries, so the samples are not told apart.${G.pMin > 0.05 ? ` With ${maps.length} maps there are only ${G.groupings} ways to group them, so no test of this kind could reach p < 0.05: map more replicates.` : ""}`);
+  } else items.push(groups.length < 2 ? "Every map carries the same sample label: give the maps of each sample their own label to compare samples." : "No sample has two maps yet: replicate maps of a sample are what the difference between samples is judged against.");
+  if (reps.length) {
+    const sigRaw = reps.filter(q => q.pRaw < 0.05).length, sigEff = reps.filter(q => q.pEff < 0.05).length;
+    cards.append(card("Replicates by pixel", `${sigRaw} of ${reps.length} differ`, `KS p < 0.05 counting every pixel · ${sigEff} of ${reps.length} at the independent pixels`));
+    if (sigRaw > sigEff) items.push(`Counting every pixel as independent, ${sigRaw} of ${reps.length} pairs of replicate maps of one sample "differ" (KS p < 0.05); at each map's effective number of independent pixels, ${sigEff}. Pixel-level tests find differences between maps that are only the correlation between neighbouring pixels.`);
+  }
+  if (groups.length >= 2) {
+    const kw = kruskalWallis(groups.map(g => maps.filter(e => e.group === g).flatMap(e => e.particles)));
+    const bf = brownForsythe(groups.map(g => maps.filter(e => e.group === g).flatMap(e => Array.from(e.pixels))));
+    cards.append(card("Uniformity by sample", kw ? `p ${pFmt(kw.p)}` : "–", `${kw ? `Kruskal–Wallis over ${fmt(kw.n)} particles` : "too few particles"} · pooled pixels: p ${bf ? pFmt(bf.p) : "–"} over ${bf ? fmt(bf.n) : "–"}`));
+    if (kw) items.push(`Between samples, the particles' excess CVs ${kw.p < 0.05 ? "differ" : "do not differ"} (Kruskal–Wallis p ${pFmt(kw.p)}, ${fmt(kw.n)} particles)${bf ? `; the pooled pixels' spread gives p ${pFmt(bf.p)} over ${fmt(bf.n)} pixels, a test that treats every pixel as an independent particle` : ""}.`);
+  }
+  box.className = `verdict ${G && G.p < 0.05 ? "good" : "warn"}`;
+  box.replaceChildren(el("b", {}, `${maps.length} maps of ${groups.length} sample${groups.length > 1 ? "s" : ""}`), ...items.map(s => el("p", {}, s)));
 }
 
 // =========================================================================
