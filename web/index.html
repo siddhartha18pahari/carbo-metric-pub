@@ -287,11 +287,11 @@
       <div class="panel map big" id="map-p"></div>
       <div class="pf-plots pf-only">
         <div class="panel col">
-          <div class="panel-h"><span id="pf-spec-h">Mean spectrum by population</span> <span class="muted small">baseline removed, G = 1, band ± 1 SD</span></div>
+          <div class="panel-h"><select id="pf-spec-mode" class="inline" title="Mean spectra of groups, or every particle's spectrum as one row"><option value="mean">Mean spectra</option><option value="heat">Every spectrum, sorted</option><option value="diff">Every spectrum minus the median</option></select><span class="muted small" id="pf-spec-h"></span></div>
           <div class="plot" id="pf-spec"><canvas></canvas></div>
         </div>
         <div class="panel col">
-          <div class="panel-h"><select id="pf-dist" class="inline"><option value="funnel">Coating: funnel</option><option value="order">Coating: along the particle order</option><option value="dev">Coating: deviations</option><option value="la">Crystallite size La</option><option value="size">Particle diameter</option></select><span class="muted small" id="pf-dist-note"></span></div>
+          <div class="panel-h"><select id="pf-dist" class="inline"><option value="funnel">Coating: funnel</option><option value="cater">Coating: caterpillar</option><option value="order">Coating: along the particle order</option><option value="dev">Coating: deviations</option><option value="la">Crystallite size La</option><option value="size">Particle diameter</option></select><span class="muted small" id="pf-dist-note"></span></div>
           <div class="plot" id="pf-dist-plot"><canvas></canvas></div>
         </div>
       </div>
@@ -300,6 +300,7 @@
       <div class="sec pf-only">
         <div class="sec-h">ParticleFinder particles</div>
         <div class="frow"><label>Plot against</label><select id="pf-x"></select></div>
+        <div class="frow"><label>Scatter as</label><select id="pf-scatter" title="The plot against morphology below: a density of particles (hexagons), or one dot per particle"><option value="density">density (hexagons)</option><option value="points">points</option></select></div>
         <div class="frow"><label>Colour particles</label><select id="pf-colour"><option value="coat">by coating (against the noise band)</option><option value="pop">by population</option><option value="value">by the fitted value</option></select></div>
         <div class="muted small">One spectrum per particle, placed at the particle's stage position and sized by its diameter. Positions and morphology are read from the project; each spectrum is fitted with the same configuration as a map.</div>
       </div>

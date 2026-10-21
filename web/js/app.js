@@ -11,8 +11,9 @@ import { SplatView, sliceField } from "./splat3d.js";
 import { segment, outlineOverlay, distance, PARTICLE_COLOURS } from "./particles.js";
 import { buildReport } from "./report.js";
 import { wilson, weightedQuantile, laCancado, robustScale, bestGmm, bootstrapShares, median, quantileSorted,
-         heightCovariances, ratioVariance, heterogeneity, moranI, spearmanCI, coverage, pairRatio } from "./pf-analysis.js";
+         heightCovariances, ratioVariance, heterogeneity, moranI, spearmanCI, coverage, pairRatio, hexBins } from "./pf-analysis.js";
 import { T, font, setTheme, currentTheme } from "./theme.js";
+import { lut } from "./colormaps.js";
 
 const QUANT = { intensity: "Intensity", width: "Width", area: "Area", position: "Position" };
 const UNIT = { intensity: "counts", width: "cm⁻¹", area: "cm⁻¹ × counts", position: "cm⁻¹" };
@@ -1872,18 +1873,39 @@ function drawScatter() {
   ctx.fillStyle = T.label; ctx.fillText(`${F.xlab}${F.xunit ? ` (${F.xunit})` : ""}${logx ? ", log scale" : ""}`, (L + W - Rr) / 2, H - 13);
   const cls = S.points.cls, cols = ["#3fe0ff", "#ff9f40", "#b18cff", "#7dff6a"];
   const A = S.pfa, by = $("#pf-colour").value, byPop = A && A.k && by === "pop", byCoat = A && A.coat && by === "coat", CC = COAT_COLOURS();
-  ctx.globalAlpha = Math.max(0.15, Math.min(0.8, 300 / idx.length));
-  idx.forEach((p, i) => {
-    if (ys[i] < ylo || ys[i] > yhi || xs[i] < xlo || xs[i] > xhi) return;
-    ctx.fillStyle = byCoat ? (A.coat.cat[p] < 0 ? T.hatchLine : CC[A.coat.cat[p]])
-      : byPop ? (A.label[p] < 0 ? T.hatchLine : A.pops[A.label[p]].nd ? T.label : PARTICLE_COLOURS[A.label[p] % PARTICLE_COLOURS.length]) : cols[Math.max(0, cls[p]) % cols.length];
-    ctx.fillRect(PX(xs[i]) - 1.2, PY(ys[i]) - 1.2, 2.4, 2.4);
-  });
-  ctx.globalAlpha = 1;
+  if ($("#pf-scatter").value === "density") {
+    // hexagons coloured by how many particles they hold (log scale): with thousands of particles,
+    // one dot each piles up into a block, and a density shows where most of them are
+    const px = [], py = [];
+    idx.forEach((p, i) => { if (ys[i] >= ylo && ys[i] <= yhi && xs[i] >= xlo && xs[i] <= xhi) { px.push(PX(xs[i])); py.push(PY(ys[i])); } });
+    const sz = Math.max(4, Math.min(9, 0.9 * Math.sqrt((W - L - Rr) * (H - Tt - B) / Math.max(1, px.length)))), cells = hexBins(px, py, sz);
+    // sparse hexagons in the colour nearer the background, dense ones in the contrasting end, so a
+    // lone outlier does not outweigh the crowd (light to dark on a light page, the other way on a dark one)
+    const mx = cells.reduce((t, c) => Math.max(t, c.n), 1), V = lut("Viridis"), light = currentTheme() === "light";
+    ctx.save(); ctx.beginPath(); ctx.rect(L, Tt, W - L - Rr, H - Tt - B); ctx.clip();
+    for (const c of cells) {
+      const u = 0.12 + 0.88 * Math.log1p(c.n) / Math.log1p(mx), j = Math.round((light ? 1 - u : u) * 255) * 3;
+      ctx.fillStyle = `rgb(${V[j]},${V[j + 1]},${V[j + 2]})`; ctx.beginPath();
+      for (let k = 0; k < 6; k++) { const a = Math.PI / 6 + k * Math.PI / 3, hx = c.x + sz * Math.cos(a), hy = c.y + sz * Math.sin(a); if (k) ctx.lineTo(hx, hy); else ctx.moveTo(hx, hy); }
+      ctx.fill();
+    }
+    ctx.restore();
+    ctx.font = font(10); ctx.textAlign = "left"; ctx.textBaseline = "top"; ctx.fillStyle = T.label;
+    ctx.fillText(`hexagons: 1 to ${fmt(mx)} particles (log scale) · line: binned medians`, L + 6, Tt + 2);
+  } else {
+    ctx.globalAlpha = Math.max(0.15, Math.min(0.8, 300 / idx.length));
+    idx.forEach((p, i) => {
+      if (ys[i] < ylo || ys[i] > yhi || xs[i] < xlo || xs[i] > xhi) return;
+      ctx.fillStyle = byCoat ? (A.coat.cat[p] < 0 ? T.hatchLine : CC[A.coat.cat[p]])
+        : byPop ? (A.label[p] < 0 ? T.hatchLine : A.pops[A.label[p]].nd ? T.label : PARTICLE_COLOURS[A.label[p] % PARTICLE_COLOURS.length]) : cols[Math.max(0, cls[p]) % cols.length];
+      ctx.fillRect(PX(xs[i]) - 1.2, PY(ys[i]) - 1.2, 2.4, 2.4);
+    });
+    ctx.globalAlpha = 1;
+  }
   // binned medians: the trend without assuming a shape
   const nb = 10, bins = Array.from({ length: nb }, () => []);
   xs.forEach((v, i) => { const b = Math.floor((v - xlo) / ((xhi - xlo) || 1) * nb); if (b >= 0 && b < nb) bins[b].push(ys[i]); });
-  ctx.strokeStyle = T.strong; ctx.lineWidth = 2; ctx.beginPath();
+  ctx.beginPath();
   let started = false;
   bins.forEach((b, k) => {
     if (b.length < 8) return;
@@ -1891,7 +1913,8 @@ function drawScatter() {
     const x = PX(xlo + (k + 0.5) / nb * (xhi - xlo)), y = PY(quantile(b, 0.5));
     if (started) ctx.lineTo(x, y); else { ctx.moveTo(x, y); started = true; }
   });
-  ctx.stroke();
+  ctx.strokeStyle = T.paper; ctx.lineWidth = 4.5; ctx.stroke();      // a halo, so the line shows over a dense core
+  ctx.strokeStyle = T.strong; ctx.lineWidth = 2; ctx.stroke();
   if (S.pinned != null && idx.includes(S.pinned)) {
     const i = idx.indexOf(S.pinned);
     ctx.strokeStyle = "#7dff6a"; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(PX(xs[i]), PY(ys[i]), 5, 0, 7); ctx.stroke();
@@ -2069,7 +2092,7 @@ function pfAnalysis() {
     }
   }
 
-  return (S.pfa = { key, n, fitted, kd, kq, snr, zG, atBound, det, quant, Q, Qd, label, k: cats, how, pops, la, laQ, noD, lambda, size, classes, coat,
+  return (S.pfa = { key, n, fitted, norm: { NS, K2, wn: ks.map(q => S.wn[q]) }, kd, kq, snr, zG, atBound, det, quant, Q, Qd, label, k: cats, how, pops, la, laQ, noD, lambda, size, classes, coat,
                     vwRatio: sw > 0 ? swr / sw : NaN, nwRatio: Qd.length ? sr / Qd.length : NaN, rho, spectra, jD, ratio, rlab, nNd, popBand });
 }
 
@@ -2151,12 +2174,12 @@ new ResizeObserver(() => { if (S.pfa) drawPopSpectra(); }).observe(pfSpecHost);
 new ResizeObserver(() => { if (S.pfa) drawPfDist(); }).observe(pfDistHost);
 
 // small axes for the two plots under the map
-function pfAxes(host, xr, yr, { logx = false, xlabel = "", ylabel = "" } = {}) {
+function pfAxes(host, xr, yr, { logx = false, xlabel = "", ylabel = "", yticks = true } = {}) {
   const W = host.clientWidth, H = host.clientHeight; if (W < 40 || H < 40) return null;
   const ctx = hidpi(host.querySelector("canvas"), W, H);
   const L = 44, R = 10, Tp = 10, B = 34, X = v => L + ((logx ? Math.log10(v) : v) - xr[0]) / (xr[1] - xr[0]) * (W - L - R), Y = v => Tp + (1 - (v - yr[0]) / (yr[1] - yr[0])) * (H - Tp - B);
   ctx.font = font(11); ctx.textBaseline = "middle"; ctx.textAlign = "right";
-  for (const t of niceTicks(yr[0], yr[1], 4)) { ctx.fillStyle = T.grid; ctx.fillRect(L, Y(t), W - L - R, 1); ctx.fillStyle = T.ink; ctx.fillText(fmt(t, 3), L - 4, Y(t)); }
+  if (yticks) for (const t of niceTicks(yr[0], yr[1], 4)) { ctx.fillStyle = T.grid; ctx.fillRect(L, Y(t), W - L - R, 1); ctx.fillStyle = T.ink; ctx.fillText(fmt(t, 3), L - 4, Y(t)); }
   ctx.textAlign = "center"; ctx.textBaseline = "top";
   const xt = logx ? [0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000].filter(v => Math.log10(v) >= xr[0] && Math.log10(v) <= xr[1]) : niceTicks(xr[0], xr[1], 6);
   for (const t of xt) { ctx.fillStyle = T.grid; ctx.fillRect(X(t), Tp, 1, H - Tp - B); ctx.fillStyle = T.ink; ctx.fillText(fmt(t, 3), X(t), H - B + 4); }
@@ -2167,8 +2190,10 @@ function pfAxes(host, xr, yr, { logx = false, xlabel = "", ylabel = "" } = {}) {
 
 function drawPopSpectra() {
   const A = S.pfa; if (!A) return;
+  const mode = $("#pf-spec-mode").value;
+  if (mode !== "mean") { drawSpecHeat(A, mode === "diff"); return; }
   const byCoat = $("#pf-colour").value === "coat" && A.coat;
-  $("#pf-spec-h").textContent = byCoat ? `Mean spectrum by coating group (${A.coat.band}/G against the noise band)` : "Mean spectrum by population";
+  $("#pf-spec-h").textContent = (byCoat ? `by coating group (${A.coat.band}/G against the noise band)` : "by population") + " · baseline removed, G = 1, band ± 1 SD";
   const sp = byCoat ? A.coat.spectra : A.spectra; if (!sp.wn.length) return;
   const colOf = g => (byCoat ? COAT_COLOURS()[g] : A.k ? (A.pops[g].nd ? T.label : PARTICLE_COLOURS[g % PARTICLE_COLOURS.length]) : T.strong);
   const nameOf = g => (byCoat ? ["below", "within", "above"][g] : A.k ? A.pops[g].name : "All quantified");
@@ -2194,10 +2219,79 @@ function drawPopSpectra() {
   });
 }
 
+// Every quantified particle's spectrum as one row (baseline removed, scaled to its G
+// height), low coating index at the bottom: how the bands change from the least to the
+// most coated particle, with odd spectra as stripes. Rows are averaged when there are more
+// particles than pixel rows. Minus the median: each row less the median spectrum, on a
+// diverging scale, so what sets particles apart stands out from what they share.
+const diverge = t => {                                   // -1 blue, 0 near white, +1 red
+  const a = [33, 102, 172], m = [247, 247, 247], b = [178, 24, 43], u = Math.abs(t), e = t < 0 ? a : b;
+  return m.map((v, i) => Math.round(v + (e[i] - v) * u));
+};
+function drawSpecHeat(A, diff) {
+  const nm = A.norm, K2 = nm ? nm.K2 : 0, C = A.coat;
+  const key = C ? C.R : A.Q.map(p => (A.ratio ? A.ratio[p] : NaN)), band = C ? C.band : A.popBand;
+  const order = A.Q.map((_, i) => i).filter(i => Number.isFinite(key[i])).sort((a, b) => key[a] - key[b]), n = order.length;
+  if (!n || !K2) return;
+  const ax = pfAxes(pfSpecHost, [nm.wn[0], nm.wn[K2 - 1]], [0, 1], { xlabel: "Raman shift (cm⁻¹)", ylabel: `${band}/G, low to high`, yticks: false });
+  if (!ax) return;
+  const { ctx, X, W, H, L, R, Tp, B } = ax, pw = Math.max(1, Math.round(W - L - R)), ph = Math.max(1, Math.round(H - Tp - B));
+  // each pixel row: the mean of the particles that fall on it
+  const img = new Float32Array(ph * K2);
+  for (let r = 0; r < ph; r++) {
+    const a = Math.min(n - 1, Math.floor((ph - 1 - r) * n / ph)), b = Math.max(a + 1, Math.floor((ph - r) * n / ph));
+    for (let k = a; k < b; k++) { const o = order[k] * K2; for (let i = 0; i < K2; i++) img[r * K2 + i] += nm.NS[o + i] / (b - a); }
+  }
+  if (diff) {                                              // the median spectrum, channel by channel
+    const col = new Float32Array(n);
+    for (let i = 0; i < K2; i++) {
+      for (let k = 0; k < n; k++) col[k] = nm.NS[order[k] * K2 + i];
+      const med = quantile(Float32Array.from(col).sort(), 0.5);
+      for (let r = 0; r < ph; r++) img[r * K2 + i] -= med;
+    }
+  }
+  // colour range: 0 to the 99th percentile on a square-root scale (weak bands show), or
+  // a symmetric range from the 1st and 99th percentiles of the differences
+  const all = Float32Array.from(img).sort();
+  const top = (diff ? Math.max(Math.abs(quantile(all, 0.01)), Math.abs(quantile(all, 0.99))) : quantile(all, 0.99)) || 1;
+  const V = lut("Viridis"), rgb = v => {
+    if (diff) return diverge(Math.max(-1, Math.min(1, v / top)));
+    const j = Math.round(Math.sqrt(Math.max(0, Math.min(1, v / top))) * 255) * 3; return [V[j], V[j + 1], V[j + 2]];
+  };
+  const off = document.createElement("canvas"); off.width = pw; off.height = ph;
+  const og = off.getContext("2d"), id = og.createImageData(pw, ph);
+  for (let r = 0; r < ph; r++) for (let c = 0; c < pw; c++) {
+    const q = rgb(img[r * K2 + Math.min(K2 - 1, Math.floor(c * K2 / pw))]), o = (r * pw + c) * 4;
+    id.data[o] = q[0]; id.data[o + 1] = q[1]; id.data[o + 2] = q[2]; id.data[o + 3] = 255;
+  }
+  og.putImageData(id, 0, 0);
+  ctx.imageSmoothingEnabled = false; ctx.drawImage(off, L, Tp, pw, ph);
+  // the coating index at the quartiles of the order
+  ctx.font = font(11); ctx.fillStyle = T.ink; ctx.textAlign = "right"; ctx.textBaseline = "middle";
+  for (const f of [0, 0.25, 0.5, 0.75, 1]) ctx.fillText(fmt(key[order[Math.round(f * (n - 1))]], 2), L - 4, Tp + (1 - f) * ph);
+  // where the coating band and G sit
+  ctx.textAlign = "center"; ctx.textBaseline = "top"; ctx.font = font(10, "bold");
+  for (const name of [band, "G"]) {
+    const pk = S.cfg.peaks.find(q => q.name === name); if (!pk || pk.pos < nm.wn[0] || pk.pos > nm.wn[K2 - 1]) continue;
+    ctx.lineWidth = 3; ctx.strokeStyle = "rgba(0,0,0,.6)"; ctx.strokeText(name, X(pk.pos), Tp + 2); ctx.fillStyle = "#fff"; ctx.fillText(name, X(pk.pos), Tp + 2);
+  }
+  // colour bar, inside at the right
+  const cx = L + pw - 12, ch = Math.min(70, ph * 0.5);
+  for (let k = 0; k < ch; k++) { const t = 1 - k / ch; ctx.fillStyle = `rgb(${diff ? diverge(2 * t - 1) : rgb(top * t * t)})`; ctx.fillRect(cx, Tp + 6 + k, 8, 1); }
+  ctx.strokeStyle = "rgba(255,255,255,.7)"; ctx.lineWidth = 1; ctx.strokeRect(cx - 0.5, Tp + 5.5, 9, ch + 1);
+  ctx.font = font(10); ctx.textAlign = "right"; ctx.textBaseline = "middle";
+  const ticks = diff ? [[top, `+${fmt(top, 2)}`], [0, "0"], [-top, `−${fmt(top, 2)}`]] : [[top, fmt(top, 2)], [top / 4, fmt(top / 4, 2)], [0, "0"]];
+  ticks.forEach(([v, t]) => {
+    const y = Tp + 6 + (diff ? (1 - (v / top + 1) / 2) : 1 - Math.sqrt(v / top)) * ch;
+    ctx.lineWidth = 3; ctx.strokeStyle = "rgba(0,0,0,.6)"; ctx.strokeText(t, cx - 3, y); ctx.fillStyle = "#fff"; ctx.fillText(t, cx - 3, y);
+  });
+  $("#pf-spec-h").textContent = `${fmt(n)} particles by ${band}/G · baseline removed, G = 1` + (diff ? " · less the median spectrum, blue below, red above" : " · square-root colour scale") + (n > ph ? ` · ${fmt(n / ph, 2)} particles per row` : "");
+}
+
 function drawPfDist() {
   const A = S.pfa; if (!A) return;
   const kind = $("#pf-dist").value;
-  if (kind === "funnel" || kind === "order" || kind === "dev") { drawCoatPlot(A, kind); return; }
+  if (kind === "funnel" || kind === "cater" || kind === "order" || kind === "dev") { drawCoatPlot(A, kind); return; }
   if (kind === "la") {
     const v = A.laQ; $("#pf-dist-note").textContent = v.length ? "quantified particles with a D band, log scale" : "";
     if (!v.length) { const ax = pfAxes(pfDistHost, [0, 3], [0, 1], { logx: true, xlabel: "La (nm)" }); if (ax) { ax.ctx.fillStyle = T.label; ax.ctx.textAlign = "center"; ax.ctx.fillText(Number.isFinite(A.lambda) ? "No particle with a D band" : "Enter the laser wavelength", ax.W / 2, ax.H / 2 - 10); } return; }
@@ -2319,6 +2413,33 @@ function drawCoatPlot(A, kind) {
     ctx.fillStyle = T.label; ctx.font = font(10); ctx.fillText("solid: noise only · dashed: with the real spread", ax.L + 8, ax.Tp + 50);
     return;
   }
+  if (kind === "cater") {
+    // every particle with its 95 % interval, in order of the coating index: an interval that
+    // misses the band of the real spread is a particle that differs beyond its noise
+    $("#pf-dist-note").textContent = `each particle with its 95 % interval${C.drift ? " · drift removed" : ""}`;
+    const idx = C.use.map((_, i) => i).sort((a, b) => C.use[a] - C.use[b]), n = idx.length;
+    const ylo = quantileSorted(qs(idx.map(i => C.use[i] - 1.96 * C.sR[i])), 0.01), yhi = quantileSorted(qs(idx.map(i => C.use[i] + 1.96 * C.sR[i])), 0.99);
+    const ax = pfAxes(pfDistHost, [0.5, n + 0.5], [ylo, yhi], { xlabel: `Particles, in order of ${b}/G`, ylabel: `${b}/G` }); if (!ax) return;
+    const { ctx, X, Y } = ax, pw = ax.W - ax.L - ax.R;
+    ctx.save(); ctx.beginPath(); ctx.rect(ax.L, ax.Tp, pw, ax.H - ax.Tp - ax.B); ctx.clip();
+    // the real spread between particles about their mean (± 1.96 tau), and the mean
+    ctx.globalAlpha = 0.16; ctx.fillStyle = T.strong;
+    ctx.fillRect(ax.L, Y(H.mu + 1.96 * H.tau), pw, Y(H.mu - 1.96 * H.tau) - Y(H.mu + 1.96 * H.tau));
+    ctx.globalAlpha = 1; ctx.fillStyle = T.strong; ctx.fillRect(ax.L, Y(H.mu) - 0.5, pw, 1.5);
+    ctx.globalAlpha = Math.max(0.15, Math.min(0.9, 600 / n)); ctx.lineWidth = Math.max(0.6, Math.min(2, 0.8 * pw / n));
+    idx.forEach((i, k) => {
+      const x = X(k + 1); ctx.strokeStyle = CC[C.cat[C.Q[i]]];
+      ctx.beginPath(); ctx.moveTo(x, Y(C.use[i] - 1.96 * C.sR[i])); ctx.lineTo(x, Y(C.use[i] + 1.96 * C.sR[i])); ctx.stroke();
+    });
+    ctx.globalAlpha = 1; ctx.fillStyle = T.strong;
+    const dot = Math.max(1.2, Math.min(3, 0.6 * pw / n));
+    idx.forEach((i, k) => ctx.fillRect(X(k + 1) - dot / 2, Y(C.use[i]) - dot / 2, dot, dot));
+    ctx.restore();
+    ctx.font = font(11, "bold"); ctx.textAlign = "left"; ctx.textBaseline = "top";
+    [[`above · ${pct(C.above / C.n)}`, CC[2]], [`within · ${pct(C.within / C.n)}`, CC[1]], [`below · ${pct(C.below / C.n)}`, CC[0]]].forEach(([t, col], k) => { ctx.fillStyle = col; ctx.fillText(t, ax.L + 8, ax.Tp + 4 + k * 15); });
+    ctx.fillStyle = T.label; ctx.font = font(10); ctx.fillText("line: the mean · band: the real spread between particles (± 1.96 τ)", ax.L + 8, ax.Tp + 50);
+    return;
+  }
   if (kind === "order") {
     $("#pf-dist-note").textContent = `measured values, running median of ${C.w}${C.drift ? ": a drift" : ""}`;
     const sy = qs(C.R), ylo = quantileSorted(sy, 0.005), yhi = quantileSorted(sy, 0.995);
@@ -2352,6 +2473,8 @@ function drawCoatPlot(A, kind) {
 
 for (const id of ["#pf-kd", "#pf-kq", "#pf-coat-band", "#pf-colour", "#pf-pop-ratio", "#pf-pop-mode", "#pf-cut1", "#pf-cut2", "#pf-laser"]) $(id).addEventListener("change", () => { if (S.points && S.fit) renderPF(); });
 $("#pf-dist").onchange = () => drawPfDist();
+$("#pf-spec-mode").onchange = () => drawPopSpectra();
+$("#pf-scatter").onchange = () => drawScatter();
 $("#pf-csv").onclick = () => {
   if (!S.points || !S.fit) return;
   const A = pfAnalysis(), pts = S.points, ratio = A.ratio;
