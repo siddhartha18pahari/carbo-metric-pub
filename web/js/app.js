@@ -17,6 +17,8 @@ import { rng, wilson, weightedQuantile, laCancado, robustScale, bestGmm, bootstr
          boundedCoverage, lowShare, qcd, qRatio, evenness, moments, spatialPermutation, neighbourNoise, blockBootstrap,
          ksTest, fitFreeHeights, nestedSize, robustSD, dispersion, nmf, nmfProject, fitSplats, splatScale, gaussSmooth,
          kruskalWallis, brownForsythe, groupGap, thinTail, mixtureCoverage, olsHC3, nForMean, nForSpread, tQuantile } from "./pf-analysis.js";
+import { PRESET_21OCT, QC_SETTINGS, BANDS as D3G_BANDS, prepare as d3gPrepare, unmix, freeFits, calibrate, standards as d3gStandards,
+         blocksOf, blockMedian, compareMedians, mapBlock, stageBlock, toJSON as calToJSON, fromJSON as calFromJSON } from "./d3g-calibration.js";
 import { T, font, setTheme, currentTheme } from "./theme.js";
 import { lut } from "./colormaps.js";
 
@@ -1564,7 +1566,7 @@ function renderParticles() {
   pmap.setTitle(r.title);
   pmap.overlays = [outlineOverlay(S.seg)];
   if (r.values) pmap.setData(r.values, { valid: r.useValid ? S.valid : null, label: r.label, unit: r.unit });
-  const ps = particleStats(); if (!ps) return;
+  const ps = particleStats(); if (!ps) { renderD3g(); return; }
   S.pstats = ps;
   const card = (k, v, s) => el("div", { class: "card" }, el("div", { class: "k" }, k), el("div", { class: "v" }, v), el("div", { class: "s" }, s));
   $("#pt-cards").replaceChildren(
@@ -1582,6 +1584,7 @@ function renderParticles() {
   renderSegCoating(card);
   renderCoverage(card);
   renderChecks(card); renderAcq(); renderAccept(card); renderXc(card); renderBetween(card);
+  renderD3g();
 }
 
 function drawStrip() {
@@ -2218,6 +2221,291 @@ function renderBetween(card) {
 }
 
 // =========================================================================
+// D3/G calibration: band shapes calibrated once and held for every sample
+// =========================================================================
+// The shapes come from a calibration (d3g-calibration.js): the one of 21 Oct 2026, one built here
+// from a graphite and a glassy carbon spectrum and an uncoated and a coated map, or one read from a
+// file. Every carbon spectrum's five heights and background are solved with the positions and widths
+// held, so the median I(D3)/I(G) compares between samples, and against an uncoated reference fitted
+// the same way. The work runs once per file and calibration step, and is kept.
+const D3G = { cals: [PRESET_21OCT], pick: "0:2", std: {}, prep: new Map(), res: new Map(), cmp: new Map(), check: new Map(), running: new Set(), building: false };
+
+function d3gFill(sel, opts, want) {
+  const ids = opts.map(o => o[0]).join("|"), keep = want ?? sel.value;
+  if (sel.dataset.ids !== ids) { sel.replaceChildren(...opts.map(([v, t]) => el("option", { value: v }, t))); sel.dataset.ids = ids; }
+  sel.value = opts.some(o => o[0] === keep) ? keep : opts.length ? opts[0][0] : "";
+}
+function d3gSelects() {
+  d3gFill($("#d3g-cal"), D3G.cals.flatMap((c, ci) => c.steps.map((s, si) => [`${ci}:${si}`, `${c.name} · ${s.name}`])), D3G.pick);
+  D3G.pick = null;
+  const files = F.files.map(f => [f.id, f.name]), cur = S.ds ? S.ds.id : null, others = files.filter(([id]) => id !== cur);
+  d3gFill($("#d3g-ref"), [["", others.length ? "none: enter its median" : "none open: enter its median"], ...others]);
+  for (const id of ["#d3g-b1", "#d3g-b2"]) d3gFill($(id), [["", "an open map…"], ...files]);
+  $("#d3g-ref-med").disabled = !!$("#d3g-ref").value;
+}
+function d3gChoice() {
+  const [ci, si] = ($("#d3g-cal").value || "0:2").split(":").map(Number), cal = D3G.cals[ci] || D3G.cals[0];
+  const step = cal.steps[si] || cal.steps[cal.steps.length - 1];
+  return { cal, step, key: `${D3G.cals.indexOf(cal)}:${cal.steps.indexOf(step)}` };
+}
+const d3gKey = (f, ch) => `${f.id}|${ch.key}|${$("#pf-incl-excl").checked}`;
+
+// a file's spectra cut, despiked and judged (kept for the last few files: every spectrum in double precision)
+async function d3gPrep(f, settings) {
+  const key = `${f.id}|${stableJSON(settings)}`;
+  if (!D3G.prep.has(key)) {
+    const cube = S.ds && f.id === S.ds.id && S.cube ? S.cube : new Float32Array(await api(`/api/ds/${f.id}/cube`));
+    const i = f.info, prep = d3gPrepare(cube, i.k, f32(i.wn), i.nx * i.ny, settings), pts = i.points;
+    prep.place = pts ? { pf: true, x: f32(pts.x), y: f32(pts.y), cls: pts.cls ? f32(pts.cls) : null, seam: pts.seam ? f32(pts.seam) : null }
+      : { pf: false, nx: i.nx, x: f32(i.x), y: f32(i.y) };
+    if (D3G.prep.size >= 4) D3G.prep.delete(D3G.prep.keys().next().value);
+    D3G.prep.set(key, prep);
+  }
+  return D3G.prep.get(key);
+}
+// the spectra a file contributes: carbon ones and, for ParticleFinder data, the particles the rest of
+// this tab uses (measured, off the mosaic's seams, the run's filter-excluded ones when asked for)
+function d3gInRun(pl, p) { return !pl.pf || ((!pl.cls || pl.cls[p] === 1 || ($("#pf-incl-excl").checked && pl.cls[p] === 0)) && !(pl.seam && pl.seam[p])); }
+const d3gList = prep => prep.carbon.filter(p => d3gInRun(prep.place, p));
+
+async function d3gResult(f, ch) {
+  const key = d3gKey(f, ch);
+  if (D3G.res.has(key)) return D3G.res.get(key);
+  const prep = await d3gPrep(f, ch.cal.settings), list = d3gList(prep), pl = prep.place;
+  let measured = 0; for (let p = 0; p < prep.P; p++) if (prep.sig[p] > 0 && d3gInRun(pl, p)) measured++;
+  let r = { f, key, prep, n: list.length, measured };
+  if (list.length) {
+    const U = unmix(prep, ch.step.shapes, list), r3 = U.ratio["ID3/IG"], nb = D3G_BANDS.length, j3 = D3G_BANDS.indexOf("D3");
+    const blocks = blocksOf(Array.from(r3), Array.from(U.list, p => (pl.pf ? stageBlock(pl.x[p], pl.y[p]) : mapBlock(p, pl.nx))));
+    const vals = new Float64Array(prep.P).fill(NaN); U.list.forEach((p, i) => { vals[p] = r3[i]; });
+    const fin = Array.from(r3).filter(Number.isFinite);
+    r = { ...r, U, vals, blocks, med: blockMedian(blocks), mean: fin.reduce((t, v) => t + v, 0) / fin.length,
+          area: median(U.ratio["AD3/AG"]), rn: median(Array.from(U.list, (p, i) => U.rmse[i] / prep.sig[p])),
+          z3: median(Array.from(U.list, (_, i) => U.h[i * nb + j3] / U.se[i * nb + j3])), snr: median(Array.from(U.list, p => prep.snr[p])) };
+  }
+  D3G.res.set(key, r);
+  return r;
+}
+// the result if it is ready; otherwise the work starts and the section redraws when it ends
+function d3gGet(f, ch) {
+  const key = d3gKey(f, ch);
+  if (D3G.res.has(key)) return D3G.res.get(key);
+  if (!D3G.running.has(key)) {
+    D3G.running.add(key);
+    setTimeout(() => d3gResult(f, ch).catch(e => D3G.res.set(key, { f, key, error: e.message }))
+      .finally(() => { D3G.running.delete(key); renderD3g(); }), 30);
+  }
+  return null;
+}
+
+// free fits for a build or a check, spread over workers when the page can start them
+async function d3gFreeFits(prep, list, init, onProgress) {
+  const nb = D3G_BANDS.length, M = list.length, { nu, N, Y, settings } = prep, chunk = 64, jobs = [];
+  const out = { list: Int32Array.from(list), h: new Float64Array(M * nb), c: new Float64Array(M * nb), w: new Float64Array(M * nb), r2: new Float64Array(M) };
+  for (let a = 0; a < M; a += chunk) jobs.push(a);
+  let done = 0;
+  const put = (a, r) => { out.h.set(r.h, a * nb); out.c.set(r.c, a * nb); out.w.set(r.w, a * nb); out.r2.set(r.r2, a); done += r.r2.length; if (onProgress) onProgress(done, M); };
+  const sub = a => { const ids = list.slice(a, a + chunk), y = new Float64Array(ids.length * N); ids.forEach((p, i) => y.set(Y.subarray(p * N, (p + 1) * N), i * N)); return y; };
+  let pool = [];
+  try { for (let i = 0, n = Math.max(1, Math.min(8, (navigator.hardwareConcurrency || 4) - 1)); i < n; i++) pool.push(new Worker(new URL("./d3g-worker.js", import.meta.url), { type: "module" })); }
+  catch { pool.forEach(w => w.terminate()); pool = []; }
+  if (!pool.length) {
+    for (const a of jobs) { const y = sub(a); put(a, freeFits({ nu, N, Y: y, settings }, Array.from({ length: y.length / N }, (_, i) => i), init)); await xcTick(); }
+    return out;
+  }
+  try {
+    let next = 0;
+    await Promise.all(pool.map(w => new Promise((res, rej) => {
+      const go = () => {
+        if (next >= jobs.length) { res(); return; }
+        const a = jobs[next++], y = sub(a);
+        w.onmessage = e => { if (e.data.error) rej(new Error(e.data.error)); else { put(a, e.data); go(); } };
+        w.onerror = e => rej(new Error(e.message || "a calibration worker failed"));
+        w.postMessage({ id: a, nu, N, Y: y, settings, init }, [y.buffer]);
+      };
+      go();
+    })));
+  } finally { pool.forEach(w => w.terminate()); }
+  return out;
+}
+
+// the band shapes of every step of the chosen calibration, the step in use in bold
+function d3gTable(ch) {
+  const t = $("#d3g-table"), steps = ch.cal.steps, s2 = v => (Number.isFinite(v) ? v.toFixed(1) : "–");
+  t.replaceChildren(el("tr", {}, el("th", {}, "Band"), el("th", {}, "Shape"), ...steps.map(s => el("th", { title: "position / FWHM, cm⁻¹" }, s === ch.step ? el("b", {}, s.name) : s.name))));
+  for (const b of D3G_BANDS) {
+    t.append(el("tr", {}, el("td", {}, b), el("td", { class: "sub" }, ch.cal.settings.bands[b].shape),
+      ...steps.map(s => {
+        const v = s.shapes[b], kept = /kept|inherit/i.test(v.note || "") || v.support < 0;
+        const tip = v.support != null ? `${v.support < 0 ? `measured in ${-v.support} spectra only: ` : v.support > 1 ? `median over ${v.support} spectra` : ""}${kept ? "the step before's shape kept" : v.note || ""}` : v.note || "";
+        return el("td", { title: tip }, `${s2(v.pos)} / ${s2(v.fwhm)}`, kept ? el("span", { class: "sub" }, " kept") : "");
+      })));
+  }
+}
+
+function renderD3g() {
+  const box = $("#d3g-verdict"), cards = $("#d3g-cards"), note = $("#d3g-note"), chk = $("#d3g-check-cards");
+  d3gSelects();
+  const ch = d3gChoice();
+  d3gTable(ch);
+  const clear = msg => { box.className = "verdict"; box.textContent = ""; cards.replaceChildren(); chk.replaceChildren(); note.textContent = msg; };
+  const cur = S.ds && fileOf(S.ds.id);
+  if (!cur || !S.cube) return clear(S.fit && S.fit.resultsOnly ? "The calibration needs the spectra: open the map itself." : "");
+  const refF = $("#d3g-ref").value ? fileOf($("#d3g-ref").value) : null, res = d3gGet(cur, ch), ref = refF ? d3gGet(refF, ch) : null;
+  if (!res || (refF && !ref)) { clear(""); box.replaceChildren(el("b", {}, `Fitting the heights with ${ch.cal.name} · ${ch.step.name}…`)); return; }
+  if (res.error || (ref && ref.error)) return clear(`Could not apply the calibration: ${res.error || ref.error}`);
+  const pf = res.prep.place.pf, unit = pf ? "particles" : "spectra";
+  if (!res.n) return clear(`No carbon ${unit} here: none has its G at least ${res.prep.settings.snrMin} × its noise.`);
+  // fixed decimals, enough to show the interval's width to two figures
+  const M = res.med, dp = Math.min(6, Math.max(2, 1 - Math.floor(Math.log10(M.hi - M.lo || 1e-3))));
+  const fx = v => (Number.isFinite(v) ? `${v < 0 ? "−" : ""}${Math.abs(v).toFixed(dp)}` : "–"), signed = v => `${v < 0 ? "−" : "+"}${Math.abs(v).toFixed(dp)}`;
+  let cmp = null, refMed = NaN, refName = "";
+  if (ref && ref.n) {
+    const k = `${res.key}~${ref.key}`;
+    if (!D3G.cmp.has(k)) D3G.cmp.set(k, compareMedians(res.blocks, ref.blocks));
+    cmp = D3G.cmp.get(k); refMed = ref.med.median; refName = refF.name;
+  } else if (!refF) {
+    refMed = parseFloat($("#d3g-ref-med").value);
+    if (refMed > 0) cmp = { diff: M.median - refMed, lo: M.lo - refMed, hi: M.hi - refMed, ratio: M.median / refMed, hand: true };
+    refName = "the median entered";
+  }
+  const warn = res.rn > 2, items = [];
+  items.push(`Median over the ${fmt(res.n)} carbon ${unit} of ${cur.name} (G at least ${res.prep.settings.snrMin} × its noise), with the band shapes of ${ch.cal.name} · ${ch.step.name}. The interval resamples whole blocks of neighbouring ${pf ? "particles (150 µm squares)" : "pixels (8 × 8)"}, since neighbouring map spectra share their signal.`);
+  if (cmp) items.push(`${fmt(cmp.ratio, 3)} × the uncoated reference (${refName}, ${fx(refMed)}): a difference of ${signed(cmp.diff)} (95 % CI ${fx(cmp.lo)} to ${fx(cmp.hi)}${cmp.hand ? "; the reference's own spread is not counted" : ""}). ` +
+    (cmp.lo > 0 ? "More D3 than the reference, beyond the spread of the measurement." : cmp.hi < 0 ? "Less D3 than the reference, beyond the spread of the measurement." : "Not told apart from the reference at this spread."));
+  else items.push(refF ? `${refF.name} has no carbon spectra to compare with.` : "Choose an uncoated reference open in this window, or enter its median, to compare with it.");
+  if (warn) items.push(`The held shapes leave a residual of ${res.rn.toFixed(2)} × the noise (median; about 1 where they describe the spectra), so the bands here differ from the calibration's. Strong spectra show it most, since the misfit grows with the signal. Check: shapes from this file says how far I(D3)/I(G) moves with this file's own shapes; a G position that moved points at the instrument's calibration (silicon at 520.7 cm⁻¹).`);
+  if (ref && ref.n && Math.max(res.snr / ref.snr, ref.snr / res.snr) > 2)
+    items.push(`The two were measured at different signal-to-noise (median G ${fmt(res.snr, 3)} × noise here, ${fmt(ref.snr, 3)} × in the reference). Noise raises I(D3)/I(G), since a height cannot go below zero, so the noisier set reads high: compare samples measured alike.`);
+  box.className = `verdict${warn ? " warn" : ""}`;
+  box.replaceChildren(el("b", {}, `I(D3)/I(G) ${fx(M.median)} (95 % CI ${fx(M.lo)}–${fx(M.hi)})`), el("div", {}, items[0]), ...items.slice(1).map(t => el("p", {}, t)));
+  const card = (k, v, s) => el("div", { class: "card" }, el("div", { class: "k" }, k), el("div", { class: "v" }, v), el("div", { class: "s" }, s));
+  cards.replaceChildren(
+    card("I(D3)/I(G)", fx(M.median), `median · 95 % CI ${fx(M.lo)}–${fx(M.hi)} · mean ${fx(res.mean)}`),
+    card(`Carbon ${unit}`, `${fmt(res.n)} of ${fmt(res.measured)}`, `G ≥ ${res.prep.settings.snrMin} × noise · ${fmt(M.blocks)} blocks${res.prep.spikes ? ` · ${fmt(res.prep.spikes)} spikes removed` : ""}`),
+    card("Against the reference", cmp ? signed(cmp.diff) : "–", cmp ? `95 % CI ${fx(cmp.lo)} to ${fx(cmp.hi)} · ${fmt(cmp.ratio, 3)} × ${refName}` : "no reference"),
+    card("A(D3)/A(G)", fx(res.area), "median · areas of the held line shapes"),
+    card("D3 in one spectrum", `${fmt(res.z3, 2)} × its error`, "median height over its error: a single spectrum barely carries D3, the median of many does"),
+    card("Fit residual", `${res.rn.toFixed(2)} × noise`, "median · about 1 where the shapes fit, above 2 flagged"));
+  const C = D3G.check.get(res.key);
+  chk.replaceChildren(...(C ? [
+    card("With this file's shapes", fx(C.median), `I(D3)/I(G) median · ${C.median >= M.median ? "+" : "−"}${fmt(Math.abs(C.median / M.median - 1) * 100, 2)} % against the calibration's`),
+    card("Residual, own shapes", `${C.rn.toFixed(2)} × noise`, `${res.rn.toFixed(2)} × with the calibration's`),
+    card("G here", `${C.shapes.G.pos.toFixed(1)} / ${C.shapes.G.fwhm.toFixed(1)}`, `cm⁻¹, position / FWHM · calibration ${ch.step.shapes.G.pos.toFixed(1)} / ${ch.step.shapes.G.fwhm.toFixed(1)}`),
+    card("Measured here", D3G_BANDS.filter(b => C.shapes[b].support > 0).join(", ") || "none", `in at least 5 % of the ${unit}; ${D3G_BANDS.filter(b => !(C.shapes[b].support > 0)).join(", ") || "none"} kept`),
+  ] : []));
+  note.textContent = `How: each spectrum is cut to ${res.prep.settings.range[0]}–${res.prep.settings.range[1]} cm⁻¹ and cleared of cosmic rays (points more than 8 × the noise above a 7-point running median, at most 2 points wide). Its noise is the robust SD of the second difference over √6; it counts as carbon when its smoothed G peak (1540–1630 cm⁻¹, Savitzky-Golay 11 points) stands at least ${res.prep.settings.snrMin} × that above a straight line through the two ends of the range. ` +
+    `The five heights (0 to ${res.prep.settings.hmax} counts) and a poly-2 background are then solved by bounded least squares with every position and width held (D3 Gaussian, the others Lorentzian); a height's error is the linear fit's, at its residual. Areas are the line shapes' own (h × w × π/2 for a Lorentzian, h × w × 1.064 for a Gaussian). ` +
+    `The spectra are the raw ones: the Carbon fit tab's smoothing and its free shapes do not enter, and its D3/G is not comparable with this one. ` +
+    (pf ? "ParticleFinder: the particles the rest of this tab uses (measured, off the mosaic's seams). " : "") +
+    "A calibration is built in steps: the standards fitted in the Q-Carbon windows (G from graphite, D1 to D4 from glassy carbon), then each band's median position and width over the uncoated map's carbon spectra where the band is at least 3 × the noise (R² above 0.5), then the same over the coated map. A band found in fewer than 5 % of the spectra keeps the step before's shape. The check applies that last step to this file, for comparison only.";
+  if ($("#d3g-map").checked && res.vals) {
+    pmap.setCategories(null);
+    pmap.setTitle("D3/G calibration : <u>I(D3)/I(G)</u>");
+    pmap.setData(res.vals, { valid: null, label: "I(D3)/I(G)", unit: "" });
+  }
+}
+for (const id of ["#d3g-cal", "#d3g-ref", "#d3g-ref-med"]) $(id).addEventListener("change", () => renderD3g());
+$("#d3g-map").addEventListener("change", () => { if (S.points && S.fit) renderPF(); else if (S.seg) renderParticles(); else renderD3g(); });
+
+$("#d3g-check").onclick = async () => {
+  const cur = S.ds && fileOf(S.ds.id), status = $("#d3g-status");
+  if (!cur || !S.cube || D3G.building) return;
+  const ch = d3gChoice();
+  try {
+    D3G.building = true; status.textContent = "Fitting this file's spectra freely…"; await xcTick();
+    const res = await d3gResult(cur, ch);
+    if (!res.n) { status.textContent = "No carbon spectra to fit."; return; }
+    const prep = res.prep, list = Array.from(res.U.list);
+    const Fr = await d3gFreeFits(prep, list, ch.step.shapes, (a, b) => { status.textContent = `Fitting this file's spectra freely: ${fmt(a)} of ${fmt(b)}…`; });
+    const own = calibrate(Fr, prep.sig, ch.step.shapes, ch.cal.settings), U2 = unmix(prep, own, list);
+    D3G.check.set(res.key, { shapes: own, median: median(U2.ratio["ID3/IG"]), rn: median(list.map((p, i) => U2.rmse[i] / prep.sig[p])) });
+    status.textContent = "";
+    renderD3g();
+  } catch (e) { status.textContent = `The check failed: ${e.message}`; }
+  finally { D3G.building = false; }
+};
+
+$("#d3g-csv").onclick = () => {
+  const cur = S.ds && fileOf(S.ds.id); if (!cur) return;
+  const res = D3G.res.get(d3gKey(cur, d3gChoice()));
+  if (!res || !res.U) { toast("Nothing to export yet: the calibration is still running, or found no carbon spectra.", "error"); return; }
+  const { prep, U } = res, pl = prep.place, nb = D3G_BANDS.length, at = new Map(Array.from(U.list, (p, i) => [p, i]));
+  const num = v => (Number.isFinite(v) ? String(+(+v).toPrecision(7)) : "");
+  const rows = [[pl.pf ? "Particle" : "Point", "X (um)", "Y (um)", ...(pl.pf ? [] : ["Column", "Row"]), "G signal/noise", "Noise (counts)", "In the result",
+    ...D3G_BANDS.flatMap(b => [`${b} height`, `${b} SE`]), "I(D3)/I(G)", "I(D3)/I(G) SE", "A(D3)/A(G)", "I(D1)/I(G)", "I(D4)/I(G)", "Residual RMS", "R2"]];
+  for (let p = 0; p < prep.P; p++) {
+    if (!Number.isFinite(prep.sig[p])) continue;                       // never measured
+    const i = at.get(p), col = p % (pl.nx || 1), row = pl.pf ? 0 : Math.floor(p / pl.nx);
+    const fit = i == null ? Array(2 * nb + 7).fill("") : [...D3G_BANDS.flatMap((_, j) => [num(U.h[i * nb + j]), num(U.se[i * nb + j])]),
+      ...["ID3/IG", "ID3/IG_se", "AD3/AG", "ID1/IG", "ID4/IG"].map(k => num(U.ratio[k][i])), num(U.rmse[i]), num(U.r2[i])];
+    rows.push([String(p + 1), num(pl.pf ? pl.x[p] : pl.x[col]), num(pl.pf ? pl.y[p] : pl.y[row]), ...(pl.pf ? [] : [String(col), String(row)]),
+      num(prep.snr[p]), num(prep.sig[p]), i == null ? "no" : "yes", ...fit]);
+  }
+  download(`${cur.name}_D3G.csv`, rows.map(r => r.join(",")).join("\n") + "\n", "text/csv");
+};
+
+// the standards for a build: a LabSpec single spectrum or a two-column text spectrum
+$("#d3g-gr").onclick = () => { D3G.picking = "graphite"; $("#d3g-std-file").click(); };
+$("#d3g-gl").onclick = () => { D3G.picking = "glassy"; $("#d3g-std-file").click(); };
+$("#d3g-std-file").onchange = async e => {
+  const file = e.target.files[0], which = D3G.picking; e.target.value = "";
+  if (!file || !which) return;
+  try {
+    const { readL6s, readText } = await import("./engine/readers.js");
+    let s;
+    if (/\.l6s$/i.test(file.name)) s = readL6s(await file.arrayBuffer(), file.name);
+    else {
+      const m = readText(await file.text(), file.name);
+      if (m.nx * m.ny !== 1) throw new Error(`${file.name}: ${fmt(m.nx * m.ny)} spectra; a standard is one spectrum`);
+      s = { wn: Float64Array.from(m.wn), y: Float64Array.from(m.cube) };
+    }
+    D3G.std[which] = { wn: s.wn, y: s.y, name: file.name };
+    $(which === "graphite" ? "#d3g-gr-name" : "#d3g-gl-name").textContent = `${file.name} · ${s.wn.length} ch, ${Math.round(s.wn[0])}–${Math.round(s.wn[s.wn.length - 1])} cm⁻¹`;
+  } catch (err) { toast(err.message, "error"); }
+};
+
+$("#d3g-build").onclick = async () => {
+  if (D3G.building) return;
+  const status = $("#d3g-status"), f1 = fileOf($("#d3g-b1").value), f2 = fileOf($("#d3g-b2").value), g = D3G.std.graphite, gl = D3G.std.glassy;
+  if (!g || !gl) { status.textContent = "Choose the graphite and the glassy carbon spectra first."; return; }
+  if (!f1 || !f2) { status.textContent = "Choose the uncoated and the coated map (open them in this window first)."; return; }
+  D3G.building = true; $("#d3g-build").disabled = true;
+  try {
+    const settings = QC_SETTINGS;
+    status.textContent = "Fitting the standards…"; await xcTick();
+    const s0 = d3gStandards(g, gl, settings);
+    const step = async (f, prev, what) => {
+      status.textContent = `${what}: reading ${f.name}…`; await xcTick();
+      const prep = await d3gPrep(f, settings), list = d3gList(prep);
+      if (list.length < 20) throw new Error(`${f.name} has only ${list.length} carbon spectra`);
+      const fits = await d3gFreeFits(prep, list, prev, (a, b) => { status.textContent = `${what}: fitting ${f.name} freely, ${fmt(a)} of ${fmt(b)} carbon spectra…`; });
+      return calibrate(fits, prep.sig, prev, settings);
+    };
+    const b1 = await step(f1, s0.shapes, "Baseline 1"), b2 = await step(f2, b1, "Baseline 2"), now = new Date();
+    D3G.cals.push({ name: `Built ${stamp(now)}`, date: now.toISOString().slice(0, 10), settings,
+      steps: [{ name: `Standards (${g.name}, ${gl.name})`, shapes: s0.shapes }, { name: `Baseline 1 (${f1.name})`, shapes: b1 }, { name: `Baseline 2 (${f2.name})`, shapes: b2 }] });
+    D3G.pick = `${D3G.cals.length - 1}:2`;
+    status.textContent = `Built from ${g.name}, ${gl.name}, ${f1.name} and ${f2.name}: its baseline 2 is now in use. Save calibration keeps it.`;
+    renderD3g();
+  } catch (e) { status.textContent = `Could not build the calibration: ${e.message}`; }
+  finally { D3G.building = false; $("#d3g-build").disabled = false; }
+};
+
+$("#d3g-save").onclick = () => { const { cal } = d3gChoice(); download(`${cal.name.replace(/[^\w.-]+/g, "_")}_D3G_calibration.json`, calToJSON(cal), "application/json"); };
+$("#d3g-load").onclick = () => $("#d3g-json-file").click();
+$("#d3g-json-file").onchange = async e => {
+  const file = e.target.files[0]; e.target.value = "";
+  if (!file) return;
+  try {
+    const cal = calFromJSON(await file.text(), file.name.replace(/\.json$/i, "")), use = cal.steps.findIndex(s => /use for all/i.test(s.name));
+    D3G.cals.push(cal); D3G.pick = `${D3G.cals.length - 1}:${use >= 0 ? use : cal.steps.length - 1}`;
+    toast(`Loaded ${file.name}: ${cal.steps.length} step${cal.steps.length > 1 ? "s" : ""}`, "good");
+    renderD3g();
+  } catch (err) { toast(err.message, "error"); }
+};
+
+// =========================================================================
 // Coverage: the share of particles (or of a particle's area) that carries the coating
 // =========================================================================
 // A spectrum is judged only above a signal floor: the G height at which a coating of the
@@ -2768,6 +3056,7 @@ function renderPF() {
     el("td", {}, popOf(p)), el("td", {}, fmt(r.values[p]))));
   if (idx.length > top.length) t.append(el("tr", {}, el("td", { colspan: 7, class: "sub" }, `${fmt(top.length)} highest of ${fmt(idx.length)} shown; Export particle analysis (CSV) has every particle`)));
   drawScatter();
+  renderD3g();
 }
 
 function drawScatter() {

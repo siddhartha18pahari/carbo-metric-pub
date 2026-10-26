@@ -258,6 +258,23 @@ export function readL6m(buf, name) {
            name: stem(name), format: "l6m", laser: laserNm(raw), settings: settings(raw) };
 }
 
+// one spectrum (.l6s, e.g. a reference standard): the first matrix in the file followed by a
+// Raman-shift axis of its length (a file may hold later copies over a wider range)
+export function readL6s(buf, name) {
+  const raw = new Uint8Array(buf);
+  magic(raw, name);
+  const blocks = matBlocks(raw).map(([o, n]) => [o, f32(raw, o, n)]);
+  for (let i = 0; i + 1 < blocks.length; i++) {
+    const [, y] = blocks[i], [, a] = blocks[i + 1];
+    if (isAxis(y) || a.length < 16 || a.length > y.length || !isAxis(a)) continue;
+    if (!(SHIFT_MIN < Math.min(a[0], a[a.length - 1]) && Math.max(a[0], a[a.length - 1]) < SHIFT_MAX)) continue;
+    const K = a.length, wn = Float64Array.from(a), v = Float64Array.from(y.subarray(0, K));
+    if (wn[0] > wn[K - 1]) { wn.reverse(); v.reverse(); }
+    return { wn, y: v, name: stem(name) };
+  }
+  throw new Error(`${name}: no spectrum with a Raman-shift axis in this file`);
+}
+
 // white-light camera frame: uint8 RGB (H, W, 3), X axis listed before Y
 export function readL6v(buf, name) {
   const raw = new Uint8Array(buf);

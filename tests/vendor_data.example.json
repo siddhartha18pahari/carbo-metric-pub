@@ -17,5 +17,12 @@
   "antistokes_red_map": "LabSpec's red map (.l6i) of that map",
   "twin_axis_map": "a .l6m map that stores its X axis twice",
   "twin_axis_red_map": "LabSpec's red map (.l6i) of that map",
-  "incomplete_map": "a LabSpec text map whose acquisition stopped 3 points before the end of its 11 x 11 grid"
+  "incomplete_map": "a LabSpec text map whose acquisition stopped 3 points before the end of its 11 x 11 grid",
+  "d3g_package": "the folder of a D3/G calibration package: its baselines_D3G.json and result workbooks (*/*results*.xlsx)",
+  "d3g_graphite": "the graphite standard spectrum (.l6s) the calibration was made with",
+  "d3g_glassy": "the glassy carbon standard spectrum (.l6s) the calibration was made with",
+  "d3g_pf_spectra_list": "the ParticleFinder spectra list (.l6m) of the package's particle sample",
+  "d3g_pf_project": "its ParticleFinder project (.l6pf)",
+  "d3g_uncoated_map": "the uncoated reference map (.l6m) the calibration's baseline 1 came from",
+  "d3g_coated_map": "the coated map (.l6m) the calibration's baseline 2 came from"
 }

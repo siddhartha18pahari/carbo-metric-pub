@@ -365,6 +365,32 @@
           <div class="muted small" id="pf-coat-note"></div>
         </div>
       </div>
+      <div class="sec" data-sec="d3g">
+        <div class="sec-h toggle">D3/G calibration</div>
+        <div class="sec-b">
+          <div class="muted small">I(D3)/I(G) with band shapes calibrated on reference standards and held for every sample: only the five heights and a poly-2 background are fitted, so the values compare between samples.</div>
+          <div class="frow"><label>Band shapes</label><select id="d3g-cal" title="The calibration step whose positions and widths are held: baseline 2 is the one to apply; the earlier steps are there to compare"></select></div>
+          <div class="frow"><label>Uncoated reference</label><select id="d3g-ref" title="An uncoated sample open in this window: fitted with the same band shapes, its median is the zero point of the comparison"></select></div>
+          <div class="frow"><label>Its median</label><div class="kx"><input type="number" id="d3g-ref-med" step="any" min="0" placeholder="I(D3)/I(G)"><span>when no file is chosen</span></div></div>
+          <div class="frow"><label></label><label class="chk" title="Draw each carbon spectrum's calibrated I(D3)/I(G) on the map above"><input type="checkbox" id="d3g-map"> Show on the map</label></div>
+          <div class="verdict" id="d3g-verdict"></div>
+          <div class="cards" id="d3g-cards"></div>
+          <div class="pf-scroll"><table class="stats" id="d3g-table"></table></div>
+          <div class="row2"><button id="d3g-check" title="Fit this file's spectra freely from the shapes in use, take each band's median shape here, and see how far I(D3)/I(G) moves (a check: the result above keeps the calibration's shapes)">Check: shapes from this file</button><button id="d3g-csv" title="Every spectrum: signal-to-noise, the five heights with their errors, the ratios and the fit residual">Export (CSV)</button></div>
+          <div class="cards" id="d3g-check-cards"></div>
+          <div class="sub-h">Build a calibration</div>
+          <div class="frow"><label>Graphite</label><div class="row2"><button id="d3g-gr" title="A spectrum of a graphite standard (.l6s, or a two-column text spectrum): its G band sets G">Choose…</button><span class="muted small" id="d3g-gr-name">no spectrum</span></div></div>
+          <div class="frow"><label>Glassy carbon</label><div class="row2"><button id="d3g-gl" title="A spectrum of a glassy carbon standard: it sets D1 to D4">Choose…</button><span class="muted small" id="d3g-gl-name">no spectrum</span></div></div>
+          <div class="frow"><label>Uncoated map</label><select id="d3g-b1" title="An uncoated map open in this window: baseline 1, from the standards"></select></div>
+          <div class="frow"><label>Coated map</label><select id="d3g-b2" title="A coated map open in this window: baseline 2, from baseline 1"></select></div>
+          <div class="row2"><button id="d3g-build">Build</button><button id="d3g-save" title="Save the calibration chosen above, every step with its settings, as JSON">Save calibration</button></div>
+          <button class="wide" id="d3g-load" title="Read a calibration saved here, or the baselines_D3G.json of the calibration's scripts">Load calibration…</button>
+          <input type="file" id="d3g-std-file" accept=".l6s,.txt,.csv,.tsv,.dat" class="hidden">
+          <input type="file" id="d3g-json-file" accept=".json,application/json" class="hidden">
+          <div class="muted small" id="d3g-status"></div>
+          <div class="muted small" id="d3g-note"></div>
+        </div>
+      </div>
       <div class="sec" data-sec="coverage">
         <div class="sec-h toggle">Coverage</div>
         <div class="sec-b">
