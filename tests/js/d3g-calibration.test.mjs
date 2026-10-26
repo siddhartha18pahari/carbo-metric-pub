@@ -2,7 +2,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { BANDS, QC_SETTINGS, PRESET_21OCT, noiseSigma, despike, savgol, prepare, boxSolver, unmix, freeFits, calibrate, standards,
-         blocksOf, blockMedian, compareMedians, mapBlock, stageBlock, toJSON, fromJSON, shapeArea } from "../../web/js/d3g-calibration.js";
+         blocksOf, blockMedian, compareMedians, mapBlock, stageBlock, toJSON, fromJSON, shapeArea,
+         medianSpectrumBand, refineOnMedian, standardRatio, scaleIndex } from "../../web/js/d3g-calibration.js";
 import { rng } from "../../web/js/pf-analysis.js";
 
 const near = (a, b, tol, msg) => assert.ok(Math.abs(a - b) <= tol, `${msg ?? ""} ${a} vs ${b}`);
@@ -132,10 +133,54 @@ test("block medians: intervals cover, comparisons are exact in their centre and 
   assert.equal(stageBlock(-1, 151), "-1,1");
 });
 
+// an uncoated-like map: D3 far below the noise in every spectrum
+function weakD3Map(d3, n = 400, seed = 37) {
+  const R = rng(seed), K = WN.length, cube = new Float32Array(n * K), truth = { ...PRESET_21OCT.steps[2].shapes, D3: { pos: 1500, fwhm: 160 } };
+  for (let p = 0; p < n; p++) cube.set(spectrum({ D4: 2, D1: 40, D3: d3, G: 150, D2: 15 }, { shapes: truth, sd: 3, R }), p * K);
+  return prepare(cube, K, WN, n);
+}
+
+// D3/G 0.02 at 3 counts of noise: about 1 x noise in each spectrum, 15 x the residual in the
+// median of 400 (its position then scatters about 3 cm-1 from map to map, 7 at D3/G 0.01)
+test("D3 that no single spectrum carries is measured on the median spectrum", () => {
+  const p = weakD3Map(3), prev = PRESET_21OCT.steps[0].shapes;
+  const per = calibrate(freeFits(p, p.carbon, prev), p.sig, prev);
+  assert.equal(per.D3.note, "kept");                       // under 3 x noise in almost every spectrum
+  const m = medianSpectrumBand(p, p.carbon, prev, "D3");
+  assert.ok(m.present, `z ${m.z}`);
+  near(m.pos, 1500, 5); near(m.fwhm, 160, 15);
+  const r = refineOnMedian(per, p, p.carbon, prev, "D3");
+  assert.match(r.shapes.D3.note, /^median spectrum/);
+  near(r.shapes.D3.pos, m.pos, 1e-12);
+  assert.equal(r.shapes.G, per.G);                         // the other bands are left as they were
+});
+
+test("without D3 the median spectrum finds none, and glassy carbon's shape stays", () => {
+  const p = weakD3Map(0), prev = PRESET_21OCT.steps[0].shapes;
+  const per = calibrate(freeFits(p, p.carbon, prev), p.sig, prev), r = refineOnMedian(per, p, p.carbon, prev, "D3");
+  assert.ok(!r.median.present, `z ${r.median.z}`);
+  assert.equal(r.shapes.D3, per.D3);
+  assert.equal(r.shapes.D3.pos, prev.D3.pos);
+});
+
+test("glassy carbon's ratio with held shapes, and the scale from the uncoated reference to it", () => {
+  const sh = PRESET_21OCT.steps[2].shapes, y = spectrum({ D4: 40, D1: 2300, D3: 280, G: 720, D2: 2400 }, { bg: [300, 10, 5] });
+  near(standardRatio({ wn: WN, y }, sh).ratio, 280 / 720, 1e-9);
+  near(scaleIndex(0.06, 0.025, 0.39), 0.035 / 0.365, 1e-15);
+  assert.ok(Number.isNaN(scaleIndex(0.06, 0.025, 0)));     // glassy carbon not above the reference: no scale
+  const R = rng(41), a = [], ka = [];
+  for (let p = 0; p < 1600; p++) { a.push(0.05 + 0.01 * gauss(R)); ka.push(mapBlock(p, 40)); }
+  const A = blocksOf(a, ka), c = compareMedians(A, A, { top: 0.39 });
+  near(c.index, 0, 1e-15);
+  assert.ok(c.indexLo < 0 && c.indexHi > 0);
+  assert.equal(compareMedians(A, A).index, undefined);     // no top, no scale
+});
+
 test("calibration files: this app's round trip and the calibration scripts' layout", () => {
   const back = fromJSON(toJSON(PRESET_21OCT));
   assert.equal(back.steps.length, 3);
   assert.equal(back.steps[2].shapes.G.pos, PRESET_21OCT.steps[2].shapes.G.pos);
+  assert.equal(back.steps[2].glassy, PRESET_21OCT.steps[2].glassy);
   const pkg = { description: "x", qcarbon_settings: { "range_cm-1": [1000, 1800], baseline_poly_order: 2, height_range: [0, 5000],
     bands: Object.fromEntries(BANDS.map(b => { const w = QC_SETTINGS.bands[b]; return [b, { position: w.pos, position_min: w.pos_min, position_max: w.pos_max, width: w.width, width_min: w.width_min, width_max: w.width_max, shape: w.shape }]; })) },
     "baseline_2 - USE FOR ALL SAMPLES": Object.fromEntries(BANDS.map(b => [b, { "position_cm-1": PRESET_21OCT.steps[2].shapes[b].pos, "FWHM_cm-1": PRESET_21OCT.steps[2].shapes[b].fwhm, note: "calibrated" }])) };

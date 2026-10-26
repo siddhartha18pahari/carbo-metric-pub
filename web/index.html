@@ -383,6 +383,7 @@
           <div class="frow"><label>Glassy carbon</label><div class="row2"><button id="d3g-gl" title="A spectrum of a glassy carbon standard: it sets D1 to D4">Choose…</button><span class="muted small" id="d3g-gl-name">no spectrum</span></div></div>
           <div class="frow"><label>Uncoated map</label><select id="d3g-b1" title="An uncoated map open in this window: baseline 1, from the standards"></select></div>
           <div class="frow"><label>Coated map</label><select id="d3g-b2" title="A coated map open in this window: baseline 2, from baseline 1"></select></div>
+          <div class="frow"><label></label><label class="chk" title="No single spectrum of an uncoated map carries D3, so its shape stays glassy carbon's. Ticked, D3 is fitted on the uncoated map's median spectrum and taken when it stands at least 3 × that fit's residual; a position or width on its window limit keeps glassy carbon's value"><input type="checkbox" id="d3g-d3med" checked> D3 from the uncoated map's median spectrum</label></div>
           <div class="row2"><button id="d3g-build">Build</button><button id="d3g-save" title="Save the calibration chosen above, every step with its settings, as JSON">Save calibration</button></div>
           <button class="wide" id="d3g-load" title="Read a calibration saved here, or the baselines_D3G.json of the calibration's scripts">Load calibration…</button>
           <input type="file" id="d3g-std-file" accept=".l6s,.txt,.csv,.tsv,.dat" class="hidden">

@@ -6,12 +6,14 @@
 //   -> baseline 2    the same over a coated map, from baseline 1
 //
 // A band too weak to measure in enough spectra keeps the previous step's shape (D3 on
-// both maps of the 21 Oct calibration, so its shape is glassy carbon's). Each spectrum is
-// cut to the Q-Carbon range, cleared of cosmic rays and counted as carbon when its G
-// stands 10 times above its noise; on carbon spectra the five heights (0 to 5000 counts)
-// and a poly-2 background are solved by bounded linear least squares, every position and
-// width held. Samples are compared on the median, against an uncoated reference fitted
-// the same way. Pure functions (no DOM), so they run under Node for the tests.
+// both maps of the 21 Oct calibration, so its shape is glassy carbon's). On the uncoated
+// map, D3 can instead be measured on the map's median spectrum (medianSpectrumBand). Each
+// spectrum is cut to the Q-Carbon range, cleared of cosmic rays and counted as carbon when
+// its G stands 10 times above its noise; on carbon spectra the five heights (0 to 5000
+// counts) and a poly-2 background are solved by bounded linear least squares, every
+// position and width held. Samples are compared on the median, against an uncoated
+// reference fitted the same way, and placed on a scale from that reference (0) to glassy
+// carbon (1). Pure functions (no DOM), so they run under Node for the tests.
 
 import { lmOne, baselineBasis, pinv, pinvSym, LORENTZ, GAUSS } from "./engine/core.js";
 import { rng, quantileSorted } from "./pf-analysis.js";
@@ -35,15 +37,18 @@ export const QC_SETTINGS = {
 const shapesOf = (rows, notes) => Object.fromEntries(BANDS.map((b, i) => [b, { pos: rows[i][0], fwhm: rows[i][1], support: rows[i][2], note: notes[i] }]));
 
 // The calibration of 21 Oct 2026 (positions and FWHM in cm-1, full precision): baseline 2
-// is the one to apply; the standards and baseline 1 are the steps that led to it.
+// is the one to apply; the standards and baseline 1 are the steps that led to it. Made by the
+// calibration's scripts, so D3 is glassy carbon's throughout (it was not refined on the
+// uncoated map's median spectrum). glassy: the glassy carbon standard's I(D3)/I(G) with each
+// step's shapes, the top of the uncoated-to-amorphous scale.
 export const PRESET_21OCT = {
   name: "21 Oct 2026", date: "2026-10-21", settings: QC_SETTINGS,
   steps: [
-    { name: "Standards", shapes: shapesOf([[1210, 120, 1], [1349.307394136578, 89.99999999999999, 1], [1510, 169.96501432885, 1],
+    { name: "Standards", glassy: 0.44572088595161247, shapes: shapesOf([[1210, 120, 1], [1349.307394136578, 89.99999999999999, 1], [1510, 169.96501432885, 1],
       [1577.908852151934, 14.34735068279007, 1], [1610.778311420766, 46.59874406724895, 1]], ["glassy carbon", "glassy carbon", "glassy carbon", "graphite", "glassy carbon"]) },
-    { name: "Baseline 1 (uncoated reference)", shapes: shapesOf([[1210, 120, 0], [1341.222822005198, 46.72824880672977, 3086], [1510, 169.96501432885, 0],
+    { name: "Baseline 1 (uncoated reference)", glassy: 0, shapes: shapesOf([[1210, 120, 0], [1341.222822005198, 46.72824880672977, 3086], [1510, 169.96501432885, 0],
       [1573.019625563872, 21.56014371767737, 3096], [1612.090968228501, 16.41613588528793, 2699]], ["kept", "median", "kept", "median", "median"]) },
-    { name: "Baseline 2 (coated)", shapes: shapesOf([[1210, 120, 0], [1342.754542709468, 89.74826429230919, 1382], [1510, 169.96501432885, -18],
+    { name: "Baseline 2 (coated)", glassy: 0.39115584956883603, shapes: shapesOf([[1210, 120, 0], [1342.754542709468, 89.74826429230919, 1382], [1510, 169.96501432885, -18],
       [1571.48191932493, 22.95410611753739, 1469], [1610, 40.15700537658364, 616]], ["kept", "median", "kept", "median", "median"]) },
   ],
 };
@@ -362,6 +367,53 @@ export function calibrate(fits, sig, prev, settings = QC_SETTINGS) {
   return out;
 }
 
+// The element-wise median of the spectra in list
+export function medianSpectrum(prep, list) {
+  const { N, Y } = prep, out = new Float64Array(N), col = new Float64Array(list.length);
+  for (let n = 0; n < N; n++) { list.forEach((p, i) => { col[i] = Y[p * N + n]; }); out[n] = medianOf(col); }
+  return out;
+}
+
+// A band that no single spectrum of a map carries (D3 on an uncoated map: under 3 x noise in every
+// one) measured on the map's median spectrum instead, fitted freely from the step before. It counts
+// as present when its height is at least `present` x the larger of the fit's residual RMS and the
+// noise a median of n spectra has (sqrt(pi / 2) sigma / sqrt(n)): the median of whole counts is
+// itself whole, so its second-difference noise reads 0, and the residual is mostly misfit, which a
+// band must stand above. A position or width on its window limit is not set by the fit and keeps
+// the step before's value. On a low-D3 map the fit puts a narrow band (about 50 cm-1) on the
+// 1490 limit at under 2 x the residual: a shoulder, not the broad D3 of a coating.
+export function medianSpectrumBand(prep, list, init, band, settings = prep.settings) {
+  const med = medianSpectrum(prep, list), j = BANDS.indexOf(band);
+  const f = freeFits({ nu: prep.nu, N: prep.N, Y: med, settings }, [0], init);
+  const fitted = Object.fromEntries(BANDS.map((b, k) => [b, { pos: f.c[k], fwhm: f.w[k] }]));
+  const U = unmix({ nu: prep.nu, N: prep.N, Y: med, settings }, fitted, [0]);
+  const sMed = Math.sqrt(Math.PI / 2) * medianOf(list.map(p => prep.sig[p])) / Math.sqrt(list.length);
+  const noise = Math.max(U.rmse[0], sMed), w = settings.bands[band], at = (v, a, b) => Math.abs(v - a) <= 0.05 || Math.abs(v - b) <= 0.05;
+  const h = f.h[j], pos = f.c[j], fwhm = f.w[j], z = h / noise, present = z >= settings.present && f.r2[0] > 0.5;
+  const posLim = at(pos, w.pos_min, w.pos_max), wLim = at(fwhm, w.width_min, w.width_max);
+  return { n: list.length, h, pos, fwhm, z, r2: f.r2[0], noise, present, posLim, wLim,
+           shape: present ? { pos: posLim ? init[band].pos : pos, fwhm: wLim ? init[band].fwhm : fwhm } : null };
+}
+
+// One calibration step's shapes with band refined on the median spectrum where the spectrum-by-
+// spectrum rule kept the step before's shape. The result says what was found either way.
+export function refineOnMedian(shapes, prep, list, prev, band = "D3") {
+  if (shapes[band].note !== "kept") return { shapes, median: null };
+  const m = medianSpectrumBand(prep, list, prev, band), out = { ...shapes };
+  if (m.shape) {
+    const kept = [m.posLim ? "position" : "", m.wLim ? "width" : ""].filter(Boolean);
+    out[band] = { pos: m.shape.pos, fwhm: m.shape.fwhm, support: shapes[band].support, atBound: NaN,
+                  note: `median spectrum${kept.length ? ` (${kept.join(" and ")} on a window limit, kept)` : ""}` };
+  }
+  return { shapes: out, median: m };
+}
+
+// I(D3)/I(G) of one reference spectrum ({ wn, y }) with a step's shapes held, and how well they fit it
+export function standardRatio(spec, shapes, settings = QC_SETTINGS) {
+  const p = prepare(Float64Array.from(spec.y), spec.y.length, spec.wn, 1, { ...settings, snrMin: -Infinity }), U = unmix(p, shapes);
+  return { ratio: U.ratio["ID3/IG"][0], rn: U.rmse[0] / p.sig[0] };
+}
+
 // The first step: the standards fitted with the Q-Carbon windows from their default shapes;
 // G is graphite's, D1 to D4 are glassy carbon's. Each standard: { wn, y }.
 export function standards(graphite, glassy, settings = QC_SETTINGS) {
@@ -425,14 +477,23 @@ export function blockMedian(blocks, { B = 2000, seed = 21 } = {}) {
   return { n: all.length, blocks: blocks.length, median: quantileSorted(all, 0.5), lo: quantileSorted(d, 0.025), hi: quantileSorted(d, 0.975) };
 }
 
+// Where a value sits between the uncoated reference (0) and glassy carbon, the amorphous
+// reference (1), on I(D3)/I(G) with the same held shapes. No scale when glassy carbon does not
+// read above the reference with those shapes.
+export const scaleIndex = (r, ref, top) => (top > ref ? (r - ref) / (top - ref) : NaN);
+
 // The difference of medians, sample minus reference, with its spatial block bootstrap 95 %
-// interval (each resample draws the blocks of both anew), and the ratio of the medians.
-export function compareMedians(sBlocks, rBlocks, { B = 2000, seed = 21 } = {}) {
+// interval (each resample draws the blocks of both anew), and the ratio of the medians. Given
+// glassy carbon's value (top), also the sample's place on the scale, with its interval from the
+// same resamples (the reference's spread moves both ends of the scale's bottom).
+export function compareMedians(sBlocks, rBlocks, { B = 2000, seed = 21, top = NaN } = {}) {
   const ms = quantileSorted(Float64Array.from(sBlocks.flat()).sort(), 0.5), mr = quantileSorted(Float64Array.from(rBlocks.flat()).sort(), 0.5);
-  const R = rng(seed), d = new Float64Array(B), bs = room(sBlocks), br = room(rBlocks);
-  for (let b = 0; b < B; b++) d[b] = resampledMedian(sBlocks, R, bs) - resampledMedian(rBlocks, R, br);
-  d.sort();
-  return { sample: ms, reference: mr, diff: ms - mr, lo: quantileSorted(d, 0.025), hi: quantileSorted(d, 0.975), ratio: mr ? ms / mr : NaN };
+  const R = rng(seed), d = new Float64Array(B), x = new Float64Array(B), bs = room(sBlocks), br = room(rBlocks);
+  for (let b = 0; b < B; b++) { const s = resampledMedian(sBlocks, R, bs), r = resampledMedian(rBlocks, R, br); d[b] = s - r; x[b] = scaleIndex(s, r, top); }
+  d.sort(); x.sort();
+  const out = { sample: ms, reference: mr, diff: ms - mr, lo: quantileSorted(d, 0.025), hi: quantileSorted(d, 0.975), ratio: mr ? ms / mr : NaN };
+  const index = scaleIndex(ms, mr, top);
+  return Number.isFinite(index) ? { ...out, index, indexLo: quantileSorted(x, 0.025), indexHi: quantileSorted(x, 0.975) } : out;
 }
 
 // block ids: 8 x 8 pixels on a map, 150 µm squares of stage position for ParticleFinder particles
@@ -446,14 +507,15 @@ export const stageBlock = (x, y, s = 150) => `${Math.floor(x / s)},${Math.floor(
 // baselines_D3G.json (qcarbon_settings plus one block per baseline) reads as well.
 export function toJSON(cal) {
   return JSON.stringify({ format: "carbo-metrics D3/G calibration", version: 1, name: cal.name, date: cal.date || null,
-    settings: cal.settings, steps: cal.steps.map(s => ({ name: s.name, shapes: s.shapes })) }, null, 1);
+    settings: cal.settings, steps: cal.steps.map(s => ({ name: s.name, shapes: s.shapes, glassy: Number.isFinite(s.glassy) ? s.glassy : null })) }, null, 1);
 }
 
 export function fromJSON(text, fileName = "calibration") {
   const d = JSON.parse(text);
   if (d.format === "carbo-metrics D3/G calibration") {
     if (!Array.isArray(d.steps) || !d.steps.length) throw new Error(`${fileName}: no calibration steps`);
-    return { name: d.name || fileName, date: d.date, settings: checkSettings(d.settings), steps: d.steps.map(s => ({ name: s.name, shapes: checkShapes(s.shapes, fileName) })) };
+    return { name: d.name || fileName, date: d.date, settings: checkSettings(d.settings),
+             steps: d.steps.map(s => ({ name: s.name, shapes: checkShapes(s.shapes, fileName), ...(Number.isFinite(s.glassy) ? { glassy: s.glassy } : {}) })) };
   }
   // the 21 Oct package layout: settings under qcarbon_settings, each baseline a block of bands
   const q = d.qcarbon_settings;

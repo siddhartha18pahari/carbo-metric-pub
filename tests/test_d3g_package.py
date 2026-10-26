@@ -75,8 +75,11 @@ def test_bundled_calibration_is_the_package_one(tmp_path):
 
 
 def test_standards_give_the_package_shapes(tmp_path):
-    out = _run(tmp_path, {"graphite": _path("d3g_graphite"), "glassy": _path("d3g_glassy")})["standards"]
-    want = _baseline(_book("maps")[0], "B0 standards")
+    res = _run(tmp_path, {"graphite": _path("d3g_graphite"), "glassy": _path("d3g_glassy")})
+    out, want = res["standards"], _baseline(_book("maps")[0], "B0 standards")
+    # the bundled top of the uncoated-to-glassy-carbon scale is the glassy standard's I(D3)/I(G)
+    # with each step's shapes (the calibration scripts' apply_baseline gives the same to 1e-14)
+    assert res["glassy"] == pytest.approx([s["glassy"] for s in res["preset_steps"]], abs=1e-12)
     # a free fit of one spectrum: the same answer to fit tolerance (positions and widths on a window
     # limit are exact; the free ones agree to 0.1 cm-1)
     for b in BANDS:
@@ -148,3 +151,20 @@ def test_maps_and_the_chain_match_the_package(tmp_path):
         want = _baseline(book, name)
         for b in BANDS:
             assert got[b]["pos"] == pytest.approx(want[b][0], abs=0.1) and got[b]["fwhm"] == pytest.approx(want[b][1], abs=0.3), (name, b)
+
+
+def test_d3_from_the_uncoated_median_spectrum(tmp_path):
+    """The build's D3 route: baseline 1's other bands are the scripts', and D3 is either measured on
+    the uncoated median spectrum (inside its window) or, not found there, glassy carbon's."""
+    book, _ = _book("maps")
+    req = {"graphite": _path("d3g_graphite"), "glassy": _path("d3g_glassy"),
+           "files": [{"path": _path("d3g_uncoated_map")}, {"path": _path("d3g_coated_map")}], "chain": [0, 1], "d3Median": True}
+    out = _run(tmp_path, req)
+    b1, m, want = out["chain"]["b1"], out["chain"]["d3median"], _baseline(book, "B1 median")
+    for b in ("D4", "D1", "G", "D2"):
+        assert b1[b]["pos"] == pytest.approx(want[b][0], abs=0.1) and b1[b]["fwhm"] == pytest.approx(want[b][1], abs=0.3), b
+    print(f"uncoated median spectrum D3: {m}")
+    if m["present"]:
+        assert 1490 <= b1["D3"]["pos"] <= 1510 and 40 <= b1["D3"]["fwhm"] <= 200
+    else:
+        assert (b1["D3"]["pos"], b1["D3"]["fwhm"]) == pytest.approx((want["D3"][0], want["D3"][1]))

@@ -18,7 +18,8 @@ import { rng, wilson, weightedQuantile, laCancado, robustScale, bestGmm, bootstr
          ksTest, fitFreeHeights, nestedSize, robustSD, dispersion, nmf, nmfProject, fitSplats, splatScale, gaussSmooth,
          kruskalWallis, brownForsythe, groupGap, thinTail, mixtureCoverage, olsHC3, nForMean, nForSpread, tQuantile } from "./pf-analysis.js";
 import { PRESET_21OCT, QC_SETTINGS, BANDS as D3G_BANDS, prepare as d3gPrepare, unmix, freeFits, calibrate, standards as d3gStandards,
-         blocksOf, blockMedian, compareMedians, mapBlock, stageBlock, toJSON as calToJSON, fromJSON as calFromJSON } from "./d3g-calibration.js";
+         blocksOf, blockMedian, compareMedians, mapBlock, stageBlock, toJSON as calToJSON, fromJSON as calFromJSON,
+         refineOnMedian, standardRatio, scaleIndex } from "./d3g-calibration.js";
 import { T, font, setTheme, currentTheme } from "./theme.js";
 import { lut } from "./colormaps.js";
 
@@ -2336,11 +2337,24 @@ function d3gTable(ch) {
   for (const b of D3G_BANDS) {
     t.append(el("tr", {}, el("td", {}, b), el("td", { class: "sub" }, ch.cal.settings.bands[b].shape),
       ...steps.map(s => {
-        const v = s.shapes[b], kept = /kept|inherit/i.test(v.note || "") || v.support < 0;
-        const tip = v.support != null ? `${v.support < 0 ? `measured in ${-v.support} spectra only: ` : v.support > 1 ? `median over ${v.support} spectra` : ""}${kept ? "the step before's shape kept" : v.note || ""}` : v.note || "";
-        return el("td", { title: tip }, `${s2(v.pos)} / ${s2(v.fwhm)}`, kept ? el("span", { class: "sub" }, " kept") : "");
+        const v = s.shapes[b], med = /^median spectrum/.test(v.note || ""), kept = !med && (/kept|inherit/i.test(v.note || "") || v.support < 0);
+        const tip = med ? `measured on the map's ${v.note}${s.d3median ? `: height ${s.d3median.z.toFixed(1)} × the fit's residual, fitted at ${s2(s.d3median.pos)} / ${s2(s.d3median.fwhm)}` : ""}`
+          : v.support != null ? `${v.support < 0 ? `measured in ${-v.support} spectra only: ` : v.support > 1 ? `median over ${v.support} spectra` : ""}${kept ? "the step before's shape kept" : v.support > 1 ? "" : v.note || ""}` : v.note || "";
+        return el("td", { title: tip }, `${s2(v.pos)} / ${s2(v.fwhm)}`, kept ? el("span", { class: "sub" }, " kept") : med ? el("span", { class: "sub" }, " median spectrum") : "");
       })));
   }
+  // the top of the uncoated-to-amorphous scale with each step's shapes
+  t.append(el("tr", { title: "The glassy carbon standard's I(D3)/I(G) with each step's shapes held: 1 on the scale from the uncoated reference to amorphous carbon" },
+    el("td", { colspan: 2, class: "sub" }, "Glassy carbon I(D3)/I(G)"), ...steps.map(s => el("td", { class: "sub" }, Number.isFinite(d3gTop(s)) ? d3gTop(s).toFixed(4) : "–"))));
+}
+
+// glassy carbon's I(D3)/I(G) with a step's shapes: kept with the step, or from the glassy carbon
+// spectrum chosen under Build a calibration
+function d3gTop(step) {
+  if (Number.isFinite(step.glassy)) return step.glassy;
+  const gl = D3G.std.glassy; if (!gl) return NaN;
+  if (!step.topCache || step.topCache.std !== gl) step.topCache = { std: gl, v: standardRatio(gl, step.shapes).ratio };
+  return step.topCache.v;
 }
 
 function renderD3g() {
@@ -2348,6 +2362,7 @@ function renderD3g() {
   d3gSelects();
   const ch = d3gChoice();
   d3gTable(ch);
+  S.d3gScale = null;
   const clear = msg => { box.className = "verdict"; box.textContent = ""; cards.replaceChildren(); chk.replaceChildren(); note.textContent = msg; };
   const cur = S.ds && fileOf(S.ds.id);
   if (!cur || !S.cube) return clear(S.fit && S.fit.resultsOnly ? "The calibration needs the spectra: open the map itself." : "");
@@ -2360,20 +2375,31 @@ function renderD3g() {
   const M = res.med, dp = Math.min(6, Math.max(2, 1 - Math.floor(Math.log10(M.hi - M.lo || 1e-3))));
   const fx = v => (Number.isFinite(v) ? `${v < 0 ? "−" : ""}${Math.abs(v).toFixed(dp)}` : "–"), signed = v => `${v < 0 ? "−" : "+"}${Math.abs(v).toFixed(dp)}`;
   let cmp = null, refMed = NaN, refName = "";
+  const top = d3gTop(ch.step);
   if (ref && ref.n) {
-    const k = `${res.key}~${ref.key}`;
-    if (!D3G.cmp.has(k)) D3G.cmp.set(k, compareMedians(res.blocks, ref.blocks));
+    const k = `${res.key}~${ref.key}~${top}`;
+    if (!D3G.cmp.has(k)) D3G.cmp.set(k, compareMedians(res.blocks, ref.blocks, { top }));
     cmp = D3G.cmp.get(k); refMed = ref.med.median; refName = refF.name;
   } else if (!refF) {
     refMed = parseFloat($("#d3g-ref-med").value);
-    if (refMed > 0) cmp = { diff: M.median - refMed, lo: M.lo - refMed, hi: M.hi - refMed, ratio: M.median / refMed, hand: true };
+    if (refMed > 0) {
+      cmp = { diff: M.median - refMed, lo: M.lo - refMed, hi: M.hi - refMed, ratio: M.median / refMed, hand: true };
+      const index = scaleIndex(M.median, refMed, top);
+      if (Number.isFinite(index)) Object.assign(cmp, { index, indexLo: scaleIndex(M.lo, refMed, top), indexHi: scaleIndex(M.hi, refMed, top) });
+    }
     refName = "the median entered";
   }
+  // per spectrum, for the export: where each one sits on the same scale
+  S.d3gScale = cmp && Number.isFinite(cmp.index) ? { ref: refMed, top } : null;
+  const why = !cmp ? "no uncoated reference" : !Number.isFinite(top) ? "glassy carbon not known for these shapes: choose its spectrum under Build a calibration"
+    : `glassy carbon reads ${top.toFixed(4)} with these shapes, not above the reference`;
   const warn = res.rn > 2, items = [];
   items.push(`Median over the ${fmt(res.n)} carbon ${unit} of ${cur.name} (G at least ${res.prep.settings.snrMin} × its noise), with the band shapes of ${ch.cal.name} · ${ch.step.name}. The interval resamples whole blocks of neighbouring ${pf ? "particles (150 µm squares)" : "pixels (8 × 8)"}, since neighbouring map spectra share their signal.`);
   if (cmp) items.push(`${fmt(cmp.ratio, 3)} × the uncoated reference (${refName}, ${fx(refMed)}): a difference of ${signed(cmp.diff)} (95 % CI ${fx(cmp.lo)} to ${fx(cmp.hi)}${cmp.hand ? "; the reference's own spread is not counted" : ""}). ` +
     (cmp.lo > 0 ? "More D3 than the reference, beyond the spread of the measurement." : cmp.hi < 0 ? "Less D3 than the reference, beyond the spread of the measurement." : "Not told apart from the reference at this spread."));
   else items.push(refF ? `${refF.name} has no carbon spectra to compare with.` : "Choose an uncoated reference open in this window, or enter its median, to compare with it.");
+  if (cmp && Number.isFinite(cmp.index)) items.push(`On the scale from the uncoated reference (0) to glassy carbon, the amorphous reference (1, I(D3)/I(G) ${top.toFixed(4)} with the same shapes): ${cmp.index.toFixed(3)} (95 % CI ${cmp.indexLo.toFixed(3)} to ${cmp.indexHi.toFixed(3)}). ` +
+    "It places the sample's D3/G between the two references; it is not a mass or thickness fraction, since D3 per unit of amorphous carbon differs between glassy carbon and a coating.");
   if (warn) items.push(`The held shapes leave a residual of ${res.rn.toFixed(2)} × the noise (median; about 1 where they describe the spectra), so the bands here differ from the calibration's. Strong spectra show it most, since the misfit grows with the signal. Check: shapes from this file says how far I(D3)/I(G) moves with this file's own shapes; a G position that moved points at the instrument's calibration (silicon at 520.7 cm⁻¹).`);
   if (ref && ref.n && Math.max(res.snr / ref.snr, ref.snr / res.snr) > 2)
     items.push(`The two were measured at different signal-to-noise (median G ${fmt(res.snr, 3)} × noise here, ${fmt(ref.snr, 3)} × in the reference). Noise raises I(D3)/I(G), since a height cannot go below zero, so the noisier set reads high: compare samples measured alike.`);
@@ -2384,6 +2410,8 @@ function renderD3g() {
     card("I(D3)/I(G)", fx(M.median), `median · 95 % CI ${fx(M.lo)}–${fx(M.hi)} · mean ${fx(res.mean)}`),
     card(`Carbon ${unit}`, `${fmt(res.n)} of ${fmt(res.measured)}`, `G ≥ ${res.prep.settings.snrMin} × noise · ${fmt(M.blocks)} blocks${res.prep.spikes ? ` · ${fmt(res.prep.spikes)} spikes removed` : ""}`),
     card("Against the reference", cmp ? signed(cmp.diff) : "–", cmp ? `95 % CI ${fx(cmp.lo)} to ${fx(cmp.hi)} · ${fmt(cmp.ratio, 3)} × ${refName}` : "no reference"),
+    card("Uncoated 0 → glassy carbon 1", cmp && Number.isFinite(cmp.index) ? cmp.index.toFixed(3) : "–",
+      cmp && Number.isFinite(cmp.index) ? `95 % CI ${cmp.indexLo.toFixed(3)} to ${cmp.indexHi.toFixed(3)} · glassy carbon ${top.toFixed(4)}` : why),
     card("A(D3)/A(G)", fx(res.area), "median · areas of the held line shapes"),
     card("D3 in one spectrum", `${fmt(res.z3, 2)} × its error`, "median height over its error: a single spectrum barely carries D3, the median of many does"),
     card("Fit residual", `${res.rn.toFixed(2)} × noise`, "median · about 1 where the shapes fit, above 2 flagged"));
@@ -2398,7 +2426,9 @@ function renderD3g() {
     `The five heights (0 to ${res.prep.settings.hmax} counts) and a poly-2 background are then solved by bounded least squares with every position and width held (D3 Gaussian, the others Lorentzian); a height's error is the linear fit's, at its residual. Areas are the line shapes' own (h × w × π/2 for a Lorentzian, h × w × 1.064 for a Gaussian). ` +
     `The spectra are the raw ones: the Carbon fit tab's smoothing and its free shapes do not enter, and its D3/G is not comparable with this one. ` +
     (pf ? "ParticleFinder: the particles the rest of this tab uses (measured, off the mosaic's seams). " : "") +
-    "A calibration is built in steps: the standards fitted in the Q-Carbon windows (G from graphite, D1 to D4 from glassy carbon), then each band's median position and width over the uncoated map's carbon spectra where the band is at least 3 × the noise (R² above 0.5), then the same over the coated map. A band found in fewer than 5 % of the spectra keeps the step before's shape. The check applies that last step to this file, for comparison only.";
+    "A calibration is built in steps: the standards fitted in the Q-Carbon windows (G from graphite, D1 to D4 from glassy carbon), then each band's median position and width over the uncoated map's carbon spectra where the band is at least 3 × the noise (R² above 0.5), then the same over the coated map. A band found in fewer than 5 % of the spectra keeps the step before's shape. " +
+    "D3 is that weak on an uncoated map, so a build can measure it on the uncoated map's median spectrum instead: taken when its height is at least 3 × that fit's residual, a position or width on its window limit keeping glassy carbon's value. The 21 Oct calibration was made without this (D3 is glassy carbon's). " +
+    "The scale: (R − R_uncoated) / (R_glassy − R_uncoated), R the median I(D3)/I(G), glassy carbon's from its standard spectrum with the same shapes, the interval from the same block resamples. The check applies the last step to this file, for comparison only.";
   if ($("#d3g-map").checked && res.vals) {
     pmap.setCategories(null);
     pmap.setTitle("D3/G calibration : <u>I(D3)/I(G)</u>");
@@ -2431,14 +2461,16 @@ $("#d3g-csv").onclick = () => {
   const res = D3G.res.get(d3gKey(cur, d3gChoice()));
   if (!res || !res.U) { toast("Nothing to export yet: the calibration is still running, or found no carbon spectra.", "error"); return; }
   const { prep, U } = res, pl = prep.place, nb = D3G_BANDS.length, at = new Map(Array.from(U.list, (p, i) => [p, i]));
-  const num = v => (Number.isFinite(v) ? String(+(+v).toPrecision(7)) : "");
+  const num = v => (Number.isFinite(v) ? String(+(+v).toPrecision(7)) : ""), sc = S.d3gScale;
   const rows = [[pl.pf ? "Particle" : "Point", "X (um)", "Y (um)", ...(pl.pf ? [] : ["Column", "Row"]), "G signal/noise", "Noise (counts)", "In the result",
-    ...D3G_BANDS.flatMap(b => [`${b} height`, `${b} SE`]), "I(D3)/I(G)", "I(D3)/I(G) SE", "A(D3)/A(G)", "I(D1)/I(G)", "I(D4)/I(G)", "Residual RMS", "R2"]];
+    ...D3G_BANDS.flatMap(b => [`${b} height`, `${b} SE`]), "I(D3)/I(G)", "I(D3)/I(G) SE", "A(D3)/A(G)", "I(D1)/I(G)", "I(D4)/I(G)", "Residual RMS", "R2",
+    "Scale (uncoated 0, glassy carbon 1)"]];
   for (let p = 0; p < prep.P; p++) {
     if (!Number.isFinite(prep.sig[p])) continue;                       // never measured
     const i = at.get(p), col = p % (pl.nx || 1), row = pl.pf ? 0 : Math.floor(p / pl.nx);
-    const fit = i == null ? Array(2 * nb + 7).fill("") : [...D3G_BANDS.flatMap((_, j) => [num(U.h[i * nb + j]), num(U.se[i * nb + j])]),
-      ...["ID3/IG", "ID3/IG_se", "AD3/AG", "ID1/IG", "ID4/IG"].map(k => num(U.ratio[k][i])), num(U.rmse[i]), num(U.r2[i])];
+    const fit = i == null ? Array(2 * nb + 8).fill("") : [...D3G_BANDS.flatMap((_, j) => [num(U.h[i * nb + j]), num(U.se[i * nb + j])]),
+      ...["ID3/IG", "ID3/IG_se", "AD3/AG", "ID1/IG", "ID4/IG"].map(k => num(U.ratio[k][i])), num(U.rmse[i]), num(U.r2[i]),
+      sc ? num(scaleIndex(U.ratio["ID3/IG"][i], sc.ref, sc.top)) : ""];
     rows.push([String(p + 1), num(pl.pf ? pl.x[p] : pl.x[col]), num(pl.pf ? pl.y[p] : pl.y[row]), ...(pl.pf ? [] : [String(col), String(row)]),
       num(prep.snr[p]), num(prep.sig[p]), i == null ? "no" : "yes", ...fit]);
   }
@@ -2475,18 +2507,29 @@ $("#d3g-build").onclick = async () => {
     const settings = QC_SETTINGS;
     status.textContent = "Fitting the standards…"; await xcTick();
     const s0 = d3gStandards(g, gl, settings);
-    const step = async (f, prev, what) => {
+    const step = async (f, prev, what, d3Median) => {
       status.textContent = `${what}: reading ${f.name}…`; await xcTick();
       const prep = await d3gPrep(f, settings), list = d3gList(prep);
       if (list.length < 20) throw new Error(`${f.name} has only ${list.length} carbon spectra`);
       const fits = await d3gFreeFits(prep, list, prev, (a, b) => { status.textContent = `${what}: fitting ${f.name} freely, ${fmt(a)} of ${fmt(b)} carbon spectra…`; });
-      return calibrate(fits, prep.sig, prev, settings);
+      const shapes = calibrate(fits, prep.sig, prev, settings);
+      // D3 too weak in single spectra of the uncoated map: measured on its median spectrum instead
+      if (!d3Median) return { shapes, median: null };
+      status.textContent = `${what}: D3 on the median spectrum of ${f.name}…`; await xcTick();
+      return refineOnMedian(shapes, prep, list, prev, "D3");
     };
-    const b1 = await step(f1, s0.shapes, "Baseline 1"), b2 = await step(f2, b1, "Baseline 2"), now = new Date();
-    D3G.cals.push({ name: `Built ${stamp(now)}`, date: now.toISOString().slice(0, 10), settings,
-      steps: [{ name: `Standards (${g.name}, ${gl.name})`, shapes: s0.shapes }, { name: `Baseline 1 (${f1.name})`, shapes: b1 }, { name: `Baseline 2 (${f2.name})`, shapes: b2 }] });
+    const d3Med = $("#d3g-d3med").checked;
+    const r1 = await step(f1, s0.shapes, "Baseline 1", d3Med), r2 = await step(f2, r1.shapes, "Baseline 2", false), now = new Date();
+    const steps = [{ name: `Standards (${g.name}, ${gl.name})`, shapes: s0.shapes }, { name: `Baseline 1 (${f1.name})`, shapes: r1.shapes, d3median: r1.median },
+                   { name: `Baseline 2 (${f2.name})`, shapes: r2.shapes }];
+    for (const s of steps) s.glassy = standardRatio(gl, s.shapes).ratio;
+    D3G.cals.push({ name: `Built ${stamp(now)}`, date: now.toISOString().slice(0, 10), settings, steps });
     D3G.pick = `${D3G.cals.length - 1}:2`;
-    status.textContent = `Built from ${g.name}, ${gl.name}, ${f1.name} and ${f2.name}: its baseline 2 is now in use. Save calibration keeps it.`;
+    const m = r1.median, d3 = !d3Med ? "D3 left to the spectrum-by-spectrum rule. "
+      : !m ? `D3 measured spectrum by spectrum on ${f1.name}. `
+      : m.shape ? `D3 from the median spectrum of ${f1.name}: ${m.z.toFixed(1)} × that fit's residual, at ${r1.shapes.D3.pos.toFixed(1)} / ${r1.shapes.D3.fwhm.toFixed(1)} cm⁻¹${m.posLim || m.wLim ? " (a value on its window limit kept glassy carbon's)" : ""}. `
+      : `D3 not found on the median spectrum of ${f1.name} (${m.z.toFixed(1)} × that fit's residual, under 3; the fit put it at ${m.pos.toFixed(1)} / ${m.fwhm.toFixed(1)} cm⁻¹): glassy carbon's shape kept. `;
+    status.textContent = `Built from ${g.name}, ${gl.name}, ${f1.name} and ${f2.name}. ${d3}Its baseline 2 is now in use; Save calibration keeps it.`;
     renderD3g();
   } catch (e) { status.textContent = `Could not build the calibration: ${e.message}`; }
   finally { D3G.building = false; $("#d3g-build").disabled = false; }
