@@ -2566,7 +2566,7 @@ $("#d3g-csv").onclick = () => {
   const num = v => (Number.isFinite(v) ? String(+(+v).toPrecision(7)) : ""), sc = S.d3gScale;
   const rows = [[pl.pf ? "Particle" : "Point", "X (um)", "Y (um)", ...(pl.pf ? [] : ["Column", "Row"]), "G signal/noise", "Noise (counts)", "In the result",
     ...D3G_BANDS.flatMap(b => [`${b} height`, `${b} SE`]), "I(D3)/I(G)", "I(D3)/I(G) SE", "A(D3)/A(G)", "I(D1)/I(G)", "I(D4)/I(G)", "Residual RMS", "R2",
-    "Scale (uncoated 0, glassy carbon 1)"]];
+    "Scale (uncoated 0; glassy carbon 1)"]];
   for (let p = 0; p < prep.P; p++) {
     if (!Number.isFinite(prep.sig[p])) continue;                       // never measured
     const i = at.get(p), col = p % (pl.nx || 1), row = pl.pf ? 0 : Math.floor(p / pl.nx);
