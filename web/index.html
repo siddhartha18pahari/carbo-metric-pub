@@ -370,7 +370,7 @@
         <div class="sec-b">
           <div class="muted small">I(D3)/I(G) with band shapes calibrated on reference standards and held for every sample: only the five heights and a poly-2 background are fitted, so the values compare between samples.</div>
           <div class="frow"><label>Band shapes</label><select id="d3g-cal" title="The calibration step whose positions and widths are held: baseline 2 is the one to apply; the earlier steps are there to compare"></select></div>
-          <div class="frow"><label>Uncoated reference</label><select id="d3g-ref" title="An uncoated sample open in this window: fitted with the same band shapes, its median is the zero point of the comparison"></select></div>
+          <div class="frow"><label>Uncoated reference</label><select id="d3g-ref" title="An uncoated sample: one open in this window, or Choose a file… to read it from disk (it opens beside this one). Fitted with the same band shapes, its median is the zero point of the comparison"></select></div>
           <div class="frow"><label>Its median</label><div class="kx"><input type="number" id="d3g-ref-med" step="any" min="0" placeholder="I(D3)/I(G)"><span>when no file is chosen</span></div></div>
           <div class="frow"><label></label><label class="chk" title="Draw each carbon spectrum's calibrated I(D3)/I(G) on the map above"><input type="checkbox" id="d3g-map"> Show on the map</label></div>
           <div class="verdict" id="d3g-verdict"></div>
@@ -395,7 +395,7 @@
       <div class="sec" data-sec="coverage">
         <div class="sec-h toggle">Coverage</div>
         <div class="sec-b">
-          <div class="frow"><label>Uncoated reference</label><select id="cov-ref" title="An uncoated sample measured in the same session and open in this window: the threshold is the 99th percentile of its coating index"></select></div>
+          <div class="frow"><label>Uncoated reference</label><select id="cov-ref" title="An uncoated sample measured in the same session: one open in this window, or Choose a file… to read it from disk (it opens beside this one and is fitted with the Carbon fit settings). The threshold is the 99th percentile of its coating index"></select></div>
           <div class="frow"><label>Threshold &tau;</label><div class="kx"><input type="number" id="cov-tau" step="any" min="0"><span id="cov-tau-note">uncoated above it: 1 %</span></div></div>
           <div class="frow"><label>Thinnest coating</label><div class="kx"><input type="number" id="cov-rc" step="any" min="0" placeholder="2 &times; &tau;"><span>that must still be found</span></div></div>
           <div class="frow"><label>Detection power</label><div class="kx"><input type="number" id="cov-power" value="0.95" min="0.5" max="0.9999" step="0.01"><span>at the signal floor</span></div></div>
@@ -530,6 +530,7 @@
 </div>
 <div id="drop" class="drop hidden"><div>Drop a map, spectrum or result table<br><span>.l6m (+ .l6v white-light image) · .txt · .csv · several maps at once to fit them all</span></div></div>
 <input type="file" id="file-input" multiple accept=".l6m,.l6v,.l6pf,.txt,.csv,.tsv,.dat" hidden>
+<input type="file" id="side-file" multiple accept=".l6m,.l6v,.l6pf,.txt,.csv,.tsv,.dat" hidden>
 <div id="toasts"></div>
 <script type="module" src="/static/js/app.js"></script>
 </body>

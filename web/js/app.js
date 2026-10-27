@@ -2222,6 +2222,73 @@ function renderBetween(card) {
 }
 
 // =========================================================================
+// a reference, or a map for a calibration, read from a file of its own
+// =========================================================================
+// The uncoated reference (Coverage, D3/G calibration) and the maps of a calibration build can be
+// chosen among the files open in the window or read from disk with the last entry of their list,
+// "Choose a file…". The file opens beside the current one, which stays on screen, and is fitted
+// with the Carbon fit settings (Coverage reads the reference's fit). One uncoated reference serves
+// both sections: chosen in one, it is taken in the other too where none is chosen yet.
+const SIDE_FILE = "__file";
+const REF_PICK = { cov: null, d3g: null, b1: null, b2: null };     // chosen once the file is open (and, for coverage, fitted)
+const sideOption = () => el("option", { value: SIDE_FILE }, "Choose a file…");
+let sideTarget = null;
+
+async function openSideFile(files) {
+  const { groups, tables } = await mapGroups(files);
+  if (!groups.length) throw new Error(tables.length ? "a fitted-result table holds no spectra: choose the map itself (.l6m)"
+    : "choose a map (.l6m, with its .l6v), a ParticleFinder spectra list with its .l6pf, or a text export of the spectra");
+  setStatus(isBrowserOnly() ? `Reading ${groups[0][0].name}…` : `Uploading ${groups[0][0].name}…`, "busy");
+  const info = await apiUpload(groups[0]);
+  if (info.resultsOnly) throw new Error(`${info.name}: a fitted-result table holds no spectra: choose the map itself`);
+  addFile(info);
+  return fileOf(info.id);
+}
+// fitted with the open map's settings, after any fit already running
+async function fitSide(f) {
+  const cfg = structuredClone(S.cfg);
+  if (f.result && f.key === fitKey(cfg, f.info)) return;
+  while (S.fitRunning || F.running || F.busy) await sleep(200);
+  setStatus(`Fitting ${f.name}…`, "busy");
+  await fitOne(f, cfg);
+  setStatus(f.state === "error" ? `Could not fit ${f.name}: ${f.error}` : `Fitted ${f.name}`, f.state === "error" ? "err" : "");
+}
+const rerenderParticles = () => { if (S.points && S.fit) renderPF(); else if (S.seg) renderParticles(); else renderD3g(); };
+
+// what each list does with a file read for it
+const SIDE_USE = {
+  "#cov-ref": f => { REF_PICK.cov = f.id; if (!$("#d3g-ref").value) REF_PICK.d3g = f.id; },
+  "#d3g-ref": f => { REF_PICK.d3g = f.id; if (!$("#cov-ref").value && !Number.isFinite(parseFloat($("#cov-tau").value))) REF_PICK.cov = f.id; },
+  "#d3g-b1": f => { REF_PICK.b1 = f.id; },
+  "#d3g-b2": f => { REF_PICK.b2 = f.id; },
+};
+for (const id of Object.keys(SIDE_USE)) {
+  const sel = $(id);
+  sel.addEventListener("focus", () => { sel.dataset.prev = sel.value; });
+  // ahead of the list's own change handler: "Choose a file…" opens the picker instead
+  sel.addEventListener("change", e => {
+    if (sel.value !== SIDE_FILE) { sel.dataset.prev = sel.value; return; }
+    e.stopImmediatePropagation();
+    sel.value = sel.dataset.prev && sel.dataset.prev !== SIDE_FILE ? sel.dataset.prev : "";
+    sideTarget = id; $("#side-file").click();
+  }, { capture: true });
+}
+$("#side-file").onchange = async e => {
+  const files = [...e.target.files], id = sideTarget; e.target.value = ""; sideTarget = null;
+  if (!files.length || !id) return;
+  try {
+    const f = await openSideFile(files);
+    SIDE_USE[id](f);
+    const both = !!(REF_PICK.cov && REF_PICK.d3g);
+    setStatus(`Opened ${f.name} beside ${S.ds ? S.ds.name : "this file"}`);
+    rerenderParticles();
+    toast(`${f.name}: ${id === "#d3g-b1" || id === "#d3g-b2" ? "chosen for the calibration build" : `the uncoated reference${both ? " for Coverage and the D3/G calibration" : ""}`}`, "good");
+    await fitSide(f);                                 // Coverage needs its fit; the calibration needs only its spectra
+    rerenderParticles();
+  } catch (err) { setStatus("Could not open", "err"); toast(err.message, "error", 9000); }
+};
+
+// =========================================================================
 // D3/G calibration: band shapes calibrated once and held for every sample
 // =========================================================================
 // The shapes come from a calibration (d3g-calibration.js): the one of 21 Oct 2026, one built here
@@ -2239,9 +2306,12 @@ function d3gFill(sel, opts, want) {
 function d3gSelects() {
   d3gFill($("#d3g-cal"), D3G.cals.flatMap((c, ci) => c.steps.map((s, si) => [`${ci}:${si}`, `${c.name} · ${s.name}`])), D3G.pick);
   D3G.pick = null;
-  const files = F.files.map(f => [f.id, f.name]), cur = S.ds ? S.ds.id : null, others = files.filter(([id]) => id !== cur);
-  d3gFill($("#d3g-ref"), [["", others.length ? "none: enter its median" : "none open: enter its median"], ...others]);
-  for (const id of ["#d3g-b1", "#d3g-b2"]) d3gFill($(id), [["", "an open map…"], ...files]);
+  const files = F.files.map(f => [f.id, f.name]), cur = S.ds ? S.ds.id : null, others = files.filter(([id]) => id !== cur), side = [SIDE_FILE, "Choose a file…"];
+  // a file read for one of these is chosen here once it is open
+  const pick = (k, list) => { const id = REF_PICK[k]; if (id && list.some(([v]) => v === id)) { REF_PICK[k] = null; return id; } return undefined; };
+  d3gFill($("#d3g-ref"), [["", others.length ? "none: enter its median" : "none open: enter its median"], ...others, side], pick("d3g", others));
+  d3gFill($("#d3g-b1"), [["", "an open map…"], ...files, side], pick("b1", files));
+  d3gFill($("#d3g-b2"), [["", "an open map…"], ...files, side], pick("b2", files));
   $("#d3g-ref-med").disabled = !!$("#d3g-ref").value;
 }
 function d3gChoice() {
@@ -2598,9 +2668,11 @@ function covSettings(band) {
   const sel = $("#cov-ref"), others = F.files.filter(f => f.result && (!S.ds || f.id !== S.ds.id)), ids = others.map(f => f.id).join("|");
   if (sel.dataset.ids !== ids) {
     const keep = sel.value;
-    sel.replaceChildren(el("option", { value: "" }, others.length ? "none: enter τ" : "none open: enter τ"), ...others.map(f => el("option", { value: f.id }, f.name)));
+    sel.replaceChildren(el("option", { value: "" }, others.length ? "none: enter τ" : "none open: enter τ"), ...others.map(f => el("option", { value: f.id }, f.name)), sideOption());
     sel.dataset.ids = ids; sel.value = others.some(f => f.id === keep) ? keep : "";
   }
+  // a reference read from a file: chosen once its fit is in
+  if (REF_PICK.cov && others.some(f => f.id === REF_PICK.cov)) { sel.value = REF_PICK.cov; REF_PICK.cov = null; }
   const ref = sel.value ? refSpectra(fileOf(sel.value), band) : null, tauIn = $("#cov-tau");
   tauIn.disabled = !!ref;
   const rcIn = parseFloat($("#cov-rc").value);
@@ -2703,7 +2775,7 @@ function renderCoverage(card) {
   $("#cov-noise-diff").textContent = S.points ? "a height without a fit" : "neighbouring pixels";
   if (!S.fit || !band || S.fit.resultsOnly) return clear(S.fit && S.fit.resultsOnly ? "Coverage needs the spectra: open the map itself." : "");
   const cs = covSettings(band);
-  if (!cs.ref && !Number.isFinite(cs.tau)) return clear(`Choose an uncoated reference measured in the same session (open it in this window and fit it), or enter its threshold τ: the ${band}/G that only 1 % of uncoated spectra exceed.`);
+  if (!cs.ref && !Number.isFinite(cs.tau)) return clear(`Choose an uncoated reference measured in the same session (an open file, or Choose a file… to read one from disk), or enter its threshold τ: the ${band}/G that only 1 % of uncoated spectra exceed.`);
   const R = S.points ? (S.pfa && S.pfCov ? pfCoverage(S.pfa, cs, band) : null) : (S.segCoat && S.segCoat.C && S.segCov ? mapCoverage(S.segCoat, cs) : null);
   if (!R) return clear(S.points ? "Too few particles to judge coverage." : "Find the particles first.");
   showFloor(R.F, band);
