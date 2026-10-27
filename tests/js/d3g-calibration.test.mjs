@@ -1,7 +1,7 @@
 // node --test tests/js/d3g-calibration.test.mjs
 import test from "node:test";
 import assert from "node:assert/strict";
-import { BANDS, QC_SETTINGS, PRESET_21OCT, noiseSigma, despike, savgol, prepare, boxSolver, unmix, freeFits, calibrate, standards,
+import { BANDS, SC_SETTINGS, PRESET_21OCT, noiseSigma, despike, savgol, prepare, boxSolver, unmix, freeFits, calibrate, standards,
          blocksOf, blockMedian, compareMedians, mapBlock, stageBlock, toJSON, fromJSON, shapeArea,
          medianSpectrumBand, refineOnMedian, standardRatio, scaleIndex } from "../../web/js/d3g-calibration.js";
 import { rng } from "../../web/js/pf-analysis.js";
@@ -16,7 +16,7 @@ function spectrum(h, { shapes = PRESET_21OCT.steps[2].shapes, bg = [60, -8, 4], 
   return Float64Array.from(WN, x => {
     const t = (x - 1400) / 400;
     let v = bg[0] + bg[1] * t + bg[2] * t * t;
-    for (const b of BANDS) v += (h[b] || 0) * (QC_SETTINGS.bands[b].shape === "Lorentz" ? lor(x, shapes[b].pos, shapes[b].fwhm) : gau(x, shapes[b].pos, shapes[b].fwhm));
+    for (const b of BANDS) v += (h[b] || 0) * (SC_SETTINGS.bands[b].shape === "Lorentz" ? lor(x, shapes[b].pos, shapes[b].fwhm) : gau(x, shapes[b].pos, shapes[b].fwhm));
     return v + (sd && R ? sd * gauss(R) : 0);
   });
 }
@@ -182,7 +182,7 @@ test("calibration files: this app's round trip and the calibration scripts' layo
   assert.equal(back.steps[2].shapes.G.pos, PRESET_21OCT.steps[2].shapes.G.pos);
   assert.equal(back.steps[2].glassy, PRESET_21OCT.steps[2].glassy);
   const pkg = { description: "x", qcarbon_settings: { "range_cm-1": [1000, 1800], baseline_poly_order: 2, height_range: [0, 5000],
-    bands: Object.fromEntries(BANDS.map(b => { const w = QC_SETTINGS.bands[b]; return [b, { position: w.pos, position_min: w.pos_min, position_max: w.pos_max, width: w.width, width_min: w.width_min, width_max: w.width_max, shape: w.shape }]; })) },
+    bands: Object.fromEntries(BANDS.map(b => { const w = SC_SETTINGS.bands[b]; return [b, { position: w.pos, position_min: w.pos_min, position_max: w.pos_max, width: w.width, width_min: w.width_min, width_max: w.width_max, shape: w.shape }]; })) },
     "baseline_2 - USE FOR ALL SAMPLES": Object.fromEntries(BANDS.map(b => [b, { "position_cm-1": PRESET_21OCT.steps[2].shapes[b].pos, "FWHM_cm-1": PRESET_21OCT.steps[2].shapes[b].fwhm, note: "calibrated" }])) };
   const cal = fromJSON(JSON.stringify(pkg), "pkg");
   assert.equal(cal.steps.length, 1); assert.equal(cal.settings.hmax, 5000); assert.equal(cal.settings.bands.D3.shape, "Gauss");

@@ -8,7 +8,7 @@
 // A band too weak to measure in enough spectra keeps the previous step's shape (D3 on
 // both maps of the 21 Oct calibration, so its shape is glassy carbon's). On the uncoated
 // map, D3 can instead be measured on the map's median spectrum (medianSpectrumBand). Each
-// spectrum is cut to the Q-Carbon range, cleared of cosmic rays and counted as carbon when
+// spectrum is cut to the S Carbon range, cleared of cosmic rays and counted as carbon when
 // its G stands 10 times above its noise; on carbon spectra the five heights (0 to 5000
 // counts) and a poly-2 background are solved by bounded linear least squares, every
 // position and width held. Samples are compared on the median, against an uncoated
@@ -21,9 +21,9 @@ import { rng, quantileSorted } from "./pf-analysis.js";
 // the bands in the order of the calibration's tables
 export const BANDS = ["D4", "D1", "D3", "G", "D2"];
 
-// the LabSpec Q-Carbon panel the calibration was made with: windows for the free fits,
+// the LabSpec S Carbon panel the calibration was made with: windows for the free fits,
 // the range, the background order and the height limit
-export const QC_SETTINGS = {
+export const SC_SETTINGS = {
   range: [1000, 1800], order: 2, hmax: 5000, snrMin: 10, present: 3, minSupport: 0.05,
   bands: {
     G: { pos: 1580, pos_min: 1570, pos_max: 1590, width: 20, width_min: 10, width_max: 35, shape: "Lorentz" },
@@ -42,7 +42,7 @@ const shapesOf = (rows, notes) => Object.fromEntries(BANDS.map((b, i) => [b, { p
 // uncoated map's median spectrum). glassy: the glassy carbon standard's I(D3)/I(G) with each
 // step's shapes, the top of the uncoated-to-amorphous scale.
 export const PRESET_21OCT = {
-  name: "21 Oct 2026", date: "2026-10-21", settings: QC_SETTINGS,
+  name: "21 Oct 2026", date: "2026-10-21", settings: SC_SETTINGS,
   steps: [
     { name: "Standards", glassy: 0.44572088595161247, shapes: shapesOf([[1210, 120, 1], [1349.307394136578, 89.99999999999999, 1], [1510, 169.96501432885, 1],
       [1577.908852151934, 14.34735068279007, 1], [1610.778311420766, 46.59874406724895, 1]], ["glassy carbon", "glassy carbon", "glassy carbon", "graphite", "glassy carbon"]) },
@@ -158,7 +158,7 @@ export function savgol(y, win = 11, order = 2) {
 // Cut to the range, despiked, with each spectrum's noise and G signal-to-noise: the peak of
 // the smoothed spectrum in 1540-1630 cm-1 above a straight line through 1000-1060 and
 // 1740-1800 cm-1, over the noise. Spectra never measured (NaN) or flat carry NaN.
-export function prepare(cube, K, wn, P, settings = QC_SETTINGS) {
+export function prepare(cube, K, wn, P, settings = SC_SETTINGS) {
   const [lo, hi] = settings.range, ks = [];
   for (let c = 0; c < K; c++) if (wn[c] >= lo && wn[c] <= hi) ks.push(c);
   const N = ks.length;
@@ -304,7 +304,7 @@ function withRatios(out) {
 // --------------------------------------------------------------------------
 // free fits and one calibration step
 // --------------------------------------------------------------------------
-// The Q-Carbon fit of each spectrum in list (every band free inside its window, heights 0 to
+// The S Carbon fit of each spectrum in list (every band free inside its window, heights 0 to
 // hmax, poly-2 background fitted with the bands), by this app's Levenberg-Marquardt. It starts
 // where the calibration's own scripts start: the shapes of the step before, G at the spectrum's
 // height above its 5th percentile and the other bands at 0.3 of it, the background through the
@@ -348,7 +348,7 @@ export function freeFits(prep, list, init, { maxIter = 200, tol = 1e-10 } = {}) 
 // One step: each band's median position and width over the spectra where it is present (height
 // at least `present` x noise, the fit's R² above 0.5); a band present in fewer than minSupport of
 // the spectra keeps the previous shape, its support then given as minus its count.
-export function calibrate(fits, sig, prev, settings = QC_SETTINGS) {
+export function calibrate(fits, sig, prev, settings = SC_SETTINGS) {
   const nb = BANDS.length, M = fits.list.length, out = {};
   BANDS.forEach((b, j) => {
     const cs = [], ws = []; let atBound = 0;
@@ -409,14 +409,14 @@ export function refineOnMedian(shapes, prep, list, prev, band = "D3") {
 }
 
 // I(D3)/I(G) of one reference spectrum ({ wn, y }) with a step's shapes held, and how well they fit it
-export function standardRatio(spec, shapes, settings = QC_SETTINGS) {
+export function standardRatio(spec, shapes, settings = SC_SETTINGS) {
   const p = prepare(Float64Array.from(spec.y), spec.y.length, spec.wn, 1, { ...settings, snrMin: -Infinity }), U = unmix(p, shapes);
   return { ratio: U.ratio["ID3/IG"][0], rn: U.rmse[0] / p.sig[0] };
 }
 
-// The first step: the standards fitted with the Q-Carbon windows from their default shapes;
+// The first step: the standards fitted with the S Carbon windows from their default shapes;
 // G is graphite's, D1 to D4 are glassy carbon's. Each standard: { wn, y }.
-export function standards(graphite, glassy, settings = QC_SETTINGS) {
+export function standards(graphite, glassy, settings = SC_SETTINGS) {
   const one = s => {
     const prep = prepare(Float64Array.from(s.y), s.y.length, s.wn, 1, { ...settings, snrMin: -Infinity });
     const init = Object.fromEntries(BANDS.map(b => [b, { pos: settings.bands[b].pos, fwhm: settings.bands[b].width }]));
@@ -522,7 +522,7 @@ export function fromJSON(text, fileName = "calibration") {
   if (!q || !q.bands) throw new Error(`${fileName}: not a D3/G calibration file`);
   const settings = checkSettings({
     range: q["range_cm-1"], order: q.baseline_poly_order, hmax: q.height_range ? q.height_range[1] : 5000,
-    snrMin: QC_SETTINGS.snrMin, present: QC_SETTINGS.present, minSupport: QC_SETTINGS.minSupport,
+    snrMin: SC_SETTINGS.snrMin, present: SC_SETTINGS.present, minSupport: SC_SETTINGS.minSupport,
     bands: Object.fromEntries(Object.entries(q.bands).map(([b, v]) => [b, { pos: v.position, pos_min: v.position_min, pos_max: v.position_max,
       width: v.width, width_min: v.width_min, width_max: v.width_max, shape: v.shape }])),
   });
@@ -536,7 +536,7 @@ function checkSettings(s) {
   if (!s || !Array.isArray(s.range) || !(s.range[1] > s.range[0])) throw new Error("calibration: no valid spectral range");
   for (const b of BANDS) if (!s.bands || !s.bands[b]) throw new Error(`calibration: band ${b} missing from the settings`);
   for (const b of BANDS) if (!["Lorentz", "Gauss"].includes(s.bands[b].shape)) throw new Error(`calibration: band ${b} has no Lorentz or Gauss shape`);
-  return { ...QC_SETTINGS, ...s, order: Number.isInteger(s.order) ? s.order : 2 };
+  return { ...SC_SETTINGS, ...s, order: Number.isInteger(s.order) ? s.order : 2 };
 }
 function checkShapes(sh, fileName) {
   for (const b of BANDS) if (!sh || !sh[b] || !(sh[b].fwhm > 0) || !Number.isFinite(sh[b].pos)) throw new Error(`${fileName}: band ${b} has no position and width`);

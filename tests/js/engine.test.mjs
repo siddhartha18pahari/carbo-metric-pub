@@ -89,7 +89,7 @@ function smoothField(ny, nx) {
   });
 }
 
-test("Q-Carbon export: recognised, bands and ratio read, grid inferred", () => {
+test("S Carbon export: recognised, bands and ratio read, grid inferred", () => {
   const ny = 23, nx = 31, g = smoothField(ny, nx);
   const lines = ["\tD1 Intensity\tD1 Width\tD1 Area\tG Intensity\tG Width\tG Area\tRatio Intensity\tRatio Width\tRatio Area\t"];
   g.forEach((v, p) => lines.push([p + 1, v / 3, 90, v * 50, v, 20, v * 30, 1 / 3, 4.5, 1.6].join("\t")));

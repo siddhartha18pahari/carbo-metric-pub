@@ -1,4 +1,4 @@
-"""Engine tests. The vendor-agreement tests compare against LabSpec Q-Carbon's
+"""Engine tests. The vendor-agreement tests compare against LabSpec S Carbon's
 own outputs; they need ``tests/vendor_data.json`` (paths to those files, kept
 out of the repository: see ``vendor_data.example.json``) and skip without it."""
 
@@ -9,11 +9,11 @@ import numpy as np
 import pytest
 from scipy.integrate import quad
 
-from qcarbon.config import Config, Peak
-from qcarbon.fitter import fit_spectra, shape_eval, windowed_area, baseline_basis
-from qcarbon.labspec import read_l6_image, read_l6m, read_l6v, read_map, read_text, find_video
-from qcarbon import labspec
-from qcarbon.results import export_table, safe_ratio, statistics, valid_mask
+from scarbon.config import Config, Peak
+from scarbon.fitter import fit_spectra, shape_eval, windowed_area, baseline_basis
+from scarbon.labspec import read_l6_image, read_l6m, read_l6v, read_map, read_text, find_video
+from scarbon import labspec
+from scarbon.results import export_table, safe_ratio, statistics, valid_mask
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 VENDOR_FILE = os.path.join(HERE, "vendor_data.json")
@@ -233,7 +233,7 @@ def test_map_orientation_matches_labspec_display():
 
 
 def test_d3_map_follows_vendor_d3_map():
-    """Fitted freely per pixel, D3 correlated with Q-Carbon's own D3 area map
+    """Fitted freely per pixel, D3 correlated with S Carbon's own D3 area map
     at only r = 0.38 and did not show the particle; with shapes from the mean
     spectrum it is 0.72."""
     mp, d3_ar = vendor("error_pair_map", "error_pair_d3_area")
@@ -326,7 +326,7 @@ def test_three_points_of_a_2x2_grid_are_a_map_stopped_early(tmp_path):
 # ---------------------------------------------------------------- smoothing
 def test_spectral_smoothing_is_savitzky_golay():
     from scipy.signal import savgol_filter
-    from qcarbon.fitter import smooth_spectra
+    from scarbon.fitter import smooth_spectra
     cube = np.random.default_rng(3).normal(100, 5, (4, 5, 150))
     for w, o in [(5, 2), (11, 3), (21, 4)]:
         cfg = Config(smooth_window=w, smooth_order=o)
@@ -334,7 +334,7 @@ def test_spectral_smoothing_is_savitzky_golay():
 
 
 def test_spatial_averaging_keeps_a_flat_map_flat_and_cuts_noise():
-    from qcarbon.fitter import smooth_spectra
+    from scarbon.fitter import smooth_spectra
     flat = np.full((6, 9, 4), 7.0)
     assert np.allclose(smooth_spectra(flat, Config(spatial_kernel=5)), 7.0)       # edges renormalised
     noise = np.random.default_rng(4).normal(0, 1, (40, 40, 50))
@@ -361,7 +361,7 @@ PF_SCREENSHOT_ROWS = [(2.64, 0.95, 100.00, 6.76, 8078.00), (2.29, 0.95, 100.00, 
 
 
 def _max_height(path, P):
-    from qcarbon.labspec import _mat_blocks, _read
+    from scarbon.labspec import _mat_blocks, _read
     raw = _read(path)
     for o, n in _mat_blocks(raw):
         if raw[o:o + 11] == b"Max height\x00":
@@ -370,7 +370,7 @@ def _max_height(path, P):
 
 
 def test_particlefinder_table_rows_match_labspec_results_table():
-    from qcarbon.labspec import read_l6pf
+    from scarbon.labspec import read_l6pf
     path = vendor("pf_project")
     m, video = read_l6pf(path)
     P = m.cube.shape[1]
@@ -392,7 +392,7 @@ def test_particlefinder_table_rows_match_labspec_results_table():
 
 
 def test_spectra_list_takes_positions_from_its_project():
-    from qcarbon.labspec import PointListError, read_any, read_l6pf
+    from scarbon.labspec import PointListError, read_any, read_l6pf
     lst, prj = vendor("pf_spectra_list", "pf_project")
     with pytest.raises(PointListError):
         read_l6m(lst)
@@ -407,7 +407,7 @@ def test_particlefinder_feret_max_is_a_caliper_length():
     """Field 10 sits where LabSpec lists Feret max (just before Feret min, field 11).
     A caliper length can never be shorter than the bounding box's longer side or
     longer than its diagonal: within one mosaic pixel, on every particle."""
-    from qcarbon.labspec import read_l6pf
+    from scarbon.labspec import read_l6pf
     m, video = read_l6pf(vendor("pf_project"))
     pts, px = m.meta["points"], abs(video.x[1] - video.x[0])
     w, h = pts["xmax"] - pts["xmin"], pts["ymax"] - pts["ymin"]
@@ -424,7 +424,7 @@ def test_untagged_mosaic_sits_under_its_particles():
     records exactly; the smoothness search used before cannot tell whole-pixel shifts
     apart and drew it 16 pixels (23 um) off, so particle centres fell on particles no
     more often than chance (13 % against 11 % of the image)."""
-    from qcarbon.labspec import read_l6pf
+    from scarbon.labspec import read_l6pf
     m, video = read_l6pf(vendor("pf_small_project"))
     pts = m.meta["points"]
     I = video.rgb.astype(np.int32).sum(axis=2)
@@ -436,7 +436,7 @@ def test_untagged_mosaic_sits_under_its_particles():
 
 
 def test_small_project_mosaic_axes():
-    from qcarbon.labspec import read_l6pf
+    from scarbon.labspec import read_l6pf
     m, video = read_l6pf(vendor("pf_small_project"))
     assert m.cube.shape[:2] == (1, 364)
     assert video.rgb.shape == (video.y.size, video.x.size, 3)
@@ -481,8 +481,8 @@ def test_map_stopped_early_keeps_its_grid(tmp_path):
     gone = ~np.isfinite(short.cube).all(axis=-1)
     assert gone.sum() == 3 and gone[-1, -3:].all()            # the last three of the last row
     np.testing.assert_array_equal(short.cube[~gone], full.cube[~gone])
-    from qcarbon.fitter import smooth_spectra
-    from qcarbon.results import quality
+    from scarbon.fitter import smooth_spectra
+    from scarbon.results import quality
     cfg = Config()
     r = fit_spectra(short.cube.reshape(-1, 200), short.wn, cfg)
     assert np.isnan(r.std_error[gone.ravel()]).all() and np.isfinite(r.std_error[~gone.ravel()]).all()
@@ -508,7 +508,7 @@ def test_scattered_points_are_still_refused(tmp_path):
 def test_spatial_smoothing_unchanged_on_complete_maps():
     """Over measured neighbours only, but on a complete map it is the same
     normalised Gaussian as before: compare with a direct 2-D sum."""
-    from qcarbon.fitter import smooth_spectra
+    from scarbon.fitter import smooth_spectra
     Y = np.random.default_rng(5).normal(size=(7, 9, 4))
     k, r = 5, 2
     g = np.exp(-0.5 * (np.arange(-r, r + 1) / (k / 4.0)) ** 2)

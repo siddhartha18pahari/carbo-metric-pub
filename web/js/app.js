@@ -17,7 +17,7 @@ import { rng, wilson, weightedQuantile, laCancado, robustScale, bestGmm, bootstr
          boundedCoverage, lowShare, qcd, qRatio, evenness, moments, spatialPermutation, neighbourNoise, blockBootstrap,
          ksTest, fitFreeHeights, nestedSize, robustSD, dispersion, nmf, nmfProject, fitSplats, splatScale, gaussSmooth,
          kruskalWallis, brownForsythe, groupGap, thinTail, mixtureCoverage, olsHC3, nForMean, nForSpread, tQuantile } from "./pf-analysis.js";
-import { PRESET_21OCT, QC_SETTINGS, BANDS as D3G_BANDS, prepare as d3gPrepare, unmix, freeFits, calibrate, standards as d3gStandards,
+import { PRESET_21OCT, SC_SETTINGS, BANDS as D3G_BANDS, prepare as d3gPrepare, unmix, freeFits, calibrate, standards as d3gStandards,
          blocksOf, blockMedian, compareMedians, mapBlock, stageBlock, toJSON as calToJSON, fromJSON as calFromJSON,
          refineOnMedian, standardRatio, scaleIndex } from "./d3g-calibration.js";
 import { T, font, setTheme, currentTheme } from "./theme.js";
@@ -117,7 +117,7 @@ const maps = [0, 1, 2, 3].map(i => new MapView($(`#map-${i}`), {
   onChange: () => { if (S.active === i) { renderHist(); renderVideo(); } },
   onView: (v, src) => { for (const m of maps) if (m !== src) m.setView(v ? { ...v } : null); renderVideo(); },
   onSmoothChange: rememberSmoothing,
-  onProfile: on => { for (const m of maps) m.setProfile(on); },      // all four maps, as Q-Carbon shows them
+  onProfile: on => { for (const m of maps) m.setProfile(on); },      // all four maps, as S Carbon shows them
   onBackdrop: on => { for (const m of [...maps, pmap]) { m.backdropOn = on; m._ptsCache = null; m.render(); } },
 }));
 maps.forEach((mv, i) => mv.host.addEventListener("mousedown", () => setActive(i)));
@@ -149,7 +149,7 @@ function renderMap(i) {
   applySmoothing(mv, `${i}:${band || spec.kind}`, band);
   mv.setTitle(r.title);
   mv.emptyText = S.fit && S.fit.resultsOnly && S.specs[i].kind === "error"
-    ? "Not in this file: Q-Carbon's export has no error. Fit the map (.l6m) to get it." : null;
+    ? "Not in this file: S Carbon's export has no error. Fit the map (.l6m) to get it." : null;
   if (r.values) mv.setData(r.values, { valid: r.useValid ? S.valid : null, label: r.label, unit: r.unit });
   else mv.render();
 }
@@ -234,7 +234,7 @@ function renderCursor() {
     const i = Math.floor(p / S.nx), j = p % S.nx;
     $("#cursor-info").textContent = `· point ${p + 1} · column ${j + 1}, row ${i + 1}${S.hover != null && S.hover !== S.pinned ? "" : " · pinned"}${S.valid && !S.valid[p] ? " · not valid" : ""}`;
     const tb = $("#cursor-table"); tb.textContent = "";
-    // every configured band, so the ones Q-Carbon did not export are visibly absent
+    // every configured band, so the ones S Carbon did not export are visibly absent
     const all = [...new Set([...S.cfg.peaks.map(q => q.name), ...S.fit.names])].sort();
     all.forEach(name => {
       const j2 = S.fit.names.indexOf(name);
@@ -584,7 +584,7 @@ $("#ratio-num").onchange = e => { S.cfg.ratio_num = e.target.value; onView(); };
 $("#ratio-den").onchange = e => { S.cfg.ratio_den = e.target.value; onView(); };
 $("#ratio-swap").onclick = () => { [S.cfg.ratio_num, S.cfg.ratio_den] = [S.cfg.ratio_den, S.cfg.ratio_num]; buildRatio(); onView(); };
 $("#cfg-save").onclick = async () => {
-  try { download("qcarbon_config.ini", await api("/api/config/ini", S.cfg)); } catch (e) { toast(e.message, "error"); }
+  try { download("scarbon_config.ini", await api("/api/config/ini", S.cfg)); } catch (e) { toast(e.message, "error"); }
 };
 $("#cfg-open").onclick = () => $("#cfg-input").click();
 $("#cfg-input").onchange = async e => {
@@ -816,7 +816,7 @@ async function renderRecent() {
   } catch { /* library optional */ }
 }
 
-// fitted-result tables (Q-Carbon export, or our full CSV): no spectra, no server
+// fitted-result tables (S Carbon export, or our full CSV): no spectra, no server
 async function openResultsTable(R, r) {
   S.results = { R, r };
   const row = $("#grid-row"), sel = $("#grid-select");
@@ -839,11 +839,11 @@ async function loadResults(grid) {
   document.body.classList.add("results-only");
   $("#held-note").textContent = "";
   $("#results-note").textContent = r.note;
-  // Q-Carbon's export carries only the two bands of its ratio, no error: the
+  // S Carbon's export carries only the two bands of its ratio, no error: the
   // rest needs the spectra, so offer the map itself
   const absent = S.cfg.peaks.map(q => q.name).filter(n => !fit.names.includes(n));
   $("#results-bands").replaceChildren(
-    el("div", { class: "muted small" }, `This file holds ${fit.names.join(" and ")} only (Q-Carbon exports the two bands of its ratio) and no error.` +
+    el("div", { class: "muted small" }, `This file holds ${fit.names.join(" and ")} only (S Carbon exports the two bands of its ratio) and no error.` +
       (absent.length ? ` ${absent.join(", ")} and the error need the spectra.` : " The error needs the spectra.")),
     r.map ? el("button", { onclick: () => uploadFiles(r.map) }, `Fit all bands from ${r.map[0].name}`)
           : el("button", { onclick: () => pickFiles() }, "Open the map (.l6m) to fit all bands…"));
@@ -970,7 +970,7 @@ async function exportData(format) {
     download(`${S.ds.name} CarboMetrics ${S.cfg.ratio_num}-${S.cfg.ratio_den}.${format === "full" ? "csv" : "txt"}`, text);
   } catch (e) { toast(e.message, "error"); }
 }
-$("#exp-txt").onclick = () => exportData("qcarbon");
+$("#exp-txt").onclick = () => exportData("scarbon");
 $("#exp-csv").onclick = () => exportData("full");
 $("#exp-png").onclick = () => maps.forEach((m, i) => setTimeout(() => m.save(), i * 250));
 $("#exp-report").onclick = () => switchTab("report");
@@ -2505,7 +2505,7 @@ function renderD3g() {
     `The five heights (0 to ${res.prep.settings.hmax} counts) and a poly-2 background are then solved by bounded least squares with every position and width held (D3 Gaussian, the others Lorentzian); a height's error is the linear fit's, at its residual. Areas are the line shapes' own (h × w × π/2 for a Lorentzian, h × w × 1.064 for a Gaussian). ` +
     `The spectra are the raw ones: the Carbon fit tab's smoothing and its free shapes do not enter, and its D3/G is not comparable with this one. ` +
     (pf ? "ParticleFinder: the particles the rest of this tab uses (measured, off the mosaic's seams). " : "") +
-    "A calibration is built in steps: the standards fitted in the Q-Carbon windows (G from graphite, D1 to D4 from glassy carbon), then each band's median position and width over the uncoated map's carbon spectra where the band is at least 3 × the noise (R² above 0.5), then the same over the coated map. A band found in fewer than 5 % of the spectra keeps the step before's shape. " +
+    "A calibration is built in steps: the standards fitted in the S Carbon windows (G from graphite, D1 to D4 from glassy carbon), then each band's median position and width over the uncoated map's carbon spectra where the band is at least 3 × the noise (R² above 0.5), then the same over the coated map. A band found in fewer than 5 % of the spectra keeps the step before's shape. " +
     "D3 is that weak on an uncoated map, so a build can measure it on the uncoated map's median spectrum instead: taken when its height is at least 3 × that fit's residual, a position or width on its window limit keeping glassy carbon's value. The 21 Oct calibration was made without this (D3 is glassy carbon's). " +
     "The scale: (R − R_uncoated) / (R_glassy − R_uncoated), R the median I(D3)/I(G), glassy carbon's from its standard spectrum with the same shapes, the interval from the same block resamples. The check applies the last step to this file, for comparison only.";
   if ($("#d3g-map").checked && res.U) {
@@ -2606,7 +2606,7 @@ $("#d3g-build").onclick = async () => {
   if (!f1 || !f2) { status.textContent = "Choose the uncoated and the coated map (open them in this window first)."; return; }
   D3G.building = true; $("#d3g-build").disabled = true;
   try {
-    const settings = QC_SETTINGS;
+    const settings = SC_SETTINGS;
     status.textContent = "Fitting the standards…"; await xcTick();
     const s0 = d3gStandards(g, gl, settings);
     const step = async (f, prev, what, d3Median) => {

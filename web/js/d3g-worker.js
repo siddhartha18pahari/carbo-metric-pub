@@ -1,4 +1,4 @@
-// One worker of a D3/G calibration build: the free Q-Carbon fits of a chunk of
+// One worker of a D3/G calibration build: the free S Carbon fits of a chunk of
 // spectra, handed back as heights, positions, widths and R².
 
 import { freeFits } from "./d3g-calibration.js";

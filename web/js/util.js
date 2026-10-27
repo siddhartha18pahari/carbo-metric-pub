@@ -101,7 +101,7 @@ export function quantile(sorted, q) {
   return i + 1 < sorted.length ? sorted[i] * (1 - f) + sorted[i + 1] * f : sorted[i];
 }
 
-// mean, SD (n-1), median, quartiles: same definitions as qcarbon/results.py
+// mean, SD (n-1), median, quartiles: same definitions as scarbon/results.py
 export function summary(values) {
   const v = Float64Array.from(values).filter(Number.isFinite).sort();
   const n = v.length;

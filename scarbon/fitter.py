@@ -265,7 +265,7 @@ def smooth_spectra(cube: np.ndarray, cfg: Config) -> np.ndarray:
     ``cfg.smooth_window`` > 0: Savitzky-Golay along Raman shift (window and
     ``smooth_order``). ``cfg.spatial_kernel`` 3/5/7: each spectrum averaged with
     its neighbours, Gaussian weights with sigma = kernel / 4, renormalised at the
-    map edges. Both are off by default (Q-Carbon fits the raw spectra). Spatial
+    map edges. Both are off by default (S Carbon fits the raw spectra). Spatial
     averaging trades resolution for noise, and neighbouring pixels then share
     data, so per-pixel statistics overstate the number of independent points.
     """

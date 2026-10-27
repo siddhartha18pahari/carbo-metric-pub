@@ -1,7 +1,7 @@
-"""Processing + peak-fitting configuration, laid out like the Q-Carbon panel.
+"""Processing + peak-fitting configuration, laid out like the S Carbon panel.
 
 The default is a typical five-band carbon configuration as set up in
-LabSpec 6.8 Q-Carbon: baseline poly order 2 fitted together
+LabSpec 6.8 S Carbon: baseline poly order 2 fitted together
 with five carbon bands over 1000-1800 cm-1, ratio D3/G.
 
 Configurations are saved as INI files. The layout is this app's own; LabSpec's

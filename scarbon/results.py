@@ -8,7 +8,7 @@ Conventions taken from the vendor's own exports (checked on three of them):
   then the three ratios.
 
 The Statistics block reports the mean and standard deviation over valid
-points, as Q-Carbon does, plus the median and interquartile range. Per-pixel
+points, as S Carbon does, plus the median and interquartile range. Per-pixel
 ratios with a near-zero denominator are heavy tailed, so the mean of a ratio
 map can sit far from its typical value.
 """

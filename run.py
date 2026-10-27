@@ -6,7 +6,7 @@ import webbrowser
 
 import uvicorn
 
-from qcarbon.server import app, warm_up
+from scarbon.server import app, warm_up
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()

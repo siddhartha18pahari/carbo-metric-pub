@@ -42,7 +42,7 @@ export class MapView {
     this.categories = null;          // particles coloured by group: { index, colours, names }
     this.backdrop = null;            // the camera image under the particles: { img, x: [first, last], y: [first, last], w, h }
     this.backdropOn = true;
-    this.profile = false;            // a particle list drawn as Q-Carbon does: value against particle number
+    this.profile = false;            // a particle list drawn as S Carbon does: value against particle number
     this.label = ""; this.unit = "";
 
     host.classList.add("mapview");
@@ -166,12 +166,12 @@ export class MapView {
     this.viewBtn.textContent = this.profile ? "By particle" : "Stage view";
     this.viewBtn.classList.toggle("on", this.profile);
     this.viewBtn.classList.toggle("hidden", !this.points || !!this.opts.noProfile);
-    this.viewBtn.title = this.profile ? "Each particle's value against its number, as Q-Carbon shows a particle list. Click for the particles on the stage."
-                                      : "The particles at their stage positions. Click for each value against its particle number, as in Q-Carbon.";
+    this.viewBtn.title = this.profile ? "Each particle's value against its number, as S Carbon shows a particle list. Click for the particles on the stage."
+                                      : "The particles at their stage positions. Click for each value against its particle number, as in S Carbon.";
   }
   setProfile(on) { this.profile = on; this._chip(); this.render(); }
 
-  // Q-Carbon's view of a particle list: each particle's value against its number
+  // S Carbon's view of a particle list: each particle's value against its number
   _renderProfile(ctx, W, H) {
     const n = this.points.x.length, v = this.values, valid = this.valid;
     const P = { x: 52, y: 8, w: Math.max(10, W - 52 - 12), h: Math.max(10, H - 8 - 32) };

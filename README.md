@@ -1,6 +1,6 @@
 # Carbo Metrics
 
-Per-pixel D and G band fitting of Raman maps of carbons, with maps of every band, their ratio and the fit error. It follows the conventions of the Q-Carbon module of HORIBA LabSpec 6 (same panel layout, configuration and export), and adds views Q-Carbon does not have: a registered white-light overlay, linked cursors, particle-level statistics, spectral Gaussian splatting and a printable report.
+Per-pixel D and G band fitting of Raman maps of carbons, with maps of every band, their ratio and the fit error. It follows the conventions of the S Carbon module of HORIBA LabSpec 6 (same panel layout, configuration and export), and adds views S Carbon does not have: a registered white-light overlay, linked cursors, particle-level statistics, spectral Gaussian splatting and a printable report.
 
 **Web app:** https://carbo-metrics.vercel.app. It runs entirely in your browser: files are read on your computer and never uploaded.
 
@@ -12,7 +12,7 @@ Per-pixel D and G band fitting of Raman maps of carbons, with maps of every band
   - a LabSpec matrix export (first row = Raman shift, then one row per point). A map whose acquisition stopped early (e.g. 118 of an 11 × 11 grid) opens on its grid, with the points never measured left out of the fit and the statistics;
   - an x / y / shift / intensity table (e.g. Renishaw WiRE);
   - a two-column spectrum (shift, intensity), shown as a single point.
-- Fitted-result tables: Q-Carbon's own *Export data* `.txt` (per point: D/G intensity, width, area and ratios) and this app's *Export all (CSV)*. They hold fitted values and no spectra, so they open as maps, histograms, statistics, particles and a report, with nothing to refit. Q-Carbon's export carries only the two bands of its ratio (G and D3, or D1 and G: all 61 exports checked) and no standard error, so the other bands and the Error map need the map itself; the app says so and offers to fit the `.l6m` (one click when it was opened with the export). The spectral Processing settings are greyed out for the same reason; *Smoothing (spatial)* still works, on the fitted maps. The cursor spectrum and the Spectral data panel draw the bands the values describe: each band at its exported height and width, with the line shape read off the exported areas (area / (height × width) is 1.06 for a Gaussian, 1.3 or more for a Lorentzian cut to the fit range) and no baseline. Q-Carbon exports no band positions, so those bands sit at their configured positions and the plot says so. Q-Carbon's export has no coordinates: open it together with its `.l6m` (and `.l6v`) to use the real grid and white-light image. Opened alone, its grid is inferred from the point count, choosing the most isotropic map with a mild preference for square shapes. On 34 exports with a same-size `.l6m` on disk the first choice was right 33 times. The Spectral data panel lets you pick another grid.
+- Fitted-result tables: S Carbon's own *Export data* `.txt` (per point: D/G intensity, width, area and ratios) and this app's *Export all (CSV)*. They hold fitted values and no spectra, so they open as maps, histograms, statistics, particles and a report, with nothing to refit. S Carbon's export carries only the two bands of its ratio (G and D3, or D1 and G: all 61 exports checked) and no standard error, so the other bands and the Error map need the map itself; the app says so and offers to fit the `.l6m` (one click when it was opened with the export). The spectral Processing settings are greyed out for the same reason; *Smoothing (spatial)* still works, on the fitted maps. The cursor spectrum and the Spectral data panel draw the bands the values describe: each band at its exported height and width, with the line shape read off the exported areas (area / (height × width) is 1.06 for a Gaussian, 1.3 or more for a Lorentzian cut to the fit range) and no baseline. S Carbon exports no band positions, so those bands sit at their configured positions and the plot says so. S Carbon's export has no coordinates: open it together with its `.l6m` (and `.l6v`) to use the real grid and white-light image. Opened alone, its grid is inferred from the point count, choosing the most isotropic map with a mild preference for square shapes. On 34 exports with a same-size `.l6m` on disk the first choice was right 33 times. The Spectral data panel lets you pick another grid.
 
 Older 32-bit LabSpec files, scattered points that share no grid, and spectra lists without their ParticleFinder project are refused with a message rather than guessed at.
 
@@ -29,11 +29,11 @@ python run.py
 
 It opens at http://127.0.0.1:8765. On Windows you can double-click `Carbo Metrics.bat`. To list your own data folders in the library, copy `data_roots.example.txt` to `data_roots.txt` and add one folder per line. Splat 3D also needs `ramansp` (`pip install git+https://github.com/siddhartha18pahari/RAMANSP`).
 
-Both run the same engine: `web/js/engine` is a port of `qcarbon/fitter.py`, and a test holds the two to the same numbers (to 1e-7).
+Both run the same engine: `web/js/engine` is a port of `scarbon/fitter.py`, and a test holds the two to the same numbers (to 1e-7).
 
-## Same as Q-Carbon
+## Same as S Carbon
 
-| Q-Carbon | Here |
+| S Carbon | Here |
 |---|---|
 | Processing: baseline (poly order), Fit separately, spectral range | same. *Fit separately* = modified-polynomial baseline first, then the bands |
 | Constraints: Intensity / Ratio(I) / Ratio(Ar) ranges with tick boxes | same; they decide which points are *valid* |
@@ -50,7 +50,7 @@ The default configuration is a typical five-band carbon model: poly order 2 base
 ## Added
 
 - **Shapes from the mean spectrum** (Processing, on by default). See *D3* below.
-- **Smoothing, as options** (all off by default, so the fit sees the raw spectra as in Q-Carbon):
+- **Smoothing, as options** (all off by default, so the fit sees the raw spectra as in S Carbon):
   - *Smoothing (spectral)* in Processing: Savitzky–Golay along the Raman shift (5–21 points, order 2–4) before the fit. Spectra look cleaner; fitted values change little, and a wide window broadens narrow bands such as G.
   - *Smoothing (spatial)* in Processing: each spectrum smoothed with its 3 × 3, 5 × 5 or 7 × 7 neighbours on the map (Gaussian weights over measured neighbours) before the fit, so every map follows, Ratio and Error included. Weak-band maps such as D3 get much cleaner (3 × 3 cuts per-pixel noise about 2×), at the cost of resolution. Neighbouring points then share data, so per-point statistics overstate the number of independent points. On a file of fitted values (no spectra) the fitted maps themselves are smoothed and the ratios recomputed. Off for ParticleFinder data, where neighbouring particle numbers are not neighbouring places.
   - *Filter* in each map's ⚙ menu: Gaussian or median, 3 × 3 or 5 × 5, over valid neighbours. Display and PNG only; statistics, histograms and data exports keep the raw per-pixel values.
@@ -73,7 +73,7 @@ The default configuration is a typical five-band carbon model: poly order 2 base
   - *Populations* on a chosen band ratio over G (D1/G by default), the G width and the G position: a Gaussian mixture (lowest ICL of 1 to 4 components), whose components are merged when their density shows no dip between them (ridge ratio above 0.2, Hennig 2010), so one continuous spread stays one population; or cut-offs on the ratio. Particles whose band is below detection form their own *n.d.* group. Shares by number (Wilson) and by ParticleFinder volume (bootstrap over particles; a mass share only at equal density), and a mean spectrum per population, baseline removed and scaled to G.
   - *Crystallite size* L<sub>a</sub> = 2.4 × 10⁻¹⁰ λ⁴ (A<sub>D1</sub>/A<sub>G</sub>)⁻¹ nm (Cançado et al. 2006), with λ = 532 nm by default (the lab's 532 nm edge laser; LabSpec's acquisition record, when it has one, is shown beside it). Values outside the calibrated range (about 2 to 500 nm) are counted, not hidden.
   - *Size*: D10, D50, D90 by number and by volume over the particles measured, off the tile seams and as the run's filter left them, with every object in the table beside them (as the routine's own histogram counts them: on a 4 575-particle project, D50 2.81 µm measured against 1.17 µm over every object); the ratio by diameter quartile, the volume-weighted mean ratio and its rank correlation with diameter; and fixed size classes (< 1, 1–3, 3–10, 10–25, ≥ 25 µm) with the particles located, measured and quantified in each and, once Coverage is set, the share judged coated with its exact lower bound, so that a size limit cannot hide inside a total. *Export particle analysis (CSV)* writes every particle with its signal-to-noise, G height over its error, detection, population, ratio, G width and position, A<sub>D1</sub>/A<sub>G</sub>, L<sub>a</sub>, and its coating index with its error, detection and place against the noise band.
-  - *By particle* (Carbon fit tab): the four maps of a particle list can also be drawn as Q-Carbon draws them, each particle's value against its number; the chip on any map switches all four.
+  - *By particle* (Carbon fit tab): the four maps of a particle list can also be drawn as S Carbon draws them, each particle's value against its number; the chip on any map switches all four.
 - **Coating coverage on maps** (Particles tab, gridded maps, after *Find particles*). ParticleFinder measures one spot per particle; a map of coated particles shows whether the coating covers each particle evenly.
   - *Pixels*: every pixel inside a particle whose G is at least 10 × its noise (inside its fit bounds and the Constraints) carries the coating index (D3/G by default), with its standard error from that pixel's own fit, as for ParticleFinder.
   - *Rim*: pixels within 1 µm of a particle's edge (editable) are left out. The laser spot lies partly off the particle there and G falls. D3/G rises at the rim of an uncoated reference map too (1.9 × the interior, G 0.53 ×), so the rim says little about the coating. The verdict reports the rim against the interior either way.
@@ -95,7 +95,7 @@ The default configuration is a typical five-band carbon model: poly order 2 base
 
     D3 is detected in 97–98 % of the coated pixels and 30 % of the uncoated ones. Coating index = D3/G with D3's shape held at the mean spectrum, so compare maps fitted the same way.
 - **D3/G calibration** (Particles tab, both kinds of data): I(D3)/I(G) with band shapes calibrated once and held for every sample, so the values compare between samples and sessions. The Carbon fit's free per-pixel shapes do not give that.
-  - *The calibration* is built in steps. A graphite and a glassy carbon spectrum are fitted in the Q-Carbon windows: G from graphite, D1 to D4 from glassy carbon. Each band's median position and width over the carbon spectra of an uncoated reference map, where the band is at least 3 × the noise (R² above 0.5), gives baseline 1; the same over a coated map, starting from baseline 1, gives baseline 2. A band found in fewer than 5 % of the spectra keeps the step before's shape: in the calibration of 21 Oct 2026, D3 is too weak on both maps, so its shape (1510 cm⁻¹, FWHM 170 cm⁻¹) is glassy carbon's. That calibration ships with the app, baseline 2 selected.
+  - *The calibration* is built in steps. A graphite and a glassy carbon spectrum are fitted in the S Carbon windows: G from graphite, D1 to D4 from glassy carbon. Each band's median position and width over the carbon spectra of an uncoated reference map, where the band is at least 3 × the noise (R² above 0.5), gives baseline 1; the same over a coated map, starting from baseline 1, gives baseline 2. A band found in fewer than 5 % of the spectra keeps the step before's shape: in the calibration of 21 Oct 2026, D3 is too weak on both maps, so its shape (1510 cm⁻¹, FWHM 170 cm⁻¹) is glassy carbon's. That calibration ships with the app, baseline 2 selected.
   - *D3 on the uncoated map* (a build option, on by default): no single uncoated spectrum carries D3 (on the 21 Oct uncoated map, 0 of 3 096 reach 3 × noise), so the build can fit D3 on the uncoated map's median spectrum instead, started from glassy carbon's shape. It is taken when its height is at least 3 × that fit's residual (the median of whole counts reads 0 noise by second differences, and the residual is mostly misfit, which a real band must stand above); a position or width on its window limit keeps glassy carbon's value; otherwise glassy carbon's shape stays, and the build says which. On synthetic maps of 400 spectra with D3/G 0.02 (1 × noise per spectrum) the median spectrum puts D3 within about 3 cm⁻¹ of its true position. On a real low-D3 map (D3/G 0.012) the fit gives a narrow band (56 cm⁻¹) on the 1490 limit at 1.7 × the residual, a shoulder rather than a coating's broad D3, and glassy carbon's shape is kept. The shipped 21 Oct calibration was made by the calibration's scripts without this option.
   - *Build a calibration* makes one from your own four files (the standards as LabSpec `.l6s` or two-column text spectra, the maps open in the window); *Save calibration* and *Load calibration…* keep it as JSON. The calibration scripts' own `baselines_D3G.json` reads too (its values are rounded to 0.01 cm⁻¹).
   - *Applied*: each spectrum is cut to 1000–1800 cm⁻¹ and cleared of cosmic rays (points more than 8 × the noise above a 7-point running median, at most 2 points wide). Its noise is the robust SD of the second difference over √6, and it counts as carbon when its smoothed G (1540–1630 cm⁻¹) stands at least 10 × that above a straight line through the two ends of the range. On carbon spectra the five heights (0 to 5000 counts) and a poly-2 background are solved by bounded least squares with every position and width held. Reported: the median I(D3)/I(G) with a 95 % interval from resampling whole blocks (8 × 8 pixels, or 150 µm squares of particles, since neighbouring map spectra share their signal), A(D3)/A(G) from the line shapes' own areas, D3's height over its error, and the residual over the noise (flagged above 2). ParticleFinder data use the particles the rest of the tab uses (measured, off the seams).
@@ -131,7 +131,7 @@ The default configuration is a typical five-band carbon model: poly order 2 base
 - **Splat 3D tab** (desktop version; a work in progress in the web app). Spectral Gaussian splatting: the baseline-corrected cube on the particles becomes a field of 3-D Gaussians in (x, y, Raman shift), fitted with `ramansp.splatting`. The WebGL viewer projects each Gaussian as in 3D Gaussian splatting. Every 5th channel is held out; on a 9 000-point map the held-out error is 0.97× the map's own noise, with 1 568 Gaussians and 58× fewer numbers than the cube.
 - **Zoom.** Scroll on any map to zoom at the pointer, drag to pan, double-click (or ⟲) for the whole map. The four maps zoom together and the optical image follows; on ParticleFinder data each particle shows its number once you are close enough to read it.
 - **Small windows.** Below 680 px of height the page scrolls (the top bar stays) rather than squeeze the maps and spectra.
-- **Map grid.** The map cards are as tall as the map needs, so a wide map leaves no empty band. The four maps sit in a row as in Q-Carbon, or 2 × 2 when that draws each map at least 1.5 times bigger (wide maps on a laptop screen: about four times). Map tools (display options, PNG, enlarge) appear over the map on hover.
+- **Map grid.** The map cards are as tall as the map needs, so a wide map leaves no empty band. The four maps sit in a row as in S Carbon, or 2 × 2 when that draws each map at least 1.5 times bigger (wide maps on a laptop screen: about four times). Map tools (display options, PNG, enlarge) appear over the map on hover.
 - **Several files.** Drop or pick several maps at once (each `.l6v` goes to the map whose name it shares most of; a ParticleFinder `.l6pf` goes with the spectra list named after it) and they are fitted one after another with the Carbon fit settings. The *Files* tab lists every map opened in the session with its status and a summary of the valid points (ratio median, mean ± SD), exports that summary as one CSV row per file, and shows the same map (ratio, band intensity or error) of up to four ticked files side by side on one colour scale. A file fitted with other settings is marked *settings changed*; *Fit all* refits only those. Click a file, or use the file menu in the top bar, to open it on the Carbon fit tab: its fit is reused when the settings still match. Fitted-result tables still open one at a time. In the web version fits run one at a time (they share the worker pool), and *Remove* frees the file's memory.
 - **Display.** Colour maps: Viridis by default (even steps in brightness, so equal value steps look equal), with the LabSpec rainbow, Inferno, Magma, Turbo, Cividis and others in each map's ⚙ menu. Also 1–99 % / full / manual scaling, optional smoothing (display only; statistics always use raw pixels), enlarged map view and PNG export. The scale bar sits above the map so it never covers data, colour bars carry at least three labels, and the pinned crosshair is dashed and light. On narrow map cards (four across), the titles shrink to fit.
 - **Report** (Report tab, then Print / Save as PDF). It leads with the results, then the maps, spectra, quality and configuration as before:
@@ -141,14 +141,14 @@ The default configuration is a typical five-band carbon model: poly order 2 base
   - *Statistical analysis: summary*: a few plain questions with their answers: how much amorphous carbon, more than uncoated or not, how many particles (or how much area) are coated, whether the coating is the same everywhere, the thinnest particles against the uncoated level, size, and anything to check. Every test behind them stays in the Particles tab.
   - The Particles tab's analyses run first if the tab has not been opened on the file. Coverage needs an uncoated reference (or a threshold τ) under Coverage; without one the report says so rather than inventing a number. Charts are inline SVG for white paper; the report stays in Times New Roman.
 
-## Checked against Q-Carbon
+## Checked against S Carbon
 
 | Check | Data | Result |
 |---|---|---|
-| G band, per pixel | map A (12 382 points) vs its Q-Carbon export | intensity r = 0.9997, area r = 0.9998 |
-| G band area map | map B vs Q-Carbon `G(ar).l6i` | r = 0.9999, medians 1955 vs 1961 |
+| G band, per pixel | map A (12 382 points) vs its S Carbon export | intensity r = 0.9997, area r = 0.9998 |
+| G band area map | map B vs S Carbon `G(ar).l6i` | r = 0.9999, medians 1955 vs 1961 |
 | Area convention | vendor area / (height × FWHM) | line shape integrated over the fit range: 1.541 for a 19 cm⁻¹ Lorentzian (vendor 1.5409); Gauss 1.0645 |
-| Std. error convention | map B vs Q-Carbon `ERROR.l6i` | √(SSR / (N − 3 × bands)): ratio 1.00 on pixels where both fits agree |
+| Std. error convention | map B vs S Carbon `ERROR.l6i` | √(SSR / (N − 3 × bands)): ratio 1.00 on pixels where both fits agree |
 | Map orientation | map C vs LabSpec's own screenshot of it | r = 0.949; rotated 0.48, mirrored ≈ 0 |
 | Text export | a LabSpec text matrix vs the same map's `.l6m` | identical cube and axes |
 | ParticleFinder fields and order | a 4 575-particle project vs rows of LabSpec's own Results table | each row's red-cursor height finds one spectrum; that particle's min diameter, convexity, elongation and volume all match (7 of 7 rows) |
@@ -156,12 +156,12 @@ The default configuration is a typical five-band carbon model: poly order 2 base
 
 **D3: shapes from the mean spectrum.**
 
-- **Problem.** Fitted freely per pixel, the broad D3 band wandered to its bounds: on map B, 62 % of pixels had D3's position on a limit. It then soaked up background curvature the quadratic baseline cannot follow, so the D3 map showed the substrate, not the carbon. It correlated with Q-Carbon's own `D3(ar).l6i` at only r = 0.38, and the particle was not visible.
+- **Problem.** Fitted freely per pixel, the broad D3 band wandered to its bounds: on map B, 62 % of pixels had D3's position on a limit. It then soaked up background curvature the quadratic baseline cannot follow, so the D3 map showed the substrate, not the carbon. It correlated with S Carbon's own `D3(ar).l6i` at only r = 0.38, and the particle was not visible.
 - **What the app does.** It first fits the mean spectrum of the carbon pixels. A band whose position or width a single pixel cannot determine keeps that mean shape, and only its intensity is fitted per pixel. "Cannot determine" means: standard error at the map's own noise level above ¼ of the width (or ½ of the width for the position).
-- **Effect.** The particle is visible again, and map B's D3 correlates with Q-Carbon at r = 0.72. G is unchanged: it stays free, and still matches Q-Carbon at r = 0.9999.
+- **Effect.** The particle is visible again, and map B's D3 correlates with S Carbon at r = 0.72. G is unchanged: it stays free, and still matches S Carbon at r = 0.9999.
 - **Which bands are held** is decided per map, and the app says which under the Peaks table. Typically D3 and D4, plus D2 on noisier maps.
 - **Limits.** A single pixel carries D3 at only about 1–2 σ at typical count levels, so some speckle is physics. D3 values left on bare substrate are background, not carbon: use *Exclude substrate (Otsu)*. A higher baseline order does not help (order 4 makes D3 worse).
-- **Turning it off** gives the plain per-pixel fit. Q-Carbon itself sets D3 to zero in 38 % of map A's pixels. Compare D3 numbers like-for-like only, and not between programs.
+- **Turning it off** gives the plain per-pixel fit. S Carbon itself sets D3 to zero in 38 % of map A's pixels. Compare D3 numbers like-for-like only, and not between programs.
 
 **ParticleFinder format.** A `.l6pf` holds the mosaic (uint8 RGB with its X and Y stage axes), the spectra (one per particle, with a 1…P index axis) and a particle table of 24 float32 per particle: X, Y, area, circle-equivalent diameter, …, Feret max (field 10), min diameter (Feret min, 11), convexity (15), elongation (16), volume (18), bounding box (19–22), class (23). The table is found by an identity that cannot hold by chance, diameter = √(4 · area / π), and every position must lie inside its own box. Some versions do not tag the mosaic as a matrix. It then fills the gap between two records exactly, as on all 16 ParticleFinder projects on disk, and is read from there. Before, a search by smoothness looked for it, but that search cannot tell whole-pixel shifts apart: it placed six such mosaics 3 to 260 pixels off (0.6 to 250 µm). On one project, only 13 % of particle centres fell on a particle in the image (11 % by chance); read from the gap, 96 % do. Feret max sits where LabSpec's Results table lists it, just before Feret min, and behaves as a caliper length: on all 4 575 particles of a project it is never shorter than the box's longer side nor longer than its diagonal (within one mosaic pixel). Fields not pinned against the instrument are not shown.
 
@@ -171,13 +171,13 @@ The default configuration is a typical five-band carbon model: poly order 2 base
 
 **Map orientation.** LabSpec rasters X fast and draws Y downwards, and its text export writes the Y column first. Reading the slow axis as X transposes the map: statistics are unaffected, but images and overlays are not. Both readers here follow LabSpec's convention.
 
-## Conventions that could not be read off Q-Carbon
+## Conventions that could not be read off S Carbon
 
 - The intensity constraint applies to the larger of the two ratio bands' intensities.
 - A ratio with a zero denominator is 0 (the vendor exports do this).
 - An unticked Fit box holds that band's position and width; its intensity is still fitted.
 - *Skip fitting step* holds every position and width; intensities and baseline are still fitted.
-- Red. χ² uses Poisson variance, max(model, 1). Q-Carbon's definition is not documented.
+- Red. χ² uses Poisson variance, max(model, 1). S Carbon's definition is not documented.
 - LabSpec's own `.ini` files are not read. Configurations are saved in this app's format.
 
 ## Tests
@@ -189,20 +189,20 @@ node --test tests/js/pf-analysis.test.mjs # particle statistics: band errors, un
 node --test tests/js/d3g-calibration.test.mjs # D3/G calibration: despiking, carbon test, held-shape heights, calibration steps, block intervals
 ```
 
-The vendor-agreement tests compare against Q-Carbon's own outputs. They need your files: copy `tests/vendor_data.example.json` to `tests/vendor_data.json` and fill in the paths; without it they skip. `python tools/serve_web.py` serves the web build the way Vercel does (static files, no Python engine).
+The vendor-agreement tests compare against S Carbon's own outputs. They need your files: copy `tests/vendor_data.example.json` to `tests/vendor_data.json` and fill in the paths; without it they skip. `python tools/serve_web.py` serves the web build the way Vercel does (static files, no Python engine).
 
 ## Layout
 
 ```
 run.py                  start the desktop server and open the browser
 data_roots.example.txt  folders the desktop library scans (copy to data_roots.txt)
-qcarbon/labspec.py      .l6m / .l6v / .l6i reader; text reader (LabSpec matrix, x/y/shift/intensity, spectrum)
-qcarbon/config.py       configuration, INI load/save
-qcarbon/fitter.py       per-pixel bounded Levenberg-Marquardt (numba, parallel), shapes from the mean spectrum
-qcarbon/results.py      ratios, valid points, quality, statistics, vendor-format export
-qcarbon/splat.py        spectral Gaussian splatting (wraps ramansp)
-qcarbon/library.py      folder scan with cache (.cache/)
-qcarbon/server.py       FastAPI app
+scarbon/labspec.py      .l6m / .l6v / .l6i reader; text reader (LabSpec matrix, x/y/shift/intensity, spectrum)
+scarbon/config.py       configuration, INI load/save
+scarbon/fitter.py       per-pixel bounded Levenberg-Marquardt (numba, parallel), shapes from the mean spectrum
+scarbon/results.py      ratios, valid points, quality, statistics, vendor-format export
+scarbon/splat.py        spectral Gaussian splatting (wraps ramansp)
+scarbon/library.py      folder scan with cache (.cache/)
+scarbon/server.py       FastAPI app
 web/                    the interface (plain JS modules, canvas + WebGL2, no build step)
 web/js/engine/          the same readers and fitter in JavaScript, for the browser-only build;
                         results-file.js opens fitted-result tables (both builds)

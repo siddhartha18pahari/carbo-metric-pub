@@ -769,7 +769,7 @@ def read_l6_image(path: str, shape: tuple[int, int]) -> np.ndarray:
     need = ny * nx
     for o, n in sorted(_mat_blocks(raw), key=lambda t: -t[1]):
         # Blocks can open with NUL-terminated labels: "1/cm x counts\0Peak
-        # area\0" (Q-Carbon result images) or "Max height\0" (red maps). The values start
+        # area\0" (S Carbon result images) or "Max height\0" (red maps). The values start
         # after the last label, off the 4-byte grid when the labels are odd.
         pos = 0
         for _ in range(3):

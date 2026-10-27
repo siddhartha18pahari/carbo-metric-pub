@@ -1,4 +1,4 @@
-// File readers for the browser: a port of qcarbon/labspec.py.
+// File readers for the browser: a port of scarbon/labspec.py.
 //
 // LabSpec 6 binaries (.l6m maps, .l6v white-light images) and text exports
 // from any program. Everything works on an ArrayBuffer in the page, so files
@@ -291,7 +291,7 @@ export function readL6v(buf, name) {
 
 // --------------------------------------------------------------------------
 // ParticleFinder projects (.l6pf): mosaic image, one spectrum per particle and
-// a table of 24 float32 per particle (see qcarbon/labspec.py, where the field
+// a table of 24 float32 per particle (see scarbon/labspec.py, where the field
 // meanings were pinned against the instrument's own Results table).
 // --------------------------------------------------------------------------
 export const PF_FIELDS = { x: 0, y: 1, area: 2, ecd: 3, feret_max: 10, min_diam: 11, convexity: 15, elongation: 16, volume: 18,
@@ -636,7 +636,7 @@ export function readText(text, name) {
 }
 
 // --------------------------------------------------------------------------
-// fitted-result tables: Q-Carbon's "Export data" (.txt, one row per point,
+// fitted-result tables: S Carbon's "Export data" (.txt, one row per point,
 // "<band> Intensity / Width / Area" columns, no coordinates) and this app's own
 // full CSV export (with X, Y and every band)
 // --------------------------------------------------------------------------
