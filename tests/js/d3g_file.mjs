@@ -32,6 +32,8 @@ out.files = preps.map(p => {
            ratio: Object.fromEntries(Object.entries(U.ratio).map(([k, v]) => [k, arr(v)])), own: shapes(own), own_ratio: arr(U2.ratio["ID3/IG"]),
            own_rn: arr(Array.from(U2.list, (q, i) => U2.rmse[i] / p.sig[q])), rn: arr(Array.from(U.list, (q, i) => U.rmse[i] / p.sig[q])) };
 });
+// baseline 1 alone, from the standards over one uncoated map
+if (req.b1 != null && B0) { const a = preps[req.b1]; out.b1 = shapes(calibrate(freeFits(a, a.carbon, B0), a.sig, B0)); }
 // the chain as the calibration's scripts build it; with d3Median, D3 refined on the uncoated median spectrum
 if (req.chain && B0) {
   const [a, b] = req.chain.map(i => preps[i]);

@@ -138,6 +138,23 @@ def test_comparison_of_medians_matches_the_package(tmp_path):
         assert got["hi"] == pytest.approx(w["95% CI high"], abs=6e-4)
 
 
+def test_uncoated_map_matches_the_package(tmp_path):
+    book, sheets = _book("maps")
+    out = _run(tmp_path, {"graphite": _path("d3g_graphite"), "glassy": _path("d3g_glassy"), "files": [{"path": _path("d3g_uncoated_map")}], "b1": 0})
+    T = pd.read_excel(book, sheet_name=sheets[0])
+    assert out["files"][0]["carbon"] == T["pix"].tolist()
+    np.testing.assert_allclose(np.asarray(out["files"][0]["ratio"]["ID3/IG"], float), T["ID3/IG"], atol=1e-9)
+    # baseline 1 from the free fits: this app's Levenberg-Marquardt and the scripts' trust-region fits
+    # agree on every position to 0.1 cm-1; D1 and D2 widths, medians over thousands of weak fits, to
+    # 0.75 cm-1 (45.98 against 46.73, 15.94 against 16.42 on the 21 Oct uncoated map)
+    want = _baseline(book, "B1 median")
+    for b in BANDS:
+        got = out["b1"][b]
+        assert got["pos"] == pytest.approx(want[b][0], abs=0.1), b
+        assert got["fwhm"] == pytest.approx(want[b][1], abs=1.0), b
+        assert got["support"] == pytest.approx(want[b][2], abs=max(1, 0.01 * abs(want[b][2]))), b
+
+
 def test_maps_and_the_chain_match_the_package(tmp_path):
     book, sheets = _book("maps")
     req = {"graphite": _path("d3g_graphite"), "glassy": _path("d3g_glassy"),

@@ -678,8 +678,8 @@ table.files .st-run { color: var(--accent); } table.files .st-err { color: var(-
 .paper .legend i { width: 3.2mm; height: 3.2mm; border-radius: 0.8mm; display: inline-block; }
 .paper .legend i.hatch { background: repeating-linear-gradient(45deg, #e8eef7 0 1.2px, #8a98b0 1.2px 2px); }
 .paper table.stats-sum th, .paper table.stats-sum td { text-align: left; vertical-align: top; }
-.paper table.stats-sum td:first-child { font-weight: 700; width: 27%; }
-.paper table.stats-sum td:last-child { width: 15mm; }
+.paper table.stats-sum td:first-child { font-weight: 700; width: 32%; }
+.paper table.stats-sum td:nth-child(2) { width: 24%; }
 .paper table.num { margin-top: 2mm; }
 .paper table.compact { font-size: 9pt; }
 .paper tr.total td { font-weight: 700; background: #f5f8fc; }
