@@ -2357,25 +2357,18 @@ function d3gTop(step) {
   return step.topCache.v;
 }
 
-function renderD3g() {
-  const box = $("#d3g-verdict"), cards = $("#d3g-cards"), note = $("#d3g-note"), chk = $("#d3g-check-cards");
-  d3gSelects();
-  const ch = d3gChoice();
-  d3gTable(ch);
-  S.d3gScale = null;
-  const clear = msg => { box.className = "verdict"; box.textContent = ""; cards.replaceChildren(); chk.replaceChildren(); note.textContent = msg; };
-  const cur = S.ds && fileOf(S.ds.id);
-  if (!cur || !S.cube) return clear(S.fit && S.fit.resultsOnly ? "The calibration needs the spectra: open the map itself." : "");
+// The open file's calibrated result against its reference, as the section and the report show it:
+// { pending } while the heights are being fitted, { missing } with the reason when there is none
+function d3gSummary() {
+  const ch = d3gChoice(), cur = S.ds && fileOf(S.ds.id);
+  if (!cur || !S.cube) return { ch, missing: S.fit && S.fit.resultsOnly ? "The calibration needs the spectra: open the map itself." : "" };
   const refF = $("#d3g-ref").value ? fileOf($("#d3g-ref").value) : null, res = d3gGet(cur, ch), ref = refF ? d3gGet(refF, ch) : null;
-  if (!res || (refF && !ref)) { clear(""); box.replaceChildren(el("b", {}, `Fitting the heights with ${ch.cal.name} · ${ch.step.name}…`)); return; }
-  if (res.error || (ref && ref.error)) return clear(`Could not apply the calibration: ${res.error || ref.error}`);
+  if (!res || (refF && !ref)) return { ch, cur, pending: true };
+  if (res.error || (ref && ref.error)) return { ch, cur, missing: `Could not apply the calibration: ${res.error || ref.error}` };
   const pf = res.prep.place.pf, unit = pf ? "particles" : "spectra";
-  if (!res.n) return clear(`No carbon ${unit} here: none has its G at least ${res.prep.settings.snrMin} × its noise.`);
-  // fixed decimals, enough to show the interval's width to two figures
-  const M = res.med, dp = Math.min(6, Math.max(2, 1 - Math.floor(Math.log10(M.hi - M.lo || 1e-3))));
-  const fx = v => (Number.isFinite(v) ? `${v < 0 ? "−" : ""}${Math.abs(v).toFixed(dp)}` : "–"), signed = v => `${v < 0 ? "−" : "+"}${Math.abs(v).toFixed(dp)}`;
+  if (!res.n) return { ch, cur, missing: `No carbon ${unit} here: none has its G at least ${res.prep.settings.snrMin} × its noise.` };
+  const M = res.med, top = d3gTop(ch.step);
   let cmp = null, refMed = NaN, refName = "";
-  const top = d3gTop(ch.step);
   if (ref && ref.n) {
     const k = `${res.key}~${ref.key}~${top}`;
     if (!D3G.cmp.has(k)) D3G.cmp.set(k, compareMedians(res.blocks, ref.blocks, { top }));
@@ -2389,10 +2382,26 @@ function renderD3g() {
     }
     refName = "the median entered";
   }
-  // per spectrum, for the export: where each one sits on the same scale
-  S.d3gScale = cmp && Number.isFinite(cmp.index) ? { ref: refMed, top } : null;
   const why = !cmp ? "no uncoated reference" : !Number.isFinite(top) ? "glassy carbon not known for these shapes: choose its spectrum under Build a calibration"
     : `glassy carbon reads ${top.toFixed(4)} with these shapes, not above the reference`;
+  // fixed decimals, enough to show the interval's width to two figures
+  const dp = Math.min(6, Math.max(2, 1 - Math.floor(Math.log10(M.hi - M.lo || 1e-3))));
+  return { ch, cur, refF, res, ref, pf, unit, M, top, cmp, refMed, refName, why, dp };
+}
+
+function renderD3g() {
+  const box = $("#d3g-verdict"), cards = $("#d3g-cards"), note = $("#d3g-note"), chk = $("#d3g-check-cards");
+  d3gSelects();
+  const Z = d3gSummary(), ch = Z.ch;
+  d3gTable(ch);
+  S.d3gScale = null;
+  const clear = msg => { box.className = "verdict"; box.textContent = ""; cards.replaceChildren(); chk.replaceChildren(); note.textContent = msg; };
+  if (Z.pending) { clear(""); box.replaceChildren(el("b", {}, `Fitting the heights with ${ch.cal.name} · ${ch.step.name}…`)); return; }
+  if (!Z.res) return clear(Z.missing || "");
+  const { cur, refF, res, ref, pf, unit, M, top, cmp, refMed, refName, why, dp } = Z;
+  const fx = v => (Number.isFinite(v) ? `${v < 0 ? "−" : ""}${Math.abs(v).toFixed(dp)}` : "–"), signed = v => `${v < 0 ? "−" : "+"}${Math.abs(v).toFixed(dp)}`;
+  // per spectrum, for the export: where each one sits on the same scale
+  S.d3gScale = cmp && Number.isFinite(cmp.index) ? { ref: refMed, top } : null;
   const warn = res.rn > 2, items = [];
   items.push(`Median over the ${fmt(res.n)} carbon ${unit} of ${cur.name} (G at least ${res.prep.settings.snrMin} × its noise), with the band shapes of ${ch.cal.name} · ${ch.step.name}. The interval resamples whole blocks of neighbouring ${pf ? "particles (150 µm squares)" : "pixels (8 × 8)"}, since neighbouring map spectra share their signal.`);
   if (cmp) items.push(`${fmt(cmp.ratio, 3)} × the uncoated reference (${refName}, ${fx(refMed)}): a difference of ${signed(cmp.diff)} (95 % CI ${fx(cmp.lo)} to ${fx(cmp.hi)}${cmp.hand ? "; the reference's own spread is not counted" : ""}). ` +
@@ -4090,17 +4099,77 @@ function reportFigures() {
   return figs;
 }
 
-function makeReport() {
+// The Particles tab's results for this file, as plain numbers for the report. The tab's analyses
+// run first (with its current settings) in case it has not been opened on this file, and the
+// calibration's fits are awaited.
+async function reportAnalysis() {
+  if (!S.fit || S.fit.resultsOnly || !S.cube) return null;
+  particlesInit();
+  // a map works out its band-height errors after drawing when there are many pixels
+  if (!S.points) for (let i = 0; i < 150 && !(S.segCoat && S.segCoat.seg === S.seg); i++) await sleep(200);
+  const ch = d3gChoice(), cur = fileOf(S.ds.id), refF = $("#d3g-ref").value ? fileOf($("#d3g-ref").value) : null;
+  try { await d3gResult(cur, ch); if (refF) await d3gResult(refF, ch); } catch { /* d3gSummary says why */ }
+  const level = node => ["good", "warn", "bad"].find(c => node.classList.contains(c)) || null;
+  const verdict = sel => { const b = $(`${sel} b`), box = $(sel); return { head: b ? b.textContent : "", level: level(box) }; };
+  // the coating verdict's headline sits in the overview above the notes
+  const overview = (ov, sel) => { const h = $(`${ov} .ov-head`); return h ? { head: h.lastElementChild.textContent, level: level(h) } : verdict(sel); };
+  const A = { kind: S.points ? "pf" : "map" };
+
+  const Z = d3gSummary();
+  if (Z.res) {
+    const sh = Z.ch.step.shapes, set = Z.ch.cal.settings;
+    A.calib = { name: `${Z.ch.cal.name} · ${Z.ch.step.name}`, unit: Z.unit, n: Z.res.n, measured: Z.res.measured, median: Z.M.median, lo: Z.M.lo, hi: Z.M.hi,
+      dp: Z.dp, area: Z.res.area, rn: Z.res.rn, top: Z.top, cmp: Z.cmp, refMed: Z.refMed,
+      ref: Z.cmp ? { name: Z.refName, median: Z.refMed, lo: Z.ref && Z.ref.n ? Z.ref.med.lo : NaN, hi: Z.ref && Z.ref.n ? Z.ref.med.hi : NaN } : null,
+      bands: D3G_BANDS.map(b => ({ name: b, pos: sh[b].pos, fwhm: sh[b].fwhm, shape: set.bands[b].shape,
+        from: /^median spectrum/.test(sh[b].note || "") ? "median spectrum" : sh[b].support > 1 ? `median of ${fmt(sh[b].support)} spectra` : sh[b].note || "" })) };
+  } else A.calib = { missing: Z.pending ? "Still fitting the heights: refresh the report in a moment." : Z.missing || "Not available." };
+
+  const R = S.covR, spec = Math.min(0.9999, Math.max(0.5, +$("#cov-spec").value || 0.99)), refName = $("#cov-ref").value ? (fileOf($("#cov-ref").value) || {}).name : "";
+  if (R && R.mode === "pf") {
+    A.cov = { mode: "pf", band: R.band, tau: R.F.tau, rc: R.F.rc, gmin: R.gmin, refName, x: R.x, n: R.n, pool: R.pool, e: R.e, c: R.c, lo: R.lo, hi: R.hi, lower: R.lower,
+      certified: R.certified, piBar: R.piBar, pass: R.pass, spec, need: spec * R.piBar + (1 - spec) * COV_FPR, needed: R.needed, quantified: S.pfa ? S.pfa.Q.length : NaN,
+      mix: R.mix ? { mode: R.mix.mode, uncoated: R.mix.uncoated, ci: R.mix.ci, two: R.mix.two } : null };
+  } else if (R && R.mode === "map") {
+    const pa = Math.abs((S.x[1] - S.x[0]) * (S.y[1] - S.y[0])), all = new Map(S.seg.parts.map(p => [p.id, p.pixels.length]));
+    const parts = R.parts.map(q => ({ id: q.id, area: (all.get(q.id) || 0) * pa, judged: q.n * pa, covered: q.c * q.n * pa, c: q.c, lo: q.lo, hi: q.hi, bound: q.bound }));
+    const sum = k => parts.reduce((t, q) => t + q[k], 0);
+    A.cov = { mode: "map", band: R.band, tau: R.F.tau, rc: R.F.rc, gmin: R.gmin, refName, parts, spec, mean: R.mean, lowest: R.lowest,
+      total: sum("area"), judged: sum("judged"), covered: sum("covered"), areaShare: sum("covered") / sum("judged") };
+  } else A.cov = { reason: $("#cov-note").textContent || "" };
+
+  if (S.points && S.pfa && S.pfa.coat) {
+    const C = S.pfa.coat, H = C.H;
+    A.uni = { mode: "pf", band: C.band, n: C.n, nC: C.nC, mu: H.mu, cv: H.tau / H.mu, cvLo: H.tauLo / H.mu, cvHi: H.tauHi / H.mu, I2: H.I2, p: H.p,
+      rho: C.rho, drift: C.drift ? { ends: C.ends } : null, moran: C.moran, rhoSize: C.rhoSize, rhoSizeCI: C.rhoSizeCI,
+      thin: C.thin ? { value: C.thin.value, ci: C.thin.ci } : null, ...overview("#pf-ov", "#pf-verdict") };
+  } else if (!S.points && S.segCoat && S.segCoat.C) {
+    const G = S.segCoat, C = G.C, W = C.within, B = C.between, mu = C.mu, cv = h => ({ cv: h.tau / mu, cvLo: h.tauLo / mu, cvHi: h.tauHi / mu, I2: h.I2, p: h.p });
+    A.uni = { mode: "map", band: G.band, mu, particles: C.particles, W: cv(W), B: B ? cv(B) : null, shareWithin: C.shareWithin, det: G.nDet / G.n,
+      patchy: G.rows.filter(r => r.h && r.h.p < 0.05).length, rim: G.rimCmp, rimLeft: !!G.rim, pairs: G.pairs, ...overview("#seg-ov", "#seg-verdict") };
+  }
+  const acc = verdict("#acc-verdict");
+  if (acc.head && !/^No decision yet/.test(acc.head)) A.accept = acc;
+  return A;
+}
+
+let reportRun = 0;
+async function makeReport() {
   if (!S.fit) { $("#report-paper").replaceChildren(el("p", {}, "Open and fit a map first.")); return; }
+  const run = ++reportRun;
+  $("#report-paper").replaceChildren(el("p", { class: "note" }, "Gathering the analysis…"));
+  let analysis = null;
+  try { analysis = await reportAnalysis(); } catch (e) { toast(`Report: ${e.message}`, "error"); }
+  if (run !== reportRun) return;                       // a newer refresh has started
   buildReport($("#report-paper"), {
-    title: $("#rp-title").value, ds: S.ds, cfg: S.cfg, fit: S.fit, nx: S.nx, ny: S.ny, x: S.x, y: S.y,
-    figs: reportFigures(), quality: $("#quality"), stats: statRows(),
-    pinned: S.pinned, pstats: S.pstats, splat: splatState().result, splatImg: sview && splatState().field ? sview.snapshot() : null,
+    title: $("#rp-title").value, ds: S.ds, cfg: S.cfg, fit: S.fit, nx: S.nx, ny: S.ny, x: S.x, y: S.y, points: !!S.points,
+    figs: reportFigures(), quality: $("#quality"), stats: statRows(), analysis,
+    pinned: S.pinned, pstats: S.points ? null : S.pstats, splat: splatState().result, splatImg: sview && splatState().field ? sview.snapshot() : null,
   });
 }
 $("#rp-refresh").onclick = makeReport;
 $("#rp-title").onchange = makeReport;
-$("#rp-print").onclick = () => { makeReport(); setTimeout(() => window.print(), 150); };
+$("#rp-print").onclick = async () => { await makeReport(); setTimeout(() => window.print(), 150); };
 
 // =========================================================================
 // light / dark theme
