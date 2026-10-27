@@ -1498,7 +1498,8 @@ function showMetrics(r) {
 // particles
 // =========================================================================
 const pmap = new MapView($("#map-p"), {
-  onTitle: (mv, e) => specMenu(e, S.pspec, () => renderParticles()),
+  // while the D3/G calibration is drawn here, its title offers the calibration's own quantities
+  onTitle: (mv, e) => ($("#d3g-map").checked ? d3gMapMenu(e) : specMenu(e, S.pspec, () => renderParticles())),
   noProfile: true,
 });
 pmap.cmap = "Viridis";
@@ -2348,9 +2349,8 @@ async function d3gResult(f, ch) {
   if (list.length) {
     const U = unmix(prep, ch.step.shapes, list), r3 = U.ratio["ID3/IG"], nb = D3G_BANDS.length, j3 = D3G_BANDS.indexOf("D3");
     const blocks = blocksOf(Array.from(r3), Array.from(U.list, p => (pl.pf ? stageBlock(pl.x[p], pl.y[p]) : mapBlock(p, pl.nx))));
-    const vals = new Float64Array(prep.P).fill(NaN); U.list.forEach((p, i) => { vals[p] = r3[i]; });
     const fin = Array.from(r3).filter(Number.isFinite);
-    r = { ...r, U, vals, blocks, med: blockMedian(blocks), mean: fin.reduce((t, v) => t + v, 0) / fin.length,
+    r = { ...r, U, blocks, med: blockMedian(blocks), mean: fin.reduce((t, v) => t + v, 0) / fin.length,
           area: median(U.ratio["AD3/AG"]), rn: median(Array.from(U.list, (p, i) => U.rmse[i] / prep.sig[p])),
           z3: median(Array.from(U.list, (_, i) => U.h[i * nb + j3] / U.se[i * nb + j3])), snr: median(Array.from(U.list, p => prep.snr[p])) };
   }
@@ -2508,11 +2508,34 @@ function renderD3g() {
     "A calibration is built in steps: the standards fitted in the Q-Carbon windows (G from graphite, D1 to D4 from glassy carbon), then each band's median position and width over the uncoated map's carbon spectra where the band is at least 3 × the noise (R² above 0.5), then the same over the coated map. A band found in fewer than 5 % of the spectra keeps the step before's shape. " +
     "D3 is that weak on an uncoated map, so a build can measure it on the uncoated map's median spectrum instead: taken when its height is at least 3 × that fit's residual, a position or width on its window limit keeping glassy carbon's value. The 21 Oct calibration was made without this (D3 is glassy carbon's). " +
     "The scale: (R − R_uncoated) / (R_glassy − R_uncoated), R the median I(D3)/I(G), glassy carbon's from its standard spectrum with the same shapes, the interval from the same block resamples. The check applies the last step to this file, for comparison only.";
-  if ($("#d3g-map").checked && res.vals) {
+  if ($("#d3g-map").checked && res.U) {
+    const q = D3G_MAP_Q[D3G.mapQ] ? D3G.mapQ : "ID3/IG", U = res.U, nb = D3G_BANDS.length, vals = new Float64Array(res.prep.P).fill(NaN);
+    U.list.forEach((p, i) => { vals[p] = q === "rn" ? U.rmse[i] / res.prep.sig[p] : U.ratio[q] ? U.ratio[q][i] : U.h[i * nb + D3G_BANDS.indexOf(q)]; });
     pmap.setCategories(null);
-    pmap.setTitle("D3/G calibration : <u>I(D3)/I(G)</u>");
-    pmap.setData(res.vals, { valid: null, label: "I(D3)/I(G)", unit: "" });
+    pmap.setTitle(`D3/G calibration : <u>${D3G_MAP_Q[q]}</u>`);
+    pmap.setData(vals, { valid: null, label: D3G_MAP_Q[q], unit: q === "D3" || q === "G" ? "counts" : "" });
   }
+}
+
+// what the calibration can draw on the map, and the title's menu for it
+const D3G_MAP_Q = { "ID3/IG": "I(D3)/I(G)", "AD3/AG": "A(D3)/A(G)", "ID1/IG": "I(D1)/I(G)", D3: "D3 height", G: "G height", rn: "Fit residual / noise" };
+function d3gMapMenu(e) {
+  e.stopPropagation();
+  $$(".popover").forEach(p => p.remove());
+  const pop = el("div", { class: "popover", onclick: ev => ev.stopPropagation() });
+  const close = () => pop.remove();
+  pop.append(el("div", { class: "pop-h" }, "D3/G calibration"),
+    el("div", { class: "menu-list" }, ...Object.entries(D3G_MAP_Q).map(([k, name]) => el("button", {
+      class: k === (D3G.mapQ || "ID3/IG") ? "on" : "", onclick: () => { D3G.mapQ = k; close(); renderD3g(); },
+    }, name))),
+    el("div", { class: "menu-list" }, el("button", {
+      onclick: () => { close(); const cb = $("#d3g-map"); cb.checked = false; cb.dispatchEvent(new Event("change")); },
+    }, "Back to the fitted maps")));
+  document.body.append(pop);
+  const r = e.currentTarget.getBoundingClientRect();
+  pop.style.left = Math.max(8, Math.min(window.innerWidth - 250, r.left)) + "px";
+  pop.style.top = r.bottom + 6 + "px";
+  setTimeout(() => document.addEventListener("click", () => pop.remove(), { once: true }));
 }
 for (const id of ["#d3g-cal", "#d3g-ref", "#d3g-ref-med"]) $(id).addEventListener("change", () => renderD3g());
 $("#d3g-map").addEventListener("change", () => { if (S.points && S.fit) renderPF(); else if (S.seg) renderParticles(); else renderD3g(); });
