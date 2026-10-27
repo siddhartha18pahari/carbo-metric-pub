@@ -1,4 +1,4 @@
-// The fitting engine for the browser: a port of qcarbon/fitter.py.
+// The fitting engine for the browser: a port of scarbon/fitter.py.
 //
 // Same model, bounds, starting point, Levenberg-Marquardt steps, mean-spectrum
 // shapes and conventions (area over the fit window, Std. error with N - 3 x

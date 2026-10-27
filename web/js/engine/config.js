@@ -1,5 +1,5 @@
 // Fitting configuration for the browser: the default and INI load/save, in the
-// same format as qcarbon/config.py, so a file saved by either version opens in
+// same format as scarbon/config.py, so a file saved by either version opens in
 // the other.
 
 import { checkConfig } from "./core.js";

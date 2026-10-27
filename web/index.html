@@ -81,7 +81,7 @@
             <div class="hero-text">
               <span class="eyebrow">Raman analysis of carbon materials</span>
               <h1>Carbon Raman maps, fitted pixel by pixel.</h1>
-              <p class="lead">Open a LabSpec&nbsp;6 map, a ParticleFinder project or a text export. Every spectrum is fitted with an editable five-band D/G model, giving maps of each band, their ratio and the fit error. Q-Carbon's own result exports open too.</p>
+              <p class="lead">Open a LabSpec&nbsp;6 map, a ParticleFinder project or a text export. Every spectrum is fitted with an editable five-band D/G model, giving maps of each band, their ratio and the fit error. S Carbon's own result exports open too.</p>
               <div class="hero-actions">
                 <button class="primary" id="hero-file">Open files…</button>
                 <button id="hero-open">Open from library</button>
@@ -111,7 +111,7 @@
           </div>
           <div class="features">
             <div class="feature"><span class="f-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 17l4-6 3 4 3-9 3 7 2-3 3 7"/><path d="M3 21h18"/></svg></span><div><h3>Per-pixel fit</h3><p>Five bands (D1 to D4, G), fitted within bounds at every pixel, with the error of each fit.</p></div></div>
-            <div class="feature"><span class="f-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M9 9v11"/></svg></span><div><h3>Q-Carbon conventions</h3><p>Same layout, configuration files and export columns; checked against Q-Carbon's own exports.</p></div></div>
+            <div class="feature"><span class="f-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M9 9v11"/></svg></span><div><h3>S Carbon conventions</h3><p>Same layout, configuration files and export columns; checked against S Carbon's own exports.</p></div></div>
             <div class="feature"><span class="f-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="8" height="8" rx="1.5"/><rect x="13" y="3" width="8" height="8" rx="1.5"/><rect x="3" y="13" width="8" height="8" rx="1.5"/><rect x="13" y="13" width="8" height="8" rx="1.5"/></svg></span><div><h3>Several files</h3><p>Fit a batch, compare maps side by side, export one summary row per file.</p></div></div>
             <div class="feature"><span class="f-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="7" cy="8" r="3"/><circle cx="16" cy="7" r="2"/><circle cx="15" cy="16" r="4"/><circle cx="6" cy="17" r="1.6"/></svg></span><div><h3>ParticleFinder</h3><p>Particles at their stage positions, with diameter, convexity and the rest of the morphology.</p></div></div>
             <div class="feature"><span class="f-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="12" cy="12" r="3.2"/><path d="M16.5 7.5h1"/></svg></span><div><h3>White light and zoom</h3><p>The optical image under the maps; every map zooms and pans together.</p></div></div>
@@ -134,7 +134,7 @@
       <div class="sec" data-sec="processing">
         <div class="sec-h toggle">Processing</div>
         <div class="sec-b">
-          <div class="muted small ro-note">This file holds Q-Carbon's fitted values, not spectra: baseline, spectral smoothing and range were applied in Q-Carbon and cannot be redone here. Smoothing (spatial) still works, on the fitted maps. Fit the map (.l6m) to change the rest.</div>
+          <div class="muted small ro-note">This file holds S Carbon's fitted values, not spectra: baseline, spectral smoothing and range were applied in S Carbon and cannot be redone here. Smoothing (spatial) still works, on the fitted maps. Fit the map (.l6m) to change the rest.</div>
           <div class="frow spec-ctl"><label>Baseline</label>
             <select id="cfg-baseline">
               <option value="-1">None</option><option value="0">Constant</option><option value="1">Linear</option>
@@ -143,7 +143,7 @@
           <div class="frow spec-ctl"><label></label><label class="chk"><input type="checkbox" id="cfg-separate"> Fit separately</label></div>
           <div class="frow spec-ctl"><label></label><label class="chk" title="Fit the mean spectrum of the carbon pixels first and start every pixel from its band shapes. A band whose position or width one pixel cannot determine (at this map's noise) keeps the mean shape; only its intensity is fitted per pixel."><input type="checkbox" id="cfg-auto"> Shapes from mean spectrum</label></div>
           <div class="frow spec-ctl"><label>Smoothing (spectral)</label>
-            <div class="row2"><select id="cfg-sgw" title="Savitzky–Golay smoothing along the Raman shift, before the fit. Off fits the raw spectra, as Q-Carbon does. A wide window broadens narrow bands such as G.">
+            <div class="row2"><select id="cfg-sgw" title="Savitzky–Golay smoothing along the Raman shift, before the fit. Off fits the raw spectra, as S Carbon does. A wide window broadens narrow bands such as G.">
               <option value="0">Off</option><option value="5">SG 5 points</option><option value="7">SG 7 points</option><option value="9">SG 9 points</option><option value="11">SG 11 points</option><option value="15">SG 15 points</option><option value="21">SG 21 points</option>
             </select><select id="cfg-sgo" title="Polynomial order of the Savitzky–Golay filter"><option value="2">order 2</option><option value="3">order 3</option><option value="4">order 4</option></select></div></div>
           <div class="frow"><label>Smoothing (spatial)</label>

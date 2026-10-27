@@ -1,6 +1,6 @@
-// Fitted-result tables (Q-Carbon's "Export data", or this app's full CSV).
+// Fitted-result tables (S Carbon's "Export data", or this app's full CSV).
 // They carry fitted values and no spectra, so they open straight into maps,
-// histograms and statistics, in either mode, without the server. Q-Carbon's
+// histograms and statistics, in either mode, without the server. S Carbon's
 // export has no coordinates: the grid comes from a .l6m opened with it, or is
 // inferred from the point count and offered for correction.
 
@@ -47,7 +47,7 @@ export async function openResults(file, files) {
 
 // Line shape of each band, read off the file itself: area / (height x FWHM)
 // is 1.0645 for a Gaussian and 1.3-1.57 for a Lorentzian windowed to the fit
-// range (both measured on Q-Carbon's own exports). Falls back to the
+// range (both measured on S Carbon's own exports). Falls back to the
 // configured shape when the file has no areas.
 const NOMINAL = { G: 1580, D1: 1350, D2: 1620, D3: 1500, D4: 1200 };
 function bandShapes(t, cfg) {
@@ -64,7 +64,7 @@ function bandShapes(t, cfg) {
 export function resultsDataset(r, grid, cfg) {
   const t = r.table, { nx, ny, x, y, fit } = placeResults(t, grid), P = nx * ny;
   const nan = () => new Float64Array(P).fill(NaN);
-  // Q-Carbon exports no band positions: the graphs draw those bands at their
+  // S Carbon exports no band positions: the graphs draw those bands at their
   // configured (or standard) positions and say so; the position maps stay empty
   const nominal = [], nominalPos = t.bands.map((b, j) => {
     for (let p = 0; p < P; p++) if (Number.isFinite(fit.position[p * t.bands.length + j])) return null;

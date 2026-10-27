@@ -9,9 +9,9 @@ import subprocess
 import numpy as np
 import pytest
 
-from qcarbon.config import Config
-from qcarbon.fitter import fit_spectra, shape_eval, smooth_spectra
-from qcarbon.labspec import read_map
+from scarbon.config import Config
+from scarbon.fitter import fit_spectra, shape_eval, smooth_spectra
+from scarbon.labspec import read_map
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 NODE = shutil.which("node")
@@ -70,7 +70,7 @@ def _vendor_path(key):
 @pytest.mark.skipif(NODE is None, reason="Node.js not installed")
 @pytest.mark.parametrize("key", ["pf_small_project", "antistokes_map", "twin_axis_map"])
 def test_browser_reader_matches_python_on_lab_files(key):
-    from qcarbon.labspec import read_any
+    from scarbon.labspec import read_any
     p = _vendor_path(key)
     out = subprocess.run([NODE, os.path.join(HERE, "js", "read_file.mjs"), p], capture_output=True, text=True, encoding="utf-8", check=True)
     js = json.loads(out.stdout)

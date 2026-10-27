@@ -1,4 +1,4 @@
-// The server, in the browser. Answers the same /api calls as qcarbon/server.py
+// The server, in the browser. Answers the same /api calls as scarbon/server.py
 // so the interface runs unchanged without Python: files are read from the
 // user's disk into the page, fits run in Web Workers, nothing is uploaded.
 // Splat 3D needs the Python engine: in the web version it is a work in progress.
