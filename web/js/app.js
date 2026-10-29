@@ -9,7 +9,7 @@ import { MapView } from "./mapview.js";
 import { SpectrumPlot, HistogramPlot, DensityPlot, PEAK_COLOURS } from "./plots.js";
 import { SplatView, sliceField } from "./splat3d.js";
 import { segment, outlineOverlay, distance, PARTICLE_COLOURS } from "./particles.js";
-import { buildReport } from "./report.js";
+import { buildReport, buildDlcReport } from "./report.js";
 import { rng, wilson, weightedQuantile, laCancado, robustScale, bestGmm, bootstrapShares, median, quantileSorted,
          heightCovariances, ratioVariance, heterogeneity, moranI, spearmanCI, coverage, pairRatio,
          binomLower, certifyCount, detectionPower, signalFloor, gini, noiseGini, logCV, lognormalPreferred,
@@ -20,6 +20,8 @@ import { rng, wilson, weightedQuantile, laCancado, robustScale, bestGmm, bootstr
 import { PRESET_21OCT, SC_SETTINGS, BANDS as D3G_BANDS, prepare as d3gPrepare, unmix, freeFits, calibrate, standards as d3gStandards,
          blocksOf, blockMedian, compareMedians, mapBlock, stageBlock, toJSON as calToJSON, fromJSON as calFromJSON,
          refineOnMedian, standardRatio, scaleIndex } from "./d3g-calibration.js";
+import { DLC_DEFAULTS, DLC_PARAMS, SE_KEYS as DLC_SE_KEYS, STATUS as DLC_STATUS, FLAG as DLC_FLAG, prepare as dlcPrepare, fitMean as dlcFitMean,
+         fitSpectra as dlcFitSpectra, makeFitter as dlcFitter, components as dlcComponents, bwfFwhm, qcTest, paramStats, homogeneity, homogeneityLevel } from "./dlc.js";
 import { T, font, setTheme, currentTheme } from "./theme.js";
 import { lut } from "./colormaps.js";
 
@@ -734,12 +736,14 @@ async function loadDataset(info) {
   }
   // particles are drawn over their camera image (a grid map covers its own)
   const back = S.points && S.video && info.video ? { img: S.video, ...info.video } : null;
-  for (const m of [...maps, pmap]) { m.setGeometry({ nx: S.nx, ny: S.ny, x: S.x, y: S.y, points: S.points }); m.values = null; m.backdrop = back; }
+  for (const m of [...maps, pmap, ...dlcMaps]) { m.setGeometry({ nx: S.nx, ny: S.ny, x: S.x, y: S.y, points: S.points }); m.values = null; m.backdrop = back; }
   fitMapRow();
   S.vidFull = false;
   setActive(S.active);
   renderDensity(); renderVideo();
   splatReset();
+  DLC.hover = DLC.pinned = null;
+  if ($("#tab-dlc").classList.contains("on")) dlcShow();
   // reopening a map the server already fitted with these settings: reuse it
   const prev = await api(`/api/ds/${info.id}/fit?result=1`).catch(() => null);
   if (prev && prev.state === "done" && prev.result && JSON.stringify(prev.result.config) === JSON.stringify(S.cfg)) {
@@ -984,6 +988,7 @@ function switchTab(name) {
   moveInk();
   if (name === "splat") splatShow();
   if (name === "particles") particlesInit();
+  if (name === "dlc") dlcShow();
   if (name === "report") makeReport();
   if (name === "files") setTimeout(() => renderFiles(), 0);
   if (name === "qc") setTimeout(() => { fitMapRow(); maps.forEach(m => m.render()); renderVideo(); cursorPlot.render(); hist.render(); density.render(); }, 0);
@@ -4152,6 +4157,538 @@ $("#pf-csv").onclick = () => {
 };
 
 // =========================================================================
+// DLC coating (dlc.js): every spectrum fitted with a Lorentzian D and a BWF G
+// over a straight background; maps of the parameters, hydrogen from the
+// background slope, a quality test against limits and the homogeneity of each
+// =========================================================================
+const DLC_P = Object.fromEntries(DLC_PARAMS.map(p => [p.key, p]));
+const DLC_EXTRA = { qc: "Quality test", status: "Fit status" };
+const DLC_QC_KEYS = DLC_PARAMS.filter(p => p.qc).map(p => p.key);
+const DLC_HOM_KEYS = ["idig", "gpos", "gfwhm", "dpos", "dfwhm", "h", "la"];
+const DLC_STORE = "carbo-dlc";
+const DLC = { settings: structuredClone(DLC_DEFAULTS), limits: DLC_QC_KEYS.map(key => ({ key, lo: null, hi: null, use_lo: false, use_hi: false })),
+  res: new Map(), running: false, specs: ["idig", "gpos", "gfwhm", "h"], active: 0, hover: null, pinned: null };
+// the fit settings and limits are kept per browser
+try {
+  const saved = JSON.parse(localStorage.getItem(DLC_STORE) || "null");
+  if (saved && saved.settings) Object.assign(DLC.settings, saved.settings);
+  if (saved && saved.limits) for (const L of DLC.limits) Object.assign(L, saved.limits.find(s => s.key === L.key) || {});
+} catch { /* storage blocked or unreadable: the defaults */ }
+function dlcSave() { try { localStorage.setItem(DLC_STORE, JSON.stringify({ settings: DLC.settings, limits: DLC.limits })); } catch { /* not remembered */ } }
+const dlcLabel = k => (DLC_P[k] ? DLC_P[k].label : DLC_EXTRA[k]);
+const dlcUnit = k => (DLC_P[k] ? DLC_P[k].unit : "");
+const dlcFitKey = s => stableJSON({ range: s.range, D: s.D, G: s.G, q: s.q, maxIter: s.maxIter });
+const dlcCur = () => (S.ds ? DLC.res.get(S.ds.id) || null : null);
+const dlcPct = v => (Number.isFinite(v) ? `${(100 * v).toFixed(1)} %` : "–");
+const dlcStatusText = t => { $("#dlc-status").textContent = t; };
+
+// a parameter per spectrum; hydrogen and La follow the coefficients in use without a refit
+function dlcCol(key, R) {
+  const s = DLC.settings, ck = key === "h" ? `h|${s.hA}|${s.hB}` : key === "la" ? `la|${s.laC}` : key;
+  if (R.cache.has(ck)) return R.cache.get(ck);
+  const out = new Float64Array(R.P);
+  if (key === "h") { const m = dlcCol("mig", R); for (let p = 0; p < R.P; p++) out[p] = m[p] > 0 ? s.hA + s.hB * Math.log10(m[p]) : NaN; }
+  else if (key === "la") { const r = dlcCol("idig", R); for (let p = 0; p < R.P; p++) out[p] = r[p] >= 0 ? 0.1 * Math.sqrt(r[p] / s.laC) : NaN; }
+  else { const j = DLC_PARAMS.findIndex(q => q.key === key), nc = DLC_PARAMS.length; for (let p = 0; p < R.P; p++) out[p] = R.cols[p * nc + j]; }
+  R.cache.set(ck, out);
+  return out;
+}
+// its standard error from the spectrum's own fit (hydrogen and La carried from m/I(G) and I(D)/I(G))
+function dlcSe(key, R) {
+  const s = DLC.settings, ck = `se|${key}|${key === "h" ? s.hB : key === "la" ? s.laC : ""}`;
+  if (R.cache.has(ck)) return R.cache.get(ck);
+  const out = new Float64Array(R.P), ns = DLC_SE_KEYS.length, raw = k => { const j = DLC_SE_KEYS.indexOf(k); return p => R.ses[p * ns + j]; };
+  if (key === "h") { const m = dlcCol("mig", R), sm = raw("mig"); for (let p = 0; p < R.P; p++) out[p] = s.hB / Math.LN10 * sm(p) / m[p]; }
+  else if (key === "la") { const la = dlcCol("la", R), r = dlcCol("idig", R), sr = raw("idig"); for (let p = 0; p < R.P; p++) out[p] = la[p] / 2 * sr(p) / r[p]; }
+  else { const g = raw(key); for (let p = 0; p < R.P; p++) out[p] = g(p); }
+  R.cache.set(ck, out);
+  return out;
+}
+// each spectrum's status at the signal floor in use, and the fitted ones
+function dlcStatus(R) {
+  const ck = `status|${DLC.settings.snrMin}`;
+  if (!R.cache.has(ck)) {
+    const snr = dlcCol("snr", R), G = DLC_FLAG.gpos | DLC_FLAG.gwidth;
+    R.cache.set(ck, Uint8Array.from(R.status0, (s, p) => (s === 0 || s === 4 ? s : !(snr[p] >= DLC.settings.snrMin) ? 2 : R.flags[p] & G ? 3 : 1)));
+  }
+  return R.cache.get(ck);
+}
+function dlcOk(R) {
+  const ck = `ok|${DLC.settings.snrMin}`;
+  if (!R.cache.has(ck)) R.cache.set(ck, Uint8Array.from(dlcStatus(R), s => (s === 1 ? 1 : 0)));
+  return R.cache.get(ck);
+}
+
+// everything the side panel and the report say about a fit, at the settings and limits in use
+function dlcFacts(R) {
+  const s = DLC.settings, key = stableJSON([s.snrMin, s.hA, s.hB, s.laC, s.hRange, s.laMax, DLC.limits]);
+  if (R.facts && R.facts.key === key) return R.facts;
+  const st = dlcStatus(R), ok = dlcOk(R), count = [0, 0, 0, 0, 0];
+  for (const v of st) count[v]++;
+  const lim = k => DLC.limits.find(L => L.key === k) || null;
+  const stats = Object.fromEntries(DLC_PARAMS.map(p => [p.key, paramStats(dlcCol(p.key, R), ok, lim(p.key))]));
+  const hk = stableJSON([s.snrMin, s.hA, s.hB, s.laC]);
+  if (!R.hom || R.hom.key !== hk) R.hom = { key: hk, rows: Object.fromEntries(DLC_HOM_KEYS.map(k => [k, homogeneity(dlcCol(k, R), dlcSe(k, R), ok, R.where)])) };
+  const h = dlcCol("h", R), la = dlcCol("la", R), H = { inside: 0, below: 0, above: 0, undef: 0 };
+  let laOver = 0;
+  for (let p = 0; p < R.P; p++) {
+    if (!ok[p]) continue;
+    if (!Number.isFinite(h[p])) H.undef++; else if (h[p] < s.hRange[0]) H.below++; else if (h[p] > s.hRange[1]) H.above++; else H.inside++;
+    if (la[p] > s.laMax) laOver++;
+  }
+  // DLC's G is 100 to 200 cm⁻¹ wide; a narrow one is graphite's, where hydrogen, La and the three-stage reading mean nothing
+  const graphitic = stats.gfwhm.n > 0 && stats.gfwhm.median < s.graphiteFwhm;
+  return (R.facts = { key, count, n: count[1], measured: R.P - count[0], stats, Q: qcTest(k => dlcCol(k, R), st, DLC.limits), hom: R.hom.rows, H, laOver, graphitic });
+}
+const dlcGraphiteText = F => `These spectra look like graphite, not DLC: the median FWHM(G) is ${fmt(F.stats.gfwhm.median, 3)} cm⁻¹, where DLC's G is about 100 to 200 cm⁻¹ wide. The band fit stands, but hydrogen from the slope, La and the three-stage reading do not apply.`;
+// the spectra that were measured but not fitted, in words
+function dlcLeftOut(F) {
+  const c = F.count, parts = [[c[2], "below the signal floor"], [c[3], "with G on a fit bound"], [c[4], "that could not be fitted"]].filter(([n]) => n);
+  return parts.length ? ` Left out: ${parts.map(([n, t]) => `${fmt(n)} ${t}`).join(", ")}.` : "";
+}
+
+// --------------------------------------------------------------------------
+// the fit: the mean spectrum first, then every spectrum from its band shapes
+// --------------------------------------------------------------------------
+async function dlcRun() {
+  if (DLC.running || !S.ds) return;
+  if (!S.cube) { toast("The DLC fit needs the spectra: this file holds fitted values only.", "error"); return; }
+  const s0 = DLC.settings, bad = [["The fit range", s0.range], ["D's position", [s0.D.pos_min, s0.D.pos_max]], ["D's width", [s0.D.width_min, s0.D.width_max]],
+    ["G's position", [s0.G.pos_min, s0.G.pos_max]], ["G's width", [s0.G.width_min, s0.G.width_max]]].find(([, [a, b]]) => !(a < b));
+  if (bad || !(s0.q[0] <= s0.q[1])) { toast(`${bad ? bad[0] : "BWF 1/Q"}: the minimum must be below the maximum.`, "error"); return; }
+  const ds = S.ds, cube = S.cube, P = S.nx * S.ny, key = dlcFitKey(s0), settings = structuredClone(s0), t0 = performance.now();
+  // the fit range, inside what was measured
+  let wlo = Infinity, whi = -Infinity;
+  for (const v of S.wn) { wlo = Math.min(wlo, v); whi = Math.max(whi, v); }
+  settings.range = [Math.max(settings.range[0], wlo), Math.min(settings.range[1], whi)];
+  DLC.running = true; $("#dlc-run").disabled = $("#dlc-run2").disabled = true;
+  const prog = $("#dlc-prog > div");
+  prog.style.width = "0%";
+  dlcStatusText(`Fitting the mean spectrum of ${ds.name}…`);
+  dlcRender();
+  try {
+    await xcTick();
+    const prep = dlcPrepare(cube, S.k, S.wn, P, settings), mean = dlcFitMean(prep, settings), list = [];
+    for (let p = 0; p < P; p++) if (prep.measured[p]) list.push(p);
+    const out = await dlcFitAll(prep, list, settings, mean.fit.th, (d, n) => { prog.style.width = `${(100 * d / n).toFixed(1)}%`; dlcStatusText(`Fitting ${fmt(d)} of ${fmt(n)} spectra…`); });
+    DLC.res.set(ds.id, { id: ds.id, key, settings, P, nx: S.nx, ny: S.ny, nu: prep.nu, N: prep.N, idx: prep.idx, range: prep.range, mean,
+      F: dlcFitter(prep.nu, settings), where: S.points ? { x: S.points.x, y: S.points.y } : { grid: { nx: S.nx, ny: S.ny } },
+      cache: new Map(), seconds: (performance.now() - t0) / 1000, ...out });
+    prog.style.width = "100%";
+  } catch (e) { dlcStatusText(`Could not fit: ${e.message}`); toast(`DLC: ${e.message}`, "error", 8000); }
+  finally { DLC.running = false; $("#dlc-run").disabled = $("#dlc-run2").disabled = false; }
+  if (S.ds === ds) { DLC.hover = DLC.pinned = null; dlcRender(); }
+}
+
+// the spectra in chunks over a pool of workers (in the page when workers cannot start)
+async function dlcFitAll(prep, list, settings, shapes, onProgress) {
+  const { nu, N, Y, P } = prep, nc = DLC_PARAMS.length, ns = DLC_SE_KEYS.length, chunk = 64, jobs = [];
+  const out = { cols: new Float64Array(P * nc).fill(NaN), ses: new Float64Array(P * ns).fill(NaN), th: new Float64Array(P * 9).fill(NaN),
+    status0: new Uint8Array(P), flags: new Uint8Array(P) };
+  for (let a = 0; a < list.length; a += chunk) jobs.push(a);
+  let done = 0;
+  const put = (a, r) => {
+    const m = r.status.length;
+    for (let i = 0; i < m; i++) {
+      const p = list[a + i];
+      out.cols.set(r.cols.subarray(i * nc, (i + 1) * nc), p * nc); out.ses.set(r.ses.subarray(i * ns, (i + 1) * ns), p * ns);
+      out.th.set(r.th.subarray(i * 9, (i + 1) * 9), p * 9); out.status0[p] = r.status[i]; out.flags[p] = r.flags[i];
+    }
+    done += m; onProgress(done, list.length);
+  };
+  const sub = a => { const ids = list.slice(a, a + chunk), y = new Float32Array(ids.length * N); ids.forEach((p, i) => y.set(Y.subarray(p * N, (p + 1) * N), i * N)); return y; };
+  let pool = [];
+  try { for (let i = 0, n = Math.max(1, Math.min(8, (navigator.hardwareConcurrency || 4) - 1)); i < n; i++) pool.push(new Worker(new URL("./dlc-worker.js", import.meta.url), { type: "module" })); }
+  catch { pool.forEach(w => w.terminate()); pool = []; }
+  if (!pool.length) {
+    for (const a of jobs) { const y = sub(a); put(a, dlcFitSpectra({ nu, N, Y: y, settings, shapes }, Array.from({ length: y.length / N }, (_, i) => i))); await xcTick(); }
+    return out;
+  }
+  try {
+    let next = 0;
+    await Promise.all(pool.map(w => new Promise((res, rej) => {
+      const go = () => {
+        if (next >= jobs.length) { res(); return; }
+        const a = jobs[next++], y = sub(a);
+        w.onmessage = e => { if (e.data.error) rej(new Error(e.data.error)); else { put(a, e.data); go(); } };
+        w.onerror = e => rej(new Error(e.message || "a DLC worker failed"));
+        w.postMessage({ id: a, nu, N, Y: y, settings, shapes }, [y.buffer]);
+      };
+      go();
+    })));
+  } finally { pool.forEach(w => w.terminate()); }
+  return out;
+}
+
+// --------------------------------------------------------------------------
+// maps, spectrum, histogram
+// --------------------------------------------------------------------------
+const dlcMaps = [0, 1, 2, 3].map(i => new MapView($(`#dlc-map-${i}`), {
+  onTitle: (mv, e) => dlcMenu(e, i),
+  onHover: p => dlcHover(p),
+  onPick: p => { dlcPin(p); dlcSetActive(i); },
+  onChange: () => { if (DLC.active === i) dlcRenderHist(); },
+  onView: (v, src) => { for (const m of dlcMaps) if (m !== src) m.setView(v ? { ...v } : null); },
+  onProfile: on => { for (const m of dlcMaps) m.setProfile(on); },
+  onBackdrop: on => { for (const m of dlcMaps) { m.backdropOn = on; m._ptsCache = null; m.render(); } },
+}));
+dlcMaps.forEach((mv, i) => mv.host.addEventListener("mousedown", () => dlcSetActive(i)));
+const dlcPlot = new SpectrumPlot($("#dlc-cursor")), dlcHist = new HistogramPlot($("#dlc-hist"));
+$("#dlc-hist-title").addEventListener("click", e => dlcMenu(e, DLC.active));
+
+function dlcSetActive(i) {
+  DLC.active = i;
+  dlcMaps.forEach((m, k) => m.host.classList.toggle("active", k === i));
+  dlcRenderHist();
+}
+function dlcMenu(e, i) {
+  e.stopPropagation();
+  $$(".popover").forEach(p => p.remove());
+  const pop = el("div", { class: "popover", style: "max-height:70vh;overflow:auto", onclick: ev => ev.stopPropagation() });
+  const pick = k => { DLC.specs[i] = k; pop.remove(); dlcRenderMap(i); if (DLC.active === i) dlcRenderHist(); };
+  pop.append(el("div", { class: "pop-h" }, "Show"),
+    el("div", { class: "menu-list" }, ...[...DLC_PARAMS.map(p => p.key), "qc", "status"].map(k => el("button", { class: k === DLC.specs[i] ? "on" : "", onclick: () => pick(k) }, dlcLabel(k)))));
+  document.body.append(pop);
+  const r = e.currentTarget.getBoundingClientRect();
+  pop.style.left = Math.max(8, Math.min(window.innerWidth - 250, r.left)) + "px";
+  pop.style.top = Math.max(8, Math.min(window.innerHeight - pop.offsetHeight - 8, r.bottom + 6)) + "px";
+  setTimeout(() => document.addEventListener("click", () => pop.remove(), { once: true }));
+}
+
+// what a map shows: a parameter over the fitted spectra, or each spectrum's test or fit status by colour
+function dlcMapData(key, R) {
+  if (key === "qc" || key === "status") {
+    const F = dlcFacts(R), index = Int8Array.from(key === "qc" ? F.Q.pass : dlcStatus(R), v => v - 1);
+    return { values: Float32Array.from(index), valid: null, label: dlcLabel(key), unit: "",
+      categories: key === "qc" ? { index, colours: [T.viz1, T.viz2], names: ["pass", "fail"] } : { index, colours: [T.viz1, T.viz3, T.viz2, T.bad], names: DLC_STATUS.slice(1) },
+      emptyText: key === "qc" && !F.Q.use.length ? "Set limits under Quality test to test every spectrum" : null };
+  }
+  return { values: dlcCol(key, R), valid: dlcOk(R), label: dlcLabel(key), unit: dlcUnit(key), categories: null, emptyText: null };
+}
+function dlcRenderMap(i) {
+  const mv = dlcMaps[i], key = DLC.specs[i], R = dlcCur();
+  mv.setTitle(`DLC : <u>${dlcLabel(key)}</u>`);
+  if (!R) { Object.assign(mv, { categories: null, values: null, emptyText: null, _dirty: true }); mv.render(); return; }
+  const M = dlcMapData(key, R);
+  Object.assign(mv, { categories: M.categories, emptyText: M.emptyText, _ptsCache: null });
+  mv.setData(M.values, { valid: M.valid, label: M.label, unit: M.unit });
+}
+
+function dlcHover(p) { DLC.hover = p; dlcMaps.forEach(m => m.setCursor(p, DLC.pinned)); dlcRenderCursor(); }
+function dlcPin(p) { DLC.pinned = p; DLC.hover = null; dlcMaps.forEach(m => m.setCursor(null, p)); dlcRenderCursor(); }
+
+// one spectrum with its fit, or the mean spectrum's when p is null
+function dlcSpectrum(R, p) {
+  const nc = DLC_PARAMS.length;
+  const [y, th, v] = p == null ? [R.mean.y, R.mean.fit.th, R.mean.derived.v]
+    : [Float64Array.from(R.idx, c => S.cube[p * S.k + c]), R.th.subarray(p * 9, (p + 1) * 9), R.cols.subarray(p * nc, (p + 1) * nc)];
+  const C = th.every(Number.isFinite) ? dlcComponents(R.F, th) : null;
+  return { v, d: { wn: R.nu, raw: y, range: R.range, fit: C && { baseline: C.base, total: C.total, comps: [
+    { name: "D", y: C.d, A: th[2], pos: th[3], width: th[4] }, { name: "G", y: C.g, A: th[5], pos: th[6], width: bwfFwhm(th[7], th[8]) }] } } };
+}
+function dlcRenderCursor() {
+  const R = dlcCur(), tb = $("#dlc-cursor-table"), info = $("#dlc-cursor-info");
+  tb.textContent = ""; info.textContent = "";
+  if (!R) { dlcPlot.setData(null); return; }
+  const p = DLC.hover ?? DLC.pinned;
+  if (p == null) info.textContent = `· mean of ${fmt(R.mean.n)} spectra · hover or click a map for one`;
+  else {
+    const st = dlcStatus(R)[p];
+    const where = S.points ? `· particle ${p + 1}` : `· point ${p + 1} · X ${fmt(S.x[p % S.nx], 4)} µm, Y ${fmt(S.y[Math.floor(p / S.nx)], 4)} µm`;
+    info.textContent = `${where}${DLC.hover != null && DLC.hover !== DLC.pinned ? "" : " · pinned"} · ${DLC_STATUS[st]}`;
+    if (st === 0) { dlcPlot.emptyText = "Not measured"; dlcPlot.setData(null); dlcPlot.emptyText = null; return; }
+  }
+  const { v, d } = dlcSpectrum(R, p), at = k => v[DLC_PARAMS.findIndex(q => q.key === k)], s = DLC.settings;
+  dlcPlot.setData(d);
+  if (!d.fit) { tb.append(el("span", {}, "No fit for this spectrum")); return; }
+  const mig = at("mig"), h = mig > 0 ? s.hA + s.hB * Math.log10(mig) : NaN, la = at("idig") >= 0 ? 0.1 * Math.sqrt(at("idig") / s.laC) : NaN;
+  const item = (name, text, colour) => tb.append(el("span", {}, el("b", colour ? { style: `color:${colour}` } : {}, name), ` ${text}`));
+  item("I(D)/I(G)", fmt(at("idig"), 3));
+  item("D", `${fmt(at("dh"), 3)} @ ${fmt(at("dpos"), 5)} · FWHM ${fmt(at("dfwhm"), 3)}`, PEAK_COLOURS[0]);
+  item("G", `${fmt(at("gh"), 3)} @ ${fmt(at("gpos"), 5)} · FWHM ${fmt(at("gfwhm"), 3)} · 1/Q ${fmt(at("q"), 2)}`, PEAK_COLOURS[1]);
+  item("H", Number.isFinite(h) ? `${h.toFixed(1)} at.% · m/I(G) ${fmt(mig, 3)} µm` : "not defined: the background does not rise");
+  item("La", `${fmt(la, 3)} nm`);
+  item("Signal", `G ${fmt(at("snr"), 3)} × noise · residual ${fmt(at("res"), 3)} × noise`);
+}
+
+function dlcRenderHist() {
+  const R = dlcCur(), key = DLC.specs[DLC.active];
+  $("#dlc-hist-title").innerHTML = `Histogram : <u>${DLC_P[key] ? dlcLabel(key) : "choose a parameter"}</u> ▾`;
+  if (!R || !DLC_P[key]) { dlcHist.setData(null); return; }
+  const ok = dlcOk(R), col = dlcCol(key, R), vals = [];
+  for (let p = 0; p < R.P; p++) if (ok[p] && Number.isFinite(col[p])) vals.push(col[p]);
+  if (!vals.length) { dlcHist.setData(null); return; }
+  const st = summary(vals), sorted = Float64Array.from(vals).sort(), L = DLC.limits.find(q => q.key === key);
+  const marks = L ? [...(L.use_lo && Number.isFinite(L.lo) ? [[L.lo, "min"]] : []), ...(L.use_hi && Number.isFinite(L.hi) ? [[L.hi, "max"]] : [])] : [];
+  // the axis takes in the limits too, so the test can be seen against the spread
+  let lo = Math.min(quantile(sorted, 0.005), ...marks.map(m => m[0])), hi = Math.max(quantile(sorted, 0.995), ...marks.map(m => m[0]));
+  if (!(hi > lo)) hi = lo + 1;
+  if (marks.length) { const pad = 0.04 * (hi - lo); lo -= pad; hi += pad; }
+  dlcHist.setData({ values: vals, range: [lo, hi], mean: st.mean, median: st.median, marks,
+    label: `${dlcLabel(key)}${dlcUnit(key) ? ` (${dlcUnit(key)})` : ""} · n = ${fmt(vals.length)}`, cmap: dlcMaps[DLC.active].cmap });
+}
+
+// --------------------------------------------------------------------------
+// the side panel
+// --------------------------------------------------------------------------
+function dlcFormFields() {
+  const s = DLC.settings;
+  $("#dlc-lo").value = s.range[0]; $("#dlc-hi").value = s.range[1];
+  $("#dlc-qlo").value = s.q[0]; $("#dlc-qhi").value = s.q[1];
+  $("#dlc-snr").value = s.snrMin; $("#dlc-ha").value = s.hA; $("#dlc-hb").value = s.hB;
+}
+// the tables are rebuilt only here (on showing the tab, a reset or a theme change), never on an
+// edit, so a click into the next field is not lost
+function dlcForm() {
+  const s = DLC.settings;
+  dlcFormFields();
+  const num = (obj, k, title = "") => {
+    const i = el("input", { type: "number", step: "any", title });
+    i.value = obj[k];
+    i.onchange = () => { const v = parseFloat(i.value); if (Number.isFinite(v)) obj[k] = v; else i.value = obj[k]; dlcSettingsChanged(true); };
+    return el("td", {}, i);
+  };
+  const gw = "The BWF's width Γ; FWHM(G) = Γ (1 + 1/Q²) / (1 − 1/Q²)";
+  $("#dlc-bounds").replaceChildren(
+    el("tr", {}, el("th", {}), el("th", { colspan: 2, class: "grp" }, "Position (cm⁻¹)"), el("th", { colspan: 2, class: "grp" }, "Width (cm⁻¹)")),
+    el("tr", {}, el("th", {}), ...["min", "max", "min", "max"].map(t => el("th", {}, t))),
+    ...[["D", s.D, 0], ["G", s.G, 1]].map(([nm, b, c]) => el("tr", {}, el("td", { class: "nm" }, el("span", { class: "sw", style: `background:${PEAK_COLOURS[c]}` }), nm),
+      num(b, "pos_min", nm === "G" ? "G's position is the BWF maximum" : ""), num(b, "pos_max", nm === "G" ? "G's position is the BWF maximum" : ""),
+      num(b, "width_min", nm === "G" ? gw : "FWHM"), num(b, "width_max", nm === "G" ? gw : "FWHM"))));
+  dlcLimitsTable();
+}
+// minimum and maximum per parameter, each with its tick; typing a value ticks it
+function dlcLimitsTable() {
+  $("#dlc-limits").replaceChildren(
+    el("tr", {}, el("th", { class: "l" }, "Parameter"), el("th", {}, "Minimum"), el("th", {}, "Maximum")),
+    ...DLC.limits.map(L => {
+      const cell = side => {
+        const use = `use_${side}`, box = el("input", { type: "checkbox", title: `Test every spectrum against this ${side === "lo" ? "minimum" : "maximum"}` });
+        const num = el("input", { type: "number", step: "any" });
+        box.checked = !!L[use]; num.value = Number.isFinite(L[side]) ? L[side] : "";
+        box.onchange = () => { L[use] = box.checked && Number.isFinite(L[side]); box.checked = L[use]; dlcLimitsChanged(); };
+        num.onchange = () => { const v = parseFloat(num.value); L[side] = Number.isFinite(v) ? v : null; L[use] = Number.isFinite(v); box.checked = L[use]; dlcLimitsChanged(); };
+        return el("td", {}, el("div", { class: "lim" }, box, num));
+      };
+      const p = DLC_P[L.key];
+      return el("tr", {}, el("td", { class: "l" }, p.label, p.unit ? el("span", { class: "muted" }, ` ${p.unit}`) : null), cell("lo"), cell("hi"));
+    }));
+}
+function dlcLimitsChanged() { dlcSave(); dlcRender(); }
+// refit: the fit's own settings changed (the result stays until refitted); otherwise redrawn at once
+function dlcSettingsChanged(refit) {
+  dlcSave();
+  if (refit) { const R = dlcCur(); if (R && R.key !== dlcFitKey(DLC.settings)) dlcStatusText("The fit settings have changed: Fit DLC to apply them."); }
+  else dlcRender();
+}
+const dlcNum = (id, set, refit) => $(id).addEventListener("change", e => {
+  const v = parseFloat(e.target.value);
+  if (Number.isFinite(v)) set(v);
+  dlcFormFields();
+  dlcSettingsChanged(refit);
+});
+dlcNum("#dlc-lo", v => { DLC.settings.range = [v, DLC.settings.range[1]]; }, true);
+dlcNum("#dlc-hi", v => { DLC.settings.range = [DLC.settings.range[0], v]; }, true);
+dlcNum("#dlc-qlo", v => { DLC.settings.q = [Math.max(-0.9, v), DLC.settings.q[1]]; }, true);
+dlcNum("#dlc-qhi", v => { DLC.settings.q = [DLC.settings.q[0], Math.min(0.9, v)]; }, true);
+dlcNum("#dlc-snr", v => { DLC.settings.snrMin = Math.max(0, v); }, false);
+dlcNum("#dlc-ha", v => { DLC.settings.hA = v; }, false);
+dlcNum("#dlc-hb", v => { DLC.settings.hB = v; }, false);
+$("#dlc-run").onclick = $("#dlc-run2").onclick = () => dlcRun();
+$("#dlc-reset").onclick = () => { DLC.settings = structuredClone(DLC_DEFAULTS); dlcForm(); dlcSave(); dlcRender(); };
+
+function dlcShow() {
+  dlcForm();
+  dlcRender();
+  if (S.ds && S.cube && !dlcCur() && !DLC.running) dlcRun();          // one click: opening the tab fits the open file
+  setTimeout(() => { dlcMaps.forEach(m => m.render()); dlcPlot.render(); dlcHist.render(); }, 0);
+}
+
+function dlcRender() {
+  const R = dlcCur(), empty = $("#dlc-empty");
+  const why = !S.ds ? "Open a map, a ParticleFinder project or a single spectrum first."
+    : !S.cube ? "This file holds fitted values, not spectra, and the DLC fit needs the spectra. Open the map itself (.l6m) or a text export of the spectra."
+    : !R ? (DLC.running ? "Fitting every spectrum…"
+      : "Every spectrum is fitted with a Lorentzian D band and a Breit-Wigner-Fano G band over a straight background: maps of I(D)/I(G), the G band's position and width, hydrogen content and sp² cluster size, a quality test against your limits and how even each one is.")
+    : null;
+  empty.classList.toggle("hidden", !why);
+  empty.classList.toggle("can-fit", !!(S.ds && S.cube && !R && !DLC.running));
+  if (why) $("#dlc-empty-p").textContent = why;
+  if (R && !DLC.running) {
+    const F = dlcFacts(R), want = DLC.settings.range, cut = R.range[0] > want[0] + 1 || R.range[1] < want[1] - 1;
+    dlcStatusText(`${fmt(F.n)} of ${fmt(F.measured)} spectra fitted in ${R.seconds.toFixed(1)} s over ${R.range[0].toFixed(0)}–${R.range[1].toFixed(0)} cm⁻¹${cut ? " (where the spectra end)" : ""}.` +
+      (R.key !== dlcFitKey(DLC.settings) ? " The fit settings have changed since: Fit DLC to apply them." : ""));
+  } else if (!R && !DLC.running) { dlcStatusText(""); $("#dlc-prog > div").style.width = "0%"; }
+  dlcMaps.forEach((_, i) => dlcRenderMap(i));
+  dlcMaps.forEach((m, k) => m.host.classList.toggle("active", k === DLC.active));
+  dlcRenderCursor(); dlcRenderHist();
+  dlcRenderResults(R); dlcRenderH(R); dlcRenderQC(R); dlcRenderHom(R);
+}
+
+const dlcCard = (k, v, s) => el("div", { class: "card" }, el("div", { class: "k" }, k), el("div", { class: "v" }, v), el("div", { class: "s" }, s));
+const dlcMed = (st, d = 3) => (st && st.n ? fmt(st.median, d) : "–");
+const dlcIqr = st => (st && st.n ? `IQR ${fmt(st.q1, 3)}–${fmt(st.q3, 3)}` : "none fitted");
+
+function dlcRenderResults(R) {
+  const box = $("#dlc-verdict"), cards = $("#dlc-cards"), note = $("#dlc-note");
+  if (!R) { box.className = "verdict"; box.textContent = ""; cards.replaceChildren(); note.textContent = ""; return; }
+  const F = dlcFacts(R), st = F.stats, s = DLC.settings, unit = S.points ? "particles" : "spectra";
+  if (!F.n) {
+    box.className = "verdict warn";
+    box.replaceChildren(el("b", {}, "No spectrum fitted"), el("div", {}, `None of the ${fmt(F.measured)} measured ${unit} passed.${dlcLeftOut(F)} Lower the signal floor, or widen G's bounds if it sits on one.`));
+    cards.replaceChildren(); note.textContent = ""; return;
+  }
+  const misfit = st.res.median > 2;
+  box.className = `verdict${misfit || F.graphitic ? " warn" : ""}`;
+  box.replaceChildren(el("b", {}, `I(D)/I(G) ${dlcMed(st.idig)} · G ${dlcMed(st.gpos, 5)} cm⁻¹ · FWHM(G) ${dlcMed(st.gfwhm)} cm⁻¹`),
+    el("div", {}, `Medians over ${fmt(F.n)} fitted ${unit} of ${fmt(F.measured)} measured.${dlcLeftOut(F)}`),
+    ...(F.graphitic ? [el("p", {}, dlcGraphiteText(F))] : []),
+    el("p", {}, "Reading them (the three-stage model of Ferrari & Robertson 2000, at 514 to 532 nm): I(D)/I(G) grows with the number and size of sp² ring clusters, so a rise points to graphitisation (heat, wear); it is near zero in tetrahedral DLC (ta-C). FWHM(G) measures structural disorder, and in DLC it rises with sp³ content, density and hardness (Casiraghi et al. 2005). The G position is not monotonic in sp³: it falls from graphite to amorphous carbon and rises again towards ta-C, so read it with the other two. The sp³ fraction and hardness themselves need a calibration or a second laser line, and are not given."),
+    ...(misfit ? [el("p", {}, `The two bands leave a residual of ${fmt(st.res.median, 3)} × the noise (median; about 1 where they describe the spectra): the spectra carry something besides D, G and a straight background, such as a substrate band, a curved photoluminescence background or crystalline graphite's D′ near 1620 cm⁻¹. Narrow the fit range, or look at a spectrum below.`)] : []));
+  cards.replaceChildren(
+    dlcCard("I(D)/I(G)", dlcMed(st.idig), `median · ${dlcIqr(st.idig)}`),
+    dlcCard("G position", `${dlcMed(st.gpos, 5)} cm⁻¹`, `median · ${dlcIqr(st.gpos)}`),
+    dlcCard("FWHM(G)", `${dlcMed(st.gfwhm)} cm⁻¹`, `median · ${dlcIqr(st.gfwhm)}`),
+    dlcCard("D position / FWHM", `${dlcMed(st.dpos, 5)} / ${dlcMed(st.dfwhm)}`, "cm⁻¹, medians"),
+    dlcCard("A(D)/A(G)", dlcMed(st.adag), "median · band areas over the fit range"),
+    dlcCard("sp² cluster size La", `${dlcMed(st.la)} nm`, `median · C′ ${s.laC} Å⁻²${F.laOver ? ` · ${fmt(F.laOver)} above ${s.laMax} nm, outside stage 2` : ""}`),
+    dlcCard("BWF 1/Q", dlcMed(st.q, 2), "median · 0 is a symmetric G"),
+    dlcCard("Fit residual", `${dlcMed(st.res, 3)} × noise`, "median · about 1 where the model fits, above 2 flagged"));
+  note.textContent = `How: each spectrum is cut to the fit range and cleared of cosmic rays. The mean spectrum is fitted first (from a start read off its band maxima, at three couplings); every spectrum then starts from its band shapes, with its own background and heights solved by least squares, and is fitted by bounded Levenberg-Marquardt: D Lorentzian, G Breit-Wigner-Fano with its maximum at the G position, I(ω) = I₀ (1 + 2(ω − ω₀)/(QΓ))² / (1 + (2(ω − ω₀)/Γ)²), and a straight background. ` +
+    `A spectrum counts as fitted when its G height is at least ${s.snrMin} × its noise (the robust SD of its second difference over √6) and G's position and width are inside their bounds. Standard errors come from each fit's covariance at its residual. ` +
+    `La = √(I(D)/I(G) / C′) with C′(514 nm) = ${s.laC} Å⁻² (Ferrari & Robertson 2000), for amorphous carbon with clusters below about 2 nm; at 532 nm it is approximate.`;
+}
+
+function dlcRenderH(R) {
+  const cards = $("#dlc-h-cards"), note = $("#dlc-h-note"), s = DLC.settings;
+  note.textContent = `H [at.%] = ${s.hA} + ${s.hB} log₁₀(m/I(G) [µm]), m the slope of the straight background (counts per cm⁻¹) and I(G) the G height (Casiraghi, Ferrari & Robertson 2005, at 514.5 nm). The slope is the photoluminescence that hydrogen brings to a-C:H, so this holds for hydrogenated DLC with about ${s.hRange[0]} to ${s.hRange[1]} at.% H: below that the photoluminescence is too weak to read, and hydrogen-free DLC (a-C, ta-C) has none to give. A fluorescent substrate, contamination or a polymer-like film raises m as well. At 532 nm the coefficients may differ a little: enter your own, e.g. from samples measured by ERDA or NRA.`;
+  if (!R) { cards.replaceChildren(); return; }
+  const F = dlcFacts(R), st = F.stats, H = F.H, n = H.inside + H.below + H.above;
+  if (F.graphitic) note.textContent = `${dlcGraphiteText(F)} ${note.textContent}`;
+  cards.replaceChildren(
+    F.graphitic ? dlcCard("Hydrogen", "–", `does not apply to graphite-like spectra (the formula would give ${dlcMed(st.h)} at.%)`)
+      : dlcCard("Hydrogen", st.h.n ? `${fmt(st.h.median, 3)} at.%` : "–", st.h.n ? `median of ${fmt(st.h.n)} · ${dlcIqr(st.h)}` : "the background does not rise in any fitted spectrum"),
+    dlcCard("m/I(G)", st.mig.n ? `${fmt(st.mig.median, 3)} µm` : "–", `median · slope ${fmt(st.slope.median, 3)} counts/cm⁻¹`),
+    dlcCard("Inside the calibration", n ? `${fmt(H.inside)} of ${fmt(n)}` : "–", `${s.hRange[0]}–${s.hRange[1]} at.% · ${fmt(H.below)} below, ${fmt(H.above)} above`),
+    dlcCard("Not defined", fmt(H.undef), "fitted spectra whose background falls or is flat: no photoluminescence to read"));
+}
+
+function dlcRenderQC(R) {
+  const box = $("#dlc-qc-verdict"), t = $("#dlc-qc-table"), note = $("#dlc-qc-note");
+  if (!R) { box.className = "verdict"; box.textContent = ""; t.replaceChildren(); note.textContent = ""; return; }
+  const F = dlcFacts(R), Q = F.Q, unit = S.points ? "particles" : "spectra";
+  if (!Q.use.length) {
+    box.className = "verdict";
+    box.replaceChildren(el("b", {}, "No limits set"), el("div", {}, "Enter a minimum, a maximum or both for any parameter above: every fitted spectrum is then tested against all of them, and the Quality test map shows where they pass."));
+  } else {
+    const level = !Q.n ? "warn" : !Q.nFail ? "good" : Q.share >= 0.95 ? "warn" : "bad";
+    box.className = `verdict ${level}`;
+    const head = !Q.n ? "Nothing to test" : !Q.nFail ? `Pass: all ${fmt(Q.n)} ${unit} inside the limits` : `${level === "warn" ? "Mostly inside" : "Fail"}: ${fmt(Q.nFail)} of ${fmt(Q.n)} ${unit} outside the limits`;
+    const by = Q.use.map(L => `${dlcLabel(L.key)} ${fmt(Q.byKey[L.key])}`).join(", ");
+    box.replaceChildren(el("b", {}, head),
+      el("div", {}, Q.n ? `${dlcPct(Q.share)} pass (95 % CI ${dlcPct(Q.ci[0])}–${dlcPct(Q.ci[1])}). Outside, by parameter: ${by}.` : "No fitted spectrum could be tested."),
+      el("p", {}, `Pass when every tested spectrum is inside, check when at least 95 % are, fail below that. Spectra not fitted (${fmt(F.measured - F.n)}) are not tested${Q.undef ? `, nor are ${fmt(Q.undef)} whose tested value is undefined (hydrogen where the background does not rise)` : ""}.`));
+  }
+  t.replaceChildren(el("tr", {}, ...["Parameter", "Median", "Mean ± SD", "Range", "Inside (95 % CI)", "Ppk"].map((h, i) => el("th", { class: i ? "" : "l" }, h))),
+    ...DLC_QC_KEYS.map(k => {
+      const st = F.stats[k], u = dlcUnit(k);
+      if (!st.n) return el("tr", {}, el("td", { class: "l" }, dlcLabel(k)), el("td", { colspan: 5, class: "muted" }, "none fitted"));
+      return el("tr", {}, el("td", { class: "l" }, dlcLabel(k), u ? el("span", { class: "muted" }, ` ${u}`) : null), el("td", {}, fmt(st.median, 4)),
+        el("td", {}, `${fmt(st.mean, 4)} ± ${fmt(st.sd, 3)}`), el("td", {}, `${fmt(st.min, 4)}–${fmt(st.max, 4)}`),
+        el("td", {}, st.inSpec != null ? `${dlcPct(st.inSpec)} (${dlcPct(st.inSpecCI[0])}–${dlcPct(st.inSpecCI[1])})` : "–"),
+        el("td", {}, st.ppk != null ? fmt(st.ppk, 3) : "–"));
+    }));
+  note.textContent = "Ppk = min(maximum − mean, mean − minimum) / (3 SD), with the SD of the fitted spectra: 1.33 or more is the usual target. Neighbouring map points share part of their signal (the laser spot is about 1 µm), so the intervals count them as more independent than they are.";
+}
+
+function dlcRenderHom(R) {
+  const box = $("#dlc-hom-verdict"), t = $("#dlc-hom-table"), note = $("#dlc-hom-note");
+  if (!R) { box.className = "verdict"; box.textContent = ""; t.replaceChildren(); note.textContent = ""; return; }
+  const F = dlcFacts(R), rows = F.hom, tol = k => { const L = DLC.limits.find(q => q.key === k); return L && L.use_lo && L.use_hi && Number.isFinite(L.lo) && Number.isFinite(L.hi) ? L.hi - L.lo : NaN; };
+  const key3 = ["idig", "gpos", "gfwhm"].filter(k => rows[k]);
+  if (!key3.length) {
+    box.className = "verdict"; box.replaceChildren(el("b", {}, "Too few fitted spectra"), el("div", {}, "Homogeneity needs at least three fitted spectra."));
+  } else {
+    const worst = key3.reduce((a, b) => (rows[b].I2 > rows[a].I2 ? b : a)), W = rows[worst], level = homogeneityLevel(W.I2);
+    box.className = `verdict ${level}`;
+    const size = k => { const H = rows[k], tw = tol(k); return `true SD ${fmt(H.tau, 3)}${dlcUnit(k) ? ` ${dlcUnit(k)}` : ""} (${dlcPct(H.cvTrue)} of the mean${Number.isFinite(tw) ? `; ${dlcPct(6 * H.tau / tw)} of the tolerance as 6 SD` : ""})`; };
+    const head = level === "good" ? "Homogeneous within the measurement" : level === "warn" ? "Partly inhomogeneous" : "Inhomogeneous";
+    box.replaceChildren(el("b", {}, head),
+      el("div", {}, level === "good" ? "I(D)/I(G), the G position and FWHM(G) spread as their own fit errors predict: less than 25 % of the spread is real variation (I²)."
+        : `${dlcLabel(worst)}: ${dlcPct(W.I2)} of the spread is real variation, beyond the fit errors; ${size(worst)}.`),
+      ...(level !== "good" ? [el("p", {}, Number.isFinite(W.moran) && W.moran > 0.3 ? `Neighbouring ${S.points ? "particles" : "points"} are alike (Moran's I ${fmt(W.moran, 2)}): the variation comes in patches or a gradient, not point to point.`
+        : `Neighbouring ${S.points ? "particles" : "points"} are hardly alike (Moran's I ${fmt(W.moran, 2)}): the variation is point to point, not in patches.`)] : []));
+  }
+  t.replaceChildren(el("tr", {}, ...["Parameter", "CV", "True SD (95 % CI)", "I²", "Moran's I", "Of the tolerance"].map((h, i) => el("th", { class: i ? "" : "l", title: [
+      "", "SD over mean, noise included", "the spread of the true values, each spectrum's fit error taken out (Paule-Mandel)", "the share of the spread that is real variation (Cochran's Q)",
+      S.points ? "values of the 6 nearest particles alike (1) or not (0)" : "values of neighbouring pixels alike (1) or not (0)", "6 × the true SD over maximum − minimum"][i] }, h))),
+    ...DLC_HOM_KEYS.map(k => {
+      const H = rows[k], u = dlcUnit(k), tw = tol(k);
+      if (!H) return el("tr", {}, el("td", { class: "l" }, dlcLabel(k)), el("td", { colspan: 5, class: "muted" }, "too few"));
+      return el("tr", {}, el("td", { class: "l" }, dlcLabel(k), u ? el("span", { class: "muted" }, ` ${u}`) : null), el("td", {}, dlcPct(H.cv)),
+        el("td", {}, `${fmt(H.tau, 3)} (${fmt(H.tauLo, 3)}–${fmt(H.tauHi, 3)})`), el("td", {}, dlcPct(H.I2)), el("td", {}, fmt(H.moran, 2)),
+        el("td", {}, Number.isFinite(tw) ? dlcPct(6 * H.tau / tw) : "–"));
+    }));
+  note.textContent = "Every spectrum's parameter carries its own fit error. If the coating were the same everywhere, the values would scatter by those errors alone: Cochran's Q tests that, I² is the share of the spread beyond them (below 25 % homogeneous, above 75 % inhomogeneous; Higgins et al. 2003), and the true SD is that real spread with the errors taken out. With many spectra, I² is high for even a small real variation, so read it with the true SD and, where limits are set, its share of the tolerance. Neighbouring map points are not independent.";
+}
+
+// --------------------------------------------------------------------------
+// export and report
+// --------------------------------------------------------------------------
+$("#dlc-csv").onclick = () => {
+  const R = dlcCur(); if (!R) { toast("Fit the DLC tab first.", "error"); return; }
+  const st = dlcStatus(R), Q = dlcFacts(R).Q;
+  const cell = v => (typeof v === "number" ? (Number.isFinite(v) ? String(v) : "") : /[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v);
+  const ses = Object.fromEntries(DLC_SE_KEYS.map(k => [k, dlcSe(k, R)])), cols = Object.fromEntries(DLC_PARAMS.map(p => [p.key, dlcCol(p.key, R)]));
+  const bound = f => [["gpos", "G position"], ["gwidth", "G width"], ["dpos", "D position"], ["dwidth", "D width"], ["q", "1/Q"]].filter(([k]) => f & DLC_FLAG[k]).map(([, v]) => v).join("; ");
+  const head = [S.points ? "Particle" : "Point", "X (µm)", "Y (µm)", "Status",
+    ...DLC_PARAMS.flatMap(p => { const nm = `${p.label}${p.unit ? ` (${p.unit})` : ""}`; return ses[p.key] ? [nm, `${nm} SE`] : [nm]; }), "Quality test", "On a fit bound"];
+  const rows = [head.map(cell)];
+  for (let p = 0; p < R.P; p++) {
+    const x = S.points ? S.points.x[p] : S.x[p % S.nx], y = S.points ? S.points.y[p] : S.y[Math.floor(p / S.nx)];
+    rows.push([p + 1, x, y, DLC_STATUS[st[p]], ...DLC_PARAMS.flatMap(q => (ses[q.key] ? [cols[q.key][p], ses[q.key][p]] : [cols[q.key][p]])),
+      Q.use.length ? ["", "pass", "fail"][Q.pass[p]] : "", bound(R.flags[p])].map(cell));
+  }
+  download(`${S.ds.name}_dlc.csv`, rows.map(r => r.join(",")).join("\n") + "\n", "text/csv");
+};
+$("#dlc-png").onclick = () => dlcMaps.forEach((m, i) => setTimeout(() => m.save(), i * 250));
+$("#dlc-report").onclick = () => { $("#rp-kind").value = "dlc"; rpTitle(); switchTab("report"); };
+
+// the DLC tab's maps, spectrum and histogram drawn off-screen for the report
+function dlcFigures(R) {
+  const figs = { maps: [] };
+  dlcMaps.forEach((src, i) => {
+    const host = offscreen(520, 440), mv = new MapView(host, {}), M = dlcMapData(DLC.specs[i], R);
+    Object.assign(mv, { cmap: src.cmap, scale: src.scale, manual: src.manual, smooth: src.smooth, filter: src.filter });
+    mv.setGeometry({ nx: S.nx, ny: S.ny, x: S.x, y: S.y, points: S.points });
+    mv.backdrop = src.backdrop;
+    mv.setTitle(`DLC : <u>${dlcLabel(DLC.specs[i])}</u>`);
+    Object.assign(mv, { categories: M.categories, emptyText: M.emptyText });
+    mv.setData(M.values, { valid: M.valid, label: M.label, unit: M.unit });
+    mv.setCursor(null, DLC.pinned);
+    figs.maps.push({ url: onDark(mv.canvas), title: dlcLabel(DLC.specs[i]) });
+    host.remove();
+  });
+  let host = offscreen(760, 360);
+  const sp = new SpectrumPlot(host); sp.setData(dlcSpectrum(R, DLC.pinned).d); figs.spectrum = onDark(sp.canvas); host.remove();
+  host = offscreen(520, 360);
+  const hp = new HistogramPlot(host); hp.setData(dlcHist.d); figs.hist = dlcHist.d ? onDark(hp.canvas) : null; host.remove();
+  figs.histLabel = dlcHist.d ? dlcLabel(DLC.specs[DLC.active]) : null;
+  return figs;
+}
+function makeDlcReport() {
+  const R = dlcCur();
+  if (!R) { $("#report-paper").replaceChildren(el("p", {}, S.ds ? "Fit the DLC tab first: open DLC, then Fit DLC." : "Open a map and fit it on the DLC tab first.")); return; }
+  const F = dlcFacts(R);
+  buildDlcReport($("#report-paper"), { title: $("#rp-title").value, ds: S.ds, R, F, graphite: F.graphitic ? dlcGraphiteText(F) : null, settings: DLC.settings, limits: DLC.limits, params: DLC_P,
+    status: DLC_STATUS, pf: !!S.points, pinned: DLC.pinned, figs: dlcFigures(R), qcKeys: DLC_QC_KEYS, homKeys: DLC_HOM_KEYS });
+}
+// the report's title follows its kind while it is one of the two defaults
+const RP_TITLES = { carbon: "Raman carbon analysis", dlc: "DLC coating analysis" };
+function rpTitle() { const t = $("#rp-title"); if (Object.values(RP_TITLES).includes(t.value)) t.value = RP_TITLES[$("#rp-kind").value]; }
+$("#rp-kind").onchange = () => { rpTitle(); makeReport(); };
+
+// =========================================================================
 // report
 // =========================================================================
 // Report figures are drawn off-screen at a fixed size, so they are current
@@ -4244,6 +4781,7 @@ async function reportAnalysis() {
 
 let reportRun = 0;
 async function makeReport() {
+  if ($("#rp-kind").value === "dlc") { ++reportRun; makeDlcReport(); return; }
   if (!S.fit) { $("#report-paper").replaceChildren(el("p", {}, "Open and fit a map first.")); return; }
   const run = ++reportRun;
   $("#report-paper").replaceChildren(el("p", { class: "note" }, "Gathering the analysis…"));
@@ -4279,6 +4817,9 @@ function repaintAll() {
   if (S.cube) renderDensity();
   if (S.seg) { drawStrip(); renderParticles(); }
   const st = splatState(); if (st.history) drawLoss(st.history);
+  dlcForm();                                      // band swatches
+  for (const m of dlcMaps) m._dirty = true;
+  dlcRender();                                    // status colours follow the theme
 }
 themeButton();
 
