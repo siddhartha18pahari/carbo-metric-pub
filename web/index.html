@@ -36,6 +36,7 @@
     <button data-tab="files">Files</button>
     <button data-tab="splat">Splat&nbsp;3D</button>
     <button data-tab="particles">Particles</button>
+    <button data-tab="dlc" title="Diamond-like carbon coatings: D and G fit, hydrogen content, quality test, homogeneity">DLC</button>
     <button data-tab="report">Report</button>
   </nav>
   <div class="status" id="status"><span class="dot"></span><span id="status-text">Ready</span></div>
@@ -501,9 +502,92 @@
     </aside>
   </section>
 
+  <!-- ======================= DLC coating ======================= -->
+  <section id="tab-dlc" class="tab">
+    <div class="dlc-main">
+      <div class="dlc-maps">
+        <div class="panel map" id="dlc-map-0"></div>
+        <div class="panel map" id="dlc-map-1"></div>
+        <div class="panel map" id="dlc-map-2"></div>
+        <div class="panel map" id="dlc-map-3"></div>
+      </div>
+      <div class="dlc-lower">
+        <div class="panel col">
+          <div class="panel-h">Spectrum <span class="muted" id="dlc-cursor-info"></span>
+            <span class="grow"></span><span class="muted small hint">drag to zoom · click a map to pin</span></div>
+          <div class="plot" id="dlc-cursor"></div>
+          <div class="cursor-table" id="dlc-cursor-table"></div>
+        </div>
+        <div class="panel col">
+          <div class="panel-h"><button class="link" id="dlc-hist-title">Histogram</button></div>
+          <div class="plot" id="dlc-hist"></div>
+        </div>
+      </div>
+      <div class="dlc-empty hidden" id="dlc-empty">
+        <div><h2>DLC coating analysis</h2><p id="dlc-empty-p"></p><button class="primary" id="dlc-run2">Fit DLC</button></div>
+      </div>
+    </div>
+    <aside class="side">
+      <div class="sec" data-sec="dlc-fit">
+        <div class="sec-h toggle">DLC fit <span class="muted small">D (Lorentzian) + G (BWF), straight background</span></div>
+        <div class="sec-b">
+          <div class="frow"><label>Fit range (cm⁻¹)</label><div class="row2"><input type="number" id="dlc-lo" step="any"><input type="number" id="dlc-hi" step="any"></div></div>
+          <table class="peaks" id="dlc-bounds"></table>
+          <div class="frow"><label>BWF 1/Q</label><div class="row2" title="The G band's coupling: 0 is a symmetric (Lorentzian) G, negative values give it a tail towards low shift"><input type="number" id="dlc-qlo" step="any"><input type="number" id="dlc-qhi" step="any"></div></div>
+          <div class="frow"><label>Signal floor</label><div class="kx"><input type="number" id="dlc-snr" min="0" step="1" title="A spectrum counts as fitted when its G height is at least this many times its noise"><span>× noise (G height)</span></div></div>
+          <div class="btnrow"><button class="primary" id="dlc-run">Fit DLC</button><button id="dlc-reset" title="The default fit settings (the limits stay)">Defaults</button></div>
+          <div class="progress" id="dlc-prog"><div></div></div>
+          <div class="muted small" id="dlc-status"></div>
+        </div>
+      </div>
+      <div class="sec" data-sec="dlc-res">
+        <div class="sec-h toggle">Results <span class="muted small">fitted spectra</span></div>
+        <div class="sec-b">
+          <div class="verdict" id="dlc-verdict"></div>
+          <div class="cards" id="dlc-cards"></div>
+          <div class="muted small" id="dlc-note"></div>
+        </div>
+      </div>
+      <div class="sec" data-sec="dlc-h">
+        <div class="sec-h toggle">Hydrogen content <span class="muted small">a-C:H</span></div>
+        <div class="sec-b">
+          <div class="frow"><label>H (at.%) = a + b log₁₀(m/I(G))</label><div class="row2"><input type="number" id="dlc-ha" step="any" title="a: H at m/I(G) = 1 µm"><input type="number" id="dlc-hb" step="any" title="b: at.% per decade of m/I(G)"></div></div>
+          <div class="cards" id="dlc-h-cards"></div>
+          <div class="muted small" id="dlc-h-note"></div>
+        </div>
+      </div>
+      <div class="sec" data-sec="dlc-qc">
+        <div class="sec-h toggle">Quality test <span class="muted small">limits for every spectrum</span></div>
+        <div class="sec-b">
+          <table class="peaks dlc-limits" id="dlc-limits"></table>
+          <div class="verdict" id="dlc-qc-verdict"></div>
+          <div class="pf-scroll"><table class="stats" id="dlc-qc-table"></table></div>
+          <div class="muted small" id="dlc-qc-note"></div>
+        </div>
+      </div>
+      <div class="sec" data-sec="dlc-hom">
+        <div class="sec-h toggle">Homogeneity</div>
+        <div class="sec-b">
+          <div class="verdict" id="dlc-hom-verdict"></div>
+          <div class="pf-scroll"><table class="stats" id="dlc-hom-table"></table></div>
+          <div class="muted small" id="dlc-hom-note"></div>
+        </div>
+      </div>
+      <div class="sec" data-sec="dlc-exp">
+        <div class="sec-h toggle">Export and report</div>
+        <div class="sec-b btnrow">
+          <button id="dlc-csv">Export (CSV)</button>
+          <button id="dlc-png">Save maps</button>
+          <button class="primary" id="dlc-report">DLC report</button>
+        </div>
+      </div>
+    </aside>
+  </section>
+
   <!-- ======================= Report ======================= -->
   <section id="tab-report" class="tab">
     <div class="report-bar">
+      <select id="rp-kind" title="Which analysis the report covers"><option value="carbon">Carbon fit report</option><option value="dlc">DLC coating report</option></select>
       <input id="rp-title" value="Raman carbon analysis">
       <button id="rp-refresh">Refresh</button>
       <button class="primary" id="rp-print">Print / Save as PDF</button>

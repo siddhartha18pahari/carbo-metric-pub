@@ -187,6 +187,7 @@ export class HistogramPlot extends Base {
     };
     vline(d.median, T.strong, `median ${fmt(d.median)}`, []);
     vline(d.mean, T.mean, `mean ${fmt(d.mean)}`, [4, 3]);
+    for (const [v, label] of d.marks || []) vline(v, T.bad, label, [2, 3]);     // limits, e.g. a quality test's
     ctx.fillStyle = T.label; ctx.font = font(11); ctx.textAlign = "center"; ctx.textBaseline = "bottom";
     // the longest caption that fits the axis
     const cap = [d.label + (out ? `   (${out} outside the axis)` : ""), d.label + (out ? `  (${out} off axis)` : ""), d.label]

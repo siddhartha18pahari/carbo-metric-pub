@@ -636,6 +636,23 @@ table.files .st-run { color: var(--accent); } table.files .st-err { color: var(-
 #tab-report { grid-template-rows: auto minmax(0, 1fr); padding: 12px; gap: 12px; }
 .report-bar { display: flex; gap: 8px; align-items: center; }
 .report-bar input { max-width: 420px; height: 34px; }
+.report-bar select { width: auto; height: 34px; }
+
+/* DLC coating: four maps, the spectrum and histogram below, settings and results at the side */
+#tab-dlc { grid-template-columns: minmax(0, 1fr) 420px; gap: 12px; padding: 12px; }
+.dlc-main { position: relative; display: grid; grid-template-rows: minmax(0, 1.1fr) minmax(0, 1fr); gap: 12px; min-height: 0; min-width: 0; }
+.dlc-maps { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); grid-auto-rows: minmax(0, 1fr); gap: 12px; min-height: 0; }
+.dlc-lower { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr); gap: 12px; min-height: 0; }
+.dlc-empty { position: absolute; inset: 0; display: grid; place-items: center; padding: 24px; }
+.dlc-empty > div { max-width: 580px; text-align: center; padding: 26px 30px; background: var(--side); border: 1px solid var(--line); border-radius: var(--r); box-shadow: var(--shadow); }
+.dlc-empty h2 { margin: 0 0 8px; font-size: 22px; color: var(--heading); }
+.dlc-empty p { margin: 0 0 16px; color: var(--text-2); line-height: 1.55; }
+.dlc-empty .primary { height: 38px; padding: 0 22px; }
+.dlc-empty:not(.can-fit) .primary { display: none; }
+table.dlc-limits td.l { text-align: left; font-size: 12.5px; color: var(--text-2); }
+table.dlc-limits .lim { display: grid; grid-template-columns: 18px minmax(0, 1fr); align-items: center; gap: 2px; }
+#dlc-status { margin-top: 4px; line-height: 1.45; }
+#dlc-note, #dlc-h-note, #dlc-qc-note, #dlc-hom-note { margin-top: 6px; line-height: 1.45; }
 .report-scroll { overflow: auto; border-radius: var(--r); }
 .paper {
   width: 210mm; min-height: 297mm; margin: 0 auto 30px; padding: 16mm 15mm; background: #fff; color: #142033;
@@ -705,7 +722,13 @@ table.files .st-run { color: var(--accent); } table.files .st-err { color: var(-
   body { overflow: auto; }
   main { height: auto; }
   .tab.on { min-height: calc(100vh - 56px - 24px); }
-  #tab-qc, #tab-splat, #tab-particles, #tab-files { grid-template-columns: minmax(0, 1fr); }
+  #tab-qc, #tab-splat, #tab-particles, #tab-files, #tab-dlc { grid-template-columns: minmax(0, 1fr); }
+  .dlc-main { grid-template-rows: auto auto; }
+  .dlc-maps { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .dlc-maps .panel { height: 320px; }
+  .dlc-lower { grid-template-columns: minmax(0, 1fr); }
+  .dlc-lower .panel { height: 300px; }
+  .dlc-empty { position: relative; inset: auto; grid-row: 1 / -1; }
   .files-main { grid-template-rows: auto auto; }
   .files-main > .panel:first-child { height: 70vh; }
   .files-main > .panel:last-child { max-height: 60vh; }
@@ -727,7 +750,7 @@ table.files .st-run { color: var(--accent); } table.files .st-err { color: var(-
   .features { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 700px) {
-  .maps { grid-template-columns: minmax(0, 1fr); }
+  .maps, .dlc-maps { grid-template-columns: minmax(0, 1fr); }
   .tabs { margin-left: 0; order: 3; width: 100%; }
   .topbar { position: relative; }                 /* three rows here: let it scroll away */
   .tabs button { flex: 1; padding: 0 4px; }
