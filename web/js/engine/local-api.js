@@ -86,7 +86,7 @@ function info(ds) {
   const m = ds.map;
   const d = { id: ds.id, name: m.name, path: m.name, nx: m.nx, ny: m.ny, k: m.wn.length,
               wn: m.wn, x: m.x, y: m.y, format: m.format, counts: counts(m.cube), missing: m.missing || 0,
-              laser_nm: m.laser ?? null, settings: m.settings ?? null };
+              laser_nm: m.laser ?? null, settings: m.settings ?? null, scan: m.scan ?? null, axes: m.axes ?? null };
   if (ds.video) {
     const v = ds.video;
     d.video = { w: v.w, h: v.h, x: [v.x[0], v.x[v.x.length - 1]], y: [v.y[0], v.y[v.y.length - 1]] };

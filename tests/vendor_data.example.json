@@ -17,6 +17,7 @@
   "antistokes_red_map": "LabSpec's red map (.l6i) of that map",
   "twin_axis_map": "a .l6m map that stores its X axis twice",
   "twin_axis_red_map": "LabSpec's red map (.l6i) of that map",
+  "named_axes_map": "a .l6m map of noise only, wider than tall (66 x 26 points), which the isotropy score alone read transposed",
   "incomplete_map": "a LabSpec text map whose acquisition stopped 3 points before the end of its 11 x 11 grid",
   "d3g_package": "the folder of a D3/G calibration package: its baselines_D3G.json and result workbooks (*/*results*.xlsx)",
   "d3g_graphite": "the graphite standard spectrum (.l6s) the calibration was made with",

@@ -54,7 +54,7 @@ function records(raw) {
   return [...recs].sort((a, b) => a - b);
 }
 
-function matBlocks(raw) {
+function matBlocks(raw, minBytes = 8) {
   const sorted = records(raw), out = [];
   for (const p of sorted) {
     if (raw[p + 9] !== MAT[0] || raw[p + 10] !== MAT[1] || raw[p + 11] !== MAT[2]) continue;
@@ -62,9 +62,48 @@ function matBlocks(raw) {
     let lo = 0, hi = sorted.length;                        // bisect_right
     while (lo < hi) { const mid = (lo + hi) >> 1; if (sorted[mid] <= data) lo = mid + 1; else hi = mid; }
     const end = lo < sorted.length ? sorted[lo] : raw.length;
-    if (end - data >= 8) out.push([data, end - data]);
+    if (end - data >= minBytes) out.push([data, end - data]);
   }
   return out;
+}
+
+// What LabSpec calls the matrix whose payload starts at dataOff: "Spectr" (Raman shift), "X", "Y",
+// "Z" (stage, um), "Points" (a list's index), "Intens" (counts). Written just before the matrix's
+// record as "typm", four bytes, then the name, NUL-terminated.
+const TYPM = Uint8Array.from("typm", c => c.charCodeAt(0));
+function axisType(raw, dataOff) {
+  const rec = dataOff - RECORD;
+  let t = -1;
+  for (let i = Math.max(0, rec - 160), f; (f = find(raw, TYPM, i)) !== -1 && f < rec; i = f + 1) t = f;
+  if (t < 0) return null;
+  let s = "";
+  for (let i = t + 8; i < Math.min(raw.length, t + 40) && raw[i]; i++) s += String.fromCharCode(raw[i]);
+  return s || null;
+}
+// A scan along a line: one stage axis (X, Y or Z) with a position per spectrum, any other a single
+// point or absent (a line scan, or a depth profile along Z); or X and Y both with a position per
+// spectrum (a line at an angle, placed by its distance from the first point). Returns
+// { axis, pos, single } or null. Axes are matched by LabSpec's own names, so a ParticleFinder
+// list ("Points") never counts.
+function lineScan(raw, n, cubeOff) {
+  const stage = {};
+  for (const [off, nb] of matBlocks(raw, 4)) {
+    const name = axisType(raw, off);
+    if (off === cubeOff || !["X", "Y", "Z"].includes(name) || stage[name]) continue;
+    const a = Float64Array.from(f32(raw, off, nb));
+    if (a.length && a.every(Number.isFinite)) stage[name] = a;
+  }
+  const all = Object.values(stage);
+  if (n < 2 || all.some(a => a.length !== 1 && a.length !== n)) return null;
+  const long = Object.keys(stage).filter(k => stage[k].length === n), single = {};
+  for (const [k, a] of Object.entries(stage)) if (a.length === 1) single[k] = a[0];
+  if (long.length === 1 && isAxis(stage[long[0]])) return { axis: long[0], pos: stage[long[0]], single };
+  if (long.length === 2 && long.includes("X") && long.includes("Y")) {
+    const X = stage.X, Y = stage.Y, pos = new Float64Array(n);
+    for (let i = 1; i < n; i++) { const d = Math.hypot(X[i] - X[i - 1], Y[i] - Y[i - 1]); if (!(d > 0)) return null; pos[i] = pos[i - 1] + d; }
+    return { axis: "XY", pos, single };
+  }
+  return null;
 }
 
 function f32(raw, off, nbytes) {
@@ -225,8 +264,12 @@ export function readL6m(buf, name) {
       if (oS === oF || aS.length * aF.length !== n) continue;
       // some files store the X axis twice: an identical pair is a last resort
       const score = Math.round(Math.abs(Math.log(Math.max(aniso(aS.length, aF.length), 1e-9))) * 1e6) / 1e6;
-      const key = [same(aS, aF) ? 1 : 0, score, oF < oS ? 0 : 1];
-      if (!best || less(key, best.key)) best = { key, x: aF, y: aS };
+      // LabSpec rasters along X (rows follow Y, or Z for a depth map); where it names the axes that
+      // decides, ahead of the isotropy score, which is a coin toss on a map of noise
+      const fN = axisType(raw, oF), sN = axisType(raw, oS), STG = ["X", "Y", "Z"];
+      const named = ["X|Y", "X|Z", "Y|Z"].includes(`${fN}|${sN}`) ? 0 : STG.includes(fN) && STG.includes(sN) ? 2 : 1;
+      const key = [same(aS, aF) ? 1 : 0, named, score, oF < oS ? 0 : 1];
+      if (!best || less(key, best.key)) best = { key, x: aF, y: aS, oF, oS };
     }
     return best;
   };
@@ -238,13 +281,26 @@ export function readL6m(buf, name) {
     best = gridFor(wo, cand.length);
     if (best) { wn = cand; break; }
   }
+  let scan, named;
   if (!best) {
-    wn = spec.reduce((a, b) => (b[1].length > a[1].length ? b : a))[1];
-    const n = payload.length / wn.length;
-    const err = new Error(`${name}: ${n} spectra with no stage grid. This is a ParticleFinder spectra list: ` +
-      "open its .l6pf project, which holds the particle positions. A line scan or depth profile opens from LabSpec's text export (.l6m line and depth scans are not read yet)");
-    Object.assign(err, { pointList: true, spectra: payload, wn, n, settings: settings(raw) });
-    throw err;
+    // no X x Y grid: the Raman shift is the axis LabSpec calls so (the longest plausible one can be
+    // a list's index), then a scan along a line
+    const shift = spec.find(([o]) => axisType(raw, o) === "Spectr");
+    wn = shift ? shift[1] : spec.reduce((a, b) => (b[1].length > a[1].length ? b : a))[1];
+    const n = payload.length / wn.length, line = lineScan(raw, n, cubeOff);
+    if (!line) {
+      const err = new Error(`${name}: ${n} spectra with no stage grid. This is a ParticleFinder spectra list: ` +
+        "open its .l6pf project, which holds the particle positions (a line scan or depth profile this reader cannot place opens from LabSpec's text export)");
+      Object.assign(err, { pointList: true, spectra: payload, wn, n, settings: settings(raw) });
+      throw err;
+    }
+    // along X (or at an angle): one row; along Y or Z (depth): one column
+    const col = line.axis === "Y" || line.axis === "Z";
+    best = col ? { x: [line.single.X ?? 0], y: line.pos } : { x: line.pos, y: [line.single.Y ?? 0] };
+    scan = line.axis === "Z" ? "depth" : "line"; named = [line.axis];
+  } else {
+    named = [axisType(raw, best.oF) || "X", axisType(raw, best.oS) || "Y"];
+    scan = named.includes("Z") ? "depth" : "map";
   }
   const K = wn.length, n = payload.length / K;
 
@@ -255,7 +311,7 @@ export function readL6m(buf, name) {
     wnOut.reverse();
   }
   return { cube, wn: wnOut, x: Float64Array.from(best.x), y: Float64Array.from(best.y), nx: best.x.length, ny: best.y.length,
-           name: stem(name), format: "l6m", laser: laserNm(raw), settings: settings(raw) };
+           name: stem(name), format: "l6m", laser: laserNm(raw), settings: settings(raw), scan, axes: named };
 }
 
 // one spectrum (.l6s, e.g. a reference standard): the first matrix in the file followed by a

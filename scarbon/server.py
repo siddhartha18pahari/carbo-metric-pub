@@ -76,6 +76,8 @@ class Dataset:
             "missing": int(m.meta.get("missing", 0)),
             "laser_nm": m.meta.get("laser_nm"),
             "settings": m.meta.get("settings"),
+            # a LabSpec file says what it is: an X-Y map, a line, or along Z a depth profile
+            "scan": m.meta.get("scan"), "axes": m.meta.get("axes"),
         }
         if self.video is not None:
             v = self.video
