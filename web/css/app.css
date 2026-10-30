@@ -653,6 +653,25 @@ table.dlc-limits td.l { text-align: left; font-size: 12.5px; color: var(--text-2
 table.dlc-limits .lim { display: grid; grid-template-columns: 18px minmax(0, 1fr); align-items: center; gap: 2px; }
 #dlc-status { margin-top: 4px; line-height: 1.45; }
 #dlc-note, #dlc-h-note, #dlc-qc-note, #dlc-hom-note { margin-top: 6px; line-height: 1.45; }
+
+/* Layers: two maps, the profile across the layers, a spectrum and the materials' spectra */
+#tab-layers { grid-template-columns: minmax(0, 1fr) 420px; gap: 12px; padding: 12px; }
+.ly-main { position: relative; display: grid; grid-template-rows: minmax(0, 1.15fr) minmax(0, 0.85fr) minmax(0, 1fr); gap: 12px; min-height: 0; min-width: 0; }
+.ly-maps { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; min-height: 0; }
+.ly-lower { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); gap: 12px; min-height: 0; }
+#tab-layers.ly-line .ly-maps { display: none; }
+#tab-layers.ly-line .ly-main { grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); }
+#ly-status, #ly-mat-note, #ly-table-note, #ly-lim-note { margin-top: 6px; line-height: 1.45; }
+table.ly-table tr[data-i] { cursor: pointer; }
+table.ly-table tr.sel td { background: var(--input); }
+table.stats input.ly-in { width: 100%; min-width: 84px; height: 26px; padding: 0 6px; font-size: 12.5px; }
+table.stats .sw { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; vertical-align: 0; }
+#ly-refs { display: grid; gap: 4px; margin: 6px 0; }
+#ly-refs .ly-ref { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; align-items: center; }
+#ly-refs .ly-ref input { height: 26px; font-size: 12.5px; }
+.ly-checks { margin: 0; padding-left: 18px; font-size: 12.5px; color: var(--text-2); line-height: 1.45; }
+.ly-checks li { margin: 0 0 6px; }
+.ly-checks li.warn::marker { color: var(--warn); }
 .report-scroll { overflow: auto; border-radius: var(--r); }
 .paper {
   width: 210mm; min-height: 297mm; margin: 0 auto 30px; padding: 16mm 15mm; background: #fff; color: #142033;
@@ -722,7 +741,12 @@ table.dlc-limits .lim { display: grid; grid-template-columns: 18px minmax(0, 1fr
   body { overflow: auto; }
   main { height: auto; }
   .tab.on { min-height: calc(100vh - 56px - 24px); }
-  #tab-qc, #tab-splat, #tab-particles, #tab-files, #tab-dlc { grid-template-columns: minmax(0, 1fr); }
+  #tab-qc, #tab-splat, #tab-particles, #tab-files, #tab-dlc, #tab-layers { grid-template-columns: minmax(0, 1fr); }
+  .ly-main, #tab-layers.ly-line .ly-main { grid-template-rows: auto auto auto; }
+  .ly-maps .panel { height: 320px; }
+  .ly-main > .panel { height: 300px; }
+  .ly-lower { grid-template-columns: minmax(0, 1fr); }
+  .ly-lower .panel { height: 300px; }
   .dlc-main { grid-template-rows: auto auto; }
   .dlc-maps { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .dlc-maps .panel { height: 320px; }
@@ -750,7 +774,7 @@ table.dlc-limits .lim { display: grid; grid-template-columns: 18px minmax(0, 1fr
   .features { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 700px) {
-  .maps, .dlc-maps { grid-template-columns: minmax(0, 1fr); }
+  .maps, .dlc-maps, .ly-maps { grid-template-columns: minmax(0, 1fr); }
   .tabs { margin-left: 0; order: 3; width: 100%; }
   .topbar { position: relative; }                 /* three rows here: let it scroll away */
   .tabs button { flex: 1; padding: 0 4px; }

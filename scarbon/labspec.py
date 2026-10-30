@@ -319,7 +319,8 @@ def read_l6m(path: str) -> RamanMap:
         n = payload.size // wn.size
         err = PointListError(
             f"{os.path.basename(path)}: {n} spectra with no stage grid. This is a "
-            f"ParticleFinder spectra list: open its .l6pf project, which holds the particle positions")
+            f"ParticleFinder spectra list: open its .l6pf project, which holds the particle positions. "
+            f"A line scan or depth profile opens from LabSpec's text export (.l6m line and depth scans are not read yet)")
         err.spectra, err.wn = payload.reshape(n, wn.size), np.asarray(wn, np.float64)
         err.settings = settings(raw)
         raise err
