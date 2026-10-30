@@ -746,6 +746,7 @@ async function loadDataset(info) {
   DLC.hover = DLC.pinned = null;
   if ($("#tab-dlc").classList.contains("on")) dlcShow();
   LY.hover = LY.pinned = LY.sel = null;
+  lyFromFile(info);
   if ($("#tab-layers").classList.contains("on")) lyShow();
   // reopening a map the server already fitted with these settings: reuse it
   const prev = await api(`/api/ds/${info.id}/fit?result=1`).catch(() => null);
@@ -4723,7 +4724,16 @@ function lyName(R, a) {
 }
 // µm to the nanometre, the same decimals down a column
 const lyUm = v => (Number.isFinite(v) ? (Math.abs(v) < 5e-4 ? 0 : v).toFixed(3) : "–");
-const lyAxisLabel = R => (LY.settings.kind === "depth" ? "Depth (µm)" : `Position along ${R.L.axis.toUpperCase()} (µm)`);
+const lyAxisLabel = R => (LY.settings.kind === "depth" ? "Depth (µm)" : S.ds && S.ds.axes && S.ds.axes[0] === "XY" ? "Distance along the line (µm)"
+  : `Position along ${R.L.axis.toUpperCase()} (µm)`);
+// a LabSpec file says what it is: along Z a depth profile, otherwise across a cut edge
+function lyFromFile(info) {
+  if (!info.scan) return;
+  const kind = info.scan === "depth" ? "depth" : "section";
+  if (LY.settings.kind === kind) return;
+  LY.settings.kind = kind; lySave();
+  const R = LY.res.get(info.id); if (R) lyLayers(R);
+}
 
 // --------------------------------------------------------------------------
 // finding them: the materials off the page (a worker), then the layers here
@@ -5103,7 +5113,11 @@ function lyRenderLimits() {
 }
 // what to know before trusting the table, as data (the report takes them too)
 function lyChecks(R) {
-  const L = R.L, s = LY.settings, line = lyIsLine(), out = [], add = (text, warn = false) => out.push({ text, warn });
+  const L = R.L, s = LY.settings, line = lyIsLine(), out = [], add = (text, warn = false) => out.push({ text, warn }), ax = S.ds && S.ds.axes;
+  if (S.ds && S.ds.scan && ax) add(S.ds.scan === "depth" ? `LabSpec recorded this along Z (${ax.join(" × ")}): read as a confocal depth profile.`
+    : S.ds.scan === "map" ? `LabSpec recorded this as a map across ${ax.join(" and ")}.`
+    : ax[0] === "XY" ? "LabSpec recorded this as a line at an angle across X and Y: positions are the distance from its first point."
+    : `LabSpec recorded this as a line along ${ax[0]}.`);
   if (R.comps.mode === "auto") {
     const st = R.comps.steps, last = st[st.length - 1], prev = st[st.length - 2], need = Math.max(2, Math.ceil(0.002 * R.prep.n));
     add(R.settings.k ? `${R.comps.k} materials, as set: with them, ${fmt(last.over)} of ${fmt(R.prep.n)} spectra have more than ${R.settings.stop} × their noise left${last.over >= need ? ": more materials are there" : ""}.`

@@ -107,7 +107,7 @@ def _records(raw: bytes, word: bytes) -> list[int]:
     return out
 
 
-def _mat_blocks(raw: bytes) -> list[tuple[int, int]]:
+def _mat_blocks(raw: bytes, min_bytes: int = 8) -> list[tuple[int, int]]:
     """``(data_offset, n_bytes)`` of every matrix payload, in file order."""
     word = _pointer_word(raw)
     if word is None:
@@ -120,9 +120,51 @@ def _mat_blocks(raw: bytes) -> list[tuple[int, int]]:
         data = p + _RECORD
         j = bisect.bisect_right(recs, data)
         end = recs[j] if j < len(recs) else len(raw)
-        if end - data >= 8:
+        if end - data >= min_bytes:
             out.append((data, end - data))
     return out
+
+
+def _axis_type(raw: bytes, data_off: int) -> str | None:
+    """What LabSpec calls the matrix whose payload starts at ``data_off``:
+    'Spectr' (Raman shift), 'X', 'Y', 'Z' (stage, um), 'Points' (a list's
+    index), 'Intens' (counts). Written just before the matrix's record as
+    'typm', four bytes, then the name, NUL-terminated."""
+    rec = data_off - _RECORD
+    t = raw.rfind(b"typm", max(0, rec - 160), rec)
+    if t < 0:
+        return None
+    return raw[t + 8:t + 40].split(b"\x00", 1)[0].decode("latin1") or None
+
+
+_STAGE = ("X", "Y", "Z")
+
+
+def _line_scan(raw: bytes, n: int, cube_off: int):
+    """A scan along a line: one stage axis (X, Y or Z) with a position per
+    spectrum, any other a single point or absent (a line scan, or a depth
+    profile along Z); or X and Y both with a position per spectrum (a line at
+    an angle, placed by its distance from the first point). Returns
+    (axis, positions, {axis: single value}) or None. Axes are matched by
+    LabSpec's own names, so a ParticleFinder list ('Points') never counts."""
+    stage: dict[str, np.ndarray] = {}
+    for off, nb in _mat_blocks(raw, 4):
+        name = _axis_type(raw, off)
+        if off != cube_off and name in _STAGE and name not in stage:
+            a = _f32(raw, off, nb).astype(np.float64)
+            if a.size and np.all(np.isfinite(a)):
+                stage[name] = a
+    if n < 2 or any(a.size not in (1, n) for a in stage.values()):
+        return None
+    long = [k for k, a in stage.items() if a.size == n]
+    single = {k: float(a[0]) for k, a in stage.items() if a.size == 1}
+    if len(long) == 1 and _is_axis(stage[long[0]]):
+        return long[0], stage[long[0]], single
+    if sorted(long) == ["X", "Y"]:
+        step = np.hypot(np.diff(stage["X"]), np.diff(stage["Y"]))
+        if np.all(step > 0):
+            return "XY", np.concatenate([[0.0], np.cumsum(step)]), single
+    return None
 
 
 def _f32(raw: bytes, off: int, nbytes: int) -> np.ndarray:
@@ -300,9 +342,14 @@ def read_l6m(path: str) -> RamanMap:
                 # legitimately have X == Y. Equal-size axes: the isotropy score
                 # cannot tell them apart, so prefer X listed first (as in .l6v/.l6i).
                 same = int(np.array_equal(a_slow, a_fast))
-                key = (same, round(score, 6), 0 if o_fast < o_slow else 1)
+                # LabSpec rasters along X (rows follow Y, or Z for a depth map); where it names the
+                # axes that decides, ahead of the isotropy score, which is a coin toss on a map of
+                # noise (a 66 x 26 map came out 26 x 66)
+                f_name, s_name = _axis_type(raw, o_fast), _axis_type(raw, o_slow)
+                named = 0 if (f_name, s_name) in (("X", "Y"), ("X", "Z"), ("Y", "Z")) else 2 if f_name in _STAGE and s_name in _STAGE else 1
+                key = (same, named, round(score, 6), 0 if o_fast < o_slow else 1)
                 if best is None or key < best[0]:
-                    best = (key, cube, a_fast, a_slow)
+                    best = (key, cube, a_fast, a_slow, o_fast, o_slow)
         return best
 
     # The spectral axis is the one that leaves a consistent X x Y grid. Taking
@@ -314,18 +361,34 @@ def read_l6m(path: str) -> RamanMap:
         if best is not None:
             wn = cand
             break
+    meta = {"format": "l6m", "version": int.from_bytes(raw[12:16], "little"), "laser_nm": laser_nm(raw), "settings": settings(raw)}
     if best is None:
-        wn = max(spec, key=lambda t: t[1].size)[1]
+        # no X x Y grid: the Raman shift is the axis LabSpec calls so (the longest
+        # plausible one can be a list's index), then a scan along a line
+        named = [a for o, a in spec if _axis_type(raw, o) == "Spectr"]
+        wn = named[0] if named else max(spec, key=lambda t: t[1].size)[1]
         n = payload.size // wn.size
-        err = PointListError(
-            f"{os.path.basename(path)}: {n} spectra with no stage grid. This is a "
-            f"ParticleFinder spectra list: open its .l6pf project, which holds the particle positions. "
-            f"A line scan or depth profile opens from LabSpec's text export (.l6m line and depth scans are not read yet)")
-        err.spectra, err.wn = payload.reshape(n, wn.size), np.asarray(wn, np.float64)
-        err.settings = settings(raw)
-        raise err
-    K = wn.size
-    _, cube, x, y = best
+        line = _line_scan(raw, n, cube_off)
+        if line is None:
+            err = PointListError(
+                f"{os.path.basename(path)}: {n} spectra with no stage grid. This is a "
+                f"ParticleFinder spectra list: open its .l6pf project, which holds the particle positions "
+                f"(a line scan or depth profile this reader cannot place opens from LabSpec's text export)")
+            err.spectra, err.wn = payload.reshape(n, wn.size), np.asarray(wn, np.float64)
+            err.settings = settings(raw)
+            raise err
+        axis, pos, single = line
+        spectra = payload.reshape(n, wn.size)
+        # along X (or at an angle): one row; along Y or Z (depth): one column
+        if axis in ("Y", "Z"):
+            cube, x, y = spectra[:, None, :], np.array([single.get("X", 0.0)]), pos
+        else:
+            cube, x, y = spectra[None], pos, np.array([single.get("Y", 0.0)])
+        meta.update(scan="depth" if axis == "Z" else "line", axes=[axis])
+    else:
+        _, cube, x, y, o_fast, o_slow = best
+        axes_names = [_axis_type(raw, o_fast) or "X", _axis_type(raw, o_slow) or "Y"]
+        meta.update(scan="depth" if "Z" in axes_names else "map", axes=axes_names)
 
     cube = np.asarray(cube, np.float32)
     wn = np.asarray(wn, np.float64)
@@ -334,9 +397,7 @@ def read_l6m(path: str) -> RamanMap:
     x = np.asarray(x, np.float64)
     y = np.asarray(y, np.float64)
     return RamanMap(cube=np.ascontiguousarray(cube), wn=wn, x=x, y=y,
-                    name=os.path.splitext(os.path.basename(path))[0], source=path,
-                    meta={"format": "l6m", "version": int.from_bytes(raw[12:16], "little"),
-                          "laser_nm": laser_nm(raw), "settings": settings(raw)})
+                    name=os.path.splitext(os.path.basename(path))[0], source=path, meta=meta)
 
 
 # --------------------------------------------------------------------------
