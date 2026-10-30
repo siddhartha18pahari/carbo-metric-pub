@@ -6,10 +6,10 @@
 import { smoothSpectra } from "./engine/core.js";
 import { $, $$, el, api, apiUpload, videoSrc, setLocalBackend, isBrowserOnly, f32, download, debounce, fmt, summary, otsu, toast, hidpi, quantile, niceTicks } from "./util.js";
 import { MapView } from "./mapview.js";
-import { SpectrumPlot, HistogramPlot, DensityPlot, PEAK_COLOURS } from "./plots.js";
+import { SpectrumPlot, HistogramPlot, DensityPlot, LinesPlot, PEAK_COLOURS } from "./plots.js";
 import { SplatView, sliceField } from "./splat3d.js";
 import { segment, outlineOverlay, distance, PARTICLE_COLOURS } from "./particles.js";
-import { buildReport, buildDlcReport } from "./report.js";
+import { buildReport, buildDlcReport, buildLayersReport } from "./report.js";
 import { rng, wilson, weightedQuantile, laCancado, robustScale, bestGmm, bootstrapShares, median, quantileSorted,
          heightCovariances, ratioVariance, heterogeneity, moranI, spearmanCI, coverage, pairRatio,
          binomLower, certifyCount, detectionPower, signalFloor, gini, noiseGini, logCV, lognormalPreferred,
@@ -22,6 +22,7 @@ import { PRESET_21OCT, SC_SETTINGS, BANDS as D3G_BANDS, prepare as d3gPrepare, u
          refineOnMedian, standardRatio, scaleIndex } from "./d3g-calibration.js";
 import { DLC_DEFAULTS, DLC_PARAMS, SE_KEYS as DLC_SE_KEYS, STATUS as DLC_STATUS, FLAG as DLC_FLAG, prepare as dlcPrepare, fitMean as dlcFitMean,
          fitSpectra as dlcFitSpectra, makeFitter as dlcFitter, components as dlcComponents, bwfFwhm, qcTest, paramStats, homogeneity, homogeneityLevel } from "./dlc.js";
+import { LAYER_DEFAULTS, prepare as lyPrepare, decompose as lyDecomp, prepRef, matchRefs, findLayers as lyFind, thicknessTest, amountMap, layerSpectra } from "./layers.js";
 import { T, font, setTheme, currentTheme } from "./theme.js";
 import { lut } from "./colormaps.js";
 
@@ -736,7 +737,7 @@ async function loadDataset(info) {
   }
   // particles are drawn over their camera image (a grid map covers its own)
   const back = S.points && S.video && info.video ? { img: S.video, ...info.video } : null;
-  for (const m of [...maps, pmap, ...dlcMaps]) { m.setGeometry({ nx: S.nx, ny: S.ny, x: S.x, y: S.y, points: S.points }); m.values = null; m.backdrop = back; }
+  for (const m of [...maps, pmap, ...dlcMaps, ...lyMaps]) { m.setGeometry({ nx: S.nx, ny: S.ny, x: S.x, y: S.y, points: S.points }); m.values = null; m.backdrop = back; }
   fitMapRow();
   S.vidFull = false;
   setActive(S.active);
@@ -744,6 +745,8 @@ async function loadDataset(info) {
   splatReset();
   DLC.hover = DLC.pinned = null;
   if ($("#tab-dlc").classList.contains("on")) dlcShow();
+  LY.hover = LY.pinned = LY.sel = null;
+  if ($("#tab-layers").classList.contains("on")) lyShow();
   // reopening a map the server already fitted with these settings: reuse it
   const prev = await api(`/api/ds/${info.id}/fit?result=1`).catch(() => null);
   if (prev && prev.state === "done" && prev.result && JSON.stringify(prev.result.config) === JSON.stringify(S.cfg)) {
@@ -989,6 +992,7 @@ function switchTab(name) {
   if (name === "splat") splatShow();
   if (name === "particles") particlesInit();
   if (name === "dlc") dlcShow();
+  if (name === "layers") lyShow();
   if (name === "report") makeReport();
   if (name === "files") setTimeout(() => renderFiles(), 0);
   if (name === "qc") setTimeout(() => { fitMapRow(); maps.forEach(m => m.render()); renderVideo(); cursorPlot.render(); hist.render(); density.render(); }, 0);
@@ -4683,10 +4687,512 @@ function makeDlcReport() {
   buildDlcReport($("#report-paper"), { title: $("#rp-title").value, ds: S.ds, R, F, graphite: F.graphitic ? dlcGraphiteText(F) : null, settings: DLC.settings, limits: DLC.limits, params: DLC_P,
     status: DLC_STATUS, pf: !!S.points, pinned: DLC.pinned, figs: dlcFigures(R), qcKeys: DLC_QC_KEYS, homKeys: DLC_HOM_KEYS });
 }
-// the report's title follows its kind while it is one of the two defaults
-const RP_TITLES = { carbon: "Raman carbon analysis", dlc: "DLC coating analysis" };
+// the report's title follows its kind while it is one of the defaults
+const RP_TITLES = { carbon: "Raman carbon analysis", dlc: "DLC coating analysis", layers: "Multilayer analysis" };
 function rpTitle() { const t = $("#rp-title"); if (Object.values(RP_TITLES).includes(t.value)) t.value = RP_TITLES[$("#rp-kind").value]; }
 $("#rp-kind").onchange = () => { rpTitle(); makeReport(); };
+
+// =========================================================================
+// Layers (layers.js): the materials of a multilayer sample and the thickness
+// of every layer, across a cut edge (a line or a map) or in depth
+// =========================================================================
+const LY_STORE = "carbo-layers";
+const LY = { settings: structuredClone(LAYER_DEFAULTS), limits: [], refs: [], res: new Map(), running: false, specs: ["mat", "amt:0"], hover: null, pinned: null, sel: null };
+let lyRefSeq = 0;
+// the settings and limits are kept per browser, the reference spectra until the page is closed
+try {
+  const saved = JSON.parse(localStorage.getItem(LY_STORE) || "null");
+  if (saved && saved.settings) Object.assign(LY.settings, saved.settings);
+  if (saved && Array.isArray(saved.limits)) LY.limits = saved.limits;
+} catch { /* storage blocked or unreadable: the defaults */ }
+function lySave() { try { localStorage.setItem(LY_STORE, JSON.stringify({ settings: LY.settings, limits: LY.limits })); } catch { /* not remembered */ } }
+const lyCur = () => (S.ds ? LY.res.get(S.ds.id) || null : null);
+const lyIsLine = () => S.nx === 1 || S.ny === 1;
+const lyCanRun = () => !!(S.ds && S.cube && !S.points && S.nx * S.ny >= 3);
+const lyStatusText = t => { $("#ly-status").textContent = t; };
+// what the decomposition depends on; the measurement, axis, depth scale, thinnest layer and tilt only re-read the layers
+const lyKey = s => stableJSON({ range: s.range, baseline: s.baseline, k: s.k, stop: s.stop, useRefs: s.useRefs, refs: s.useRefs ? LY.refs.map(r => r.id) : null });
+const lyLKey = () => { const s = LY.settings; return stableJSON([s.kind, s.axis, s.depthScale, s.minPts, s.tilt]); };
+const lyColour = a => (a < 0 ? T.muted : PEAK_COLOURS[a % PEAK_COLOURS.length]);
+function lyName(R, a) {
+  if (a < 0) return "No material";
+  if (R.userNames[a]) return R.userNames[a];
+  if (R.refNames) return R.refNames[a];
+  const m = R.match && R.match[a];
+  return m && m.best >= 0 && LY.refs[m.best] ? LY.refs[m.best].name : `Material ${a + 1}`;
+}
+// µm to the nanometre, the same decimals down a column
+const lyUm = v => (Number.isFinite(v) ? (Math.abs(v) < 5e-4 ? 0 : v).toFixed(3) : "–");
+const lyAxisLabel = R => (LY.settings.kind === "depth" ? "Depth (µm)" : `Position along ${R.L.axis.toUpperCase()} (µm)`);
+
+// --------------------------------------------------------------------------
+// finding them: the materials off the page (a worker), then the layers here
+// --------------------------------------------------------------------------
+async function lyRun() {
+  if (LY.running || !S.ds) return;
+  if (!lyCanRun()) { toast(!S.cube ? "Layers need the spectra: this file holds fitted values only." : S.points ? "Layers need a line or a map across the layers, not ParticleFinder particles." : "Layers need a line scan or a map, not one spectrum.", "error"); return; }
+  const s0 = LY.settings;
+  if (!(s0.range[0] < s0.range[1])) { toast("The range: the minimum must be below the maximum.", "error"); return; }
+  if (s0.useRefs && LY.refs.length < 2) { toast("Load at least two reference spectra to unmix against them, or untick that box.", "error"); return; }
+  const ds = S.ds, settings = structuredClone(s0), refs = LY.refs.map(r => ({ name: r.name, wn: r.wn, y: r.y })), key = lyKey(s0), t0 = performance.now();
+  const geom = { nx: S.nx, ny: S.ny, x: Float64Array.from(S.x), y: Float64Array.from(S.y) };
+  LY.running = true; $("#ly-run").disabled = $("#ly-run2").disabled = true;
+  const prog = $("#ly-prog > div");
+  prog.style.width = "3%";
+  lyStatusText(`Reading the spectra of ${ds.name}…`);
+  lyRender();
+  try {
+    const out = await lyDecompose({ cube: S.cube, K: S.k, wn: S.wn, geom: { nx: S.nx, ny: S.ny }, settings, refs }, t => {
+      const m = /^Preparing (\d+) of (\d+)/.exec(t);
+      const w = m ? 3 + 55 * m[1] / m[2] : /purest/.test(t) ? 62 : /Refining/.test(t) ? 72 : /Unmixing/.test(t) ? 88 : null;
+      if (w != null) prog.style.width = `${w.toFixed(1)}%`;
+      lyStatusText(`${t}…`);
+    });
+    const R = { id: ds.id, key, settings, geom, prep: out.prep, comps: out.comps, refNames: settings.useRefs ? refs.map(r => r.name) : null,
+      userNames: [], comments: [], seconds: (performance.now() - t0) / 1000 };
+    lyMatch(R); lyLayers(R);
+    LY.res.set(ds.id, R);
+    prog.style.width = "100%";
+  } catch (e) { lyStatusText(`Could not find the layers: ${e.message}`); toast(`Layers: ${e.message}`, "error", 8000); }
+  finally { LY.running = false; $("#ly-run").disabled = $("#ly-run2").disabled = false; }
+  if (S.ds === ds) { LY.hover = LY.pinned = LY.sel = null; lyForm(); lyRender(); }
+}
+// the slow part in a worker (in the page when workers cannot start)
+function lyDecompose(msg, onStage) {
+  let w = null;
+  try { w = new Worker(new URL("./layers-worker.js", import.meta.url), { type: "module" }); } catch { w = null; }
+  if (!w) return xcTick().then(() => { const prep = lyPrepare(msg.cube, msg.K, msg.wn, msg.geom, msg.settings); return { prep, comps: lyDecomp(prep, msg.settings, msg.refs) }; });
+  return new Promise((res, rej) => {
+    w.onmessage = e => { const d = e.data; if (d.stage) { onStage(d.stage); return; } w.terminate(); if (d.error) rej(new Error(d.error)); else res(d); };
+    w.onerror = e => { w.terminate(); rej(new Error(e.message || "the Layers worker failed")); };
+    w.postMessage(msg);
+  });
+}
+// each material's best reference (when the materials were found, not given)
+function lyMatch(R) { R.match = !R.refNames && LY.refs.length ? matchRefs(R.comps, R.prep, LY.refs, LY.settings.minHQI) : null; R.refPrep = new Map(); }
+// the layers at the measurement, axis, depth scale, thinnest layer and tilt in use
+function lyLayers(R) { R.L = lyFind(R.prep, R.comps, R.geom, LY.settings); R.lkey = lyLKey(); R.spectra = null; R.amt = new Map(); }
+const lySpectraOf = R => R.spectra || (R.spectra = layerSpectra(S.cube, S.k, R.prep.P, R.L.layerOf, R.L.layers.length));
+// a point's position across the layers, and the measured point nearest a position on a line scan
+const lyPosOf = (R, p) => (R.L.axis === "x" ? R.geom.x[p % R.geom.nx] : R.geom.y[Math.floor(p / R.geom.nx)]) * R.L.scale;
+function lyNearest(x) {
+  const R = lyCur(); if (!R || x == null) return null;
+  let best = null, bd = Infinity;
+  for (let p = 0; p < R.prep.P; p++) { if (!R.prep.measured[p]) continue; const d = Math.abs(lyPosOf(R, p) - x); if (d < bd) { bd = d; best = p; } }
+  return best;
+}
+
+// --------------------------------------------------------------------------
+// maps, profile, spectra
+// --------------------------------------------------------------------------
+const lyMaps = [0, 1].map(i => new MapView($(`#ly-map-${i}`), {
+  onTitle: (mv, e) => lyMenu(e, i),
+  onHover: p => lyHover(p),
+  onPick: p => lyPin(p),
+  onView: (v, src) => { for (const m of lyMaps) if (m !== src) m.setView(v ? { ...v } : null); },
+  onProfile: on => { for (const m of lyMaps) m.setProfile(on); },
+  onBackdrop: on => { for (const m of lyMaps) { m.backdropOn = on; m._ptsCache = null; m.render(); } },
+}));
+const lyProf = new LinesPlot($("#ly-prof"), { onHover: x => { if (lyIsLine()) lyHover(lyNearest(x)); }, onPick: x => { if (lyIsLine()) lyPin(lyNearest(x)); } });
+const lyPlot = new SpectrumPlot($("#ly-cursor")), lySpec = new LinesPlot($("#ly-spec"));
+
+function lyMenu(e, i) {
+  e.stopPropagation();
+  const R = lyCur(); if (!R) return;
+  $$(".popover").forEach(p => p.remove());
+  const pop = el("div", { class: "popover", style: "max-height:70vh;overflow:auto", onclick: ev => ev.stopPropagation() });
+  const pick = k => { LY.specs[i] = k; pop.remove(); lyRenderMap(i); };
+  const opts = [["mat", "Material"], ["layer", "Layer number"], ...Array.from({ length: R.comps.k }, (_, a) => [`amt:${a}`, `${lyName(R, a)}: amount`]), ["resid", "Residual"]];
+  pop.append(el("div", { class: "pop-h" }, "Show"), el("div", { class: "menu-list" }, ...opts.map(([k, t]) => el("button", { class: k === LY.specs[i] ? "on" : "", onclick: () => pick(k) }, t))));
+  document.body.append(pop);
+  const r = e.currentTarget.getBoundingClientRect();
+  pop.style.left = Math.max(8, Math.min(window.innerWidth - 250, r.left)) + "px";
+  pop.style.top = Math.max(8, Math.min(window.innerHeight - pop.offsetHeight - 8, r.bottom + 6)) + "px";
+  setTimeout(() => document.addEventListener("click", () => pop.remove(), { once: true }));
+}
+// what a map shows: each point's material by colour, its layer, a material's amount or the residual
+function lyMapData(spec, R) {
+  const L = R.L, k = R.comps.k;
+  if (spec === "mat") {
+    const index = Int8Array.from(L.label, v => (Number.isNaN(v) ? -1 : v < 0 ? k : v));
+    return { values: Float32Array.from(index), label: "Material", unit: "", categories: { index, colours: [...Array.from({ length: k }, (_, a) => lyColour(a)), T.muted],
+      names: [...Array.from({ length: k }, (_, a) => lyName(R, a)), "No material"] } };
+  }
+  if (spec === "layer") return { values: Float32Array.from(L.layerOf, v => (v < 0 ? NaN : v + 1)), label: "Layer number", unit: "" };
+  if (spec === "resid") { const v = new Float32Array(R.prep.P).fill(NaN); R.prep.list.forEach((p, i) => { v[p] = R.comps.resid[i]; }); return { values: v, label: "Residual", unit: "× noise" }; }
+  const a = +spec.split(":")[1];
+  if (!(a < k)) return lyMapData("mat", R);
+  if (!R.amt.has(a)) R.amt.set(a, amountMap(R.prep, R.comps, L.plateau, a));
+  return { values: R.amt.get(a), label: `${lyName(R, a)}: amount`, unit: "" };
+}
+function lyRenderMap(i) {
+  const mv = lyMaps[i], R = lyCur();
+  if (!R || lyIsLine()) { mv.setTitle("Layers"); Object.assign(mv, { categories: null, values: null, emptyText: null, _dirty: true }); mv.render(); return; }
+  const M = lyMapData(LY.specs[i], R);
+  mv.setTitle(`Layers : <u>${escHTML(M.label)}</u>`);
+  Object.assign(mv, { categories: M.categories || null, emptyText: null, _ptsCache: null });
+  mv.setData(M.values, { valid: null, label: M.label, unit: M.unit });
+}
+function lyHover(p) { LY.hover = p; lyMaps.forEach(m => m.setCursor(p, LY.pinned)); lyRenderCursor(); lyRenderProfile(); }
+function lyPin(p) { LY.pinned = p; LY.hover = null; lyMaps.forEach(m => m.setCursor(null, p)); lyRenderCursor(); lyRenderProfile(); }
+
+// the mean profile across the layers: each material's scaled amount, the layers shaded and numbered
+function lyRenderProfile() {
+  const R = lyCur(), info = $("#ly-prof-info");
+  if (!R) { lyProf.emptyText = ""; lyProf.setData(null); info.textContent = ""; return; }
+  const L = R.L, k = R.comps.k, cur = LY.hover ?? LY.pinned;
+  let top = 1.1;
+  const series = Array.from({ length: k }, (_, a) => { for (const v of L.profile.u[a]) if (v > top) top = v; return { x: L.profile.s, y: L.profile.u[a], colour: lyColour(a), label: lyName(R, a), width: 1.6 }; });
+  const spans = L.layers.map((Ly, i) => ({ from: Ly.from, to: Ly.to, colour: lyColour(Ly.mat), label: String(i + 1) }));
+  const sel = LY.sel != null && L.layers[LY.sel] ? [L.layers[LY.sel]] : [];
+  lyProf.emptyText = "No measured points along the lines";
+  lyProf.setData({ series, spans: [...spans, ...sel.map(Ly => ({ from: Ly.from, to: Ly.to, colour: lyColour(Ly.mat) }))], vlines: [...new Set(L.layers.flatMap(Ly => [Ly.from, Ly.to]))],
+    hlines: [0.5], cursor: cur != null ? lyPosOf(R, cur) : null, xl: lyAxisLabel(R), xu: "µm", yl: "Scaled amount", yr: [-0.05, top + 0.05] });
+  info.textContent = lyIsLine() ? `· ${fmt(L.m)} points, ${fmt(L.step, 3)} µm apart` : `· mean over the ${fmt(L.nCons)} lines that share the stack`;
+}
+// one spectrum with its materials, or a layer's mean spectrum
+function lyRenderCursor() {
+  const R = lyCur(), tb = $("#ly-cursor-table"), info = $("#ly-cursor-info");
+  tb.textContent = ""; info.textContent = "";
+  if (!R) { lyPlot.setData(null); return; }
+  const p = LY.hover ?? LY.pinned;
+  if (p == null && LY.sel != null && R.L.layers[LY.sel]) {
+    const sp = lySpectraOf(R)[LY.sel], Ly = R.L.layers[LY.sel];
+    info.textContent = `· layer ${LY.sel + 1}, ${lyName(R, Ly.mat)}: the mean of its ${fmt(sp.n)} spectra`;
+    lyPlot.emptyText = "No spectra in this layer";
+    lyPlot.setData(sp.y ? { wn: S.wn, raw: sp.y, range: R.prep.range } : null);
+    return;
+  }
+  if (p == null) { lyPlot.emptyText = `Hover or click ${lyIsLine() ? "the profile" : "a map"}, or click a row of the layer table`; lyPlot.setData(null); return; }
+  const i = R.prep.rowOf[p], where = lyIsLine() ? `· point ${p + 1} at ${fmt(lyPosOf(R, p), 4)} µm` : `· point ${p + 1} · X ${fmt(S.x[p % S.nx], 4)} µm, Y ${fmt(S.y[Math.floor(p / S.nx)], 4)} µm`;
+  info.textContent = `${where}${LY.hover != null && LY.hover !== LY.pinned ? "" : " · pinned"}`;
+  if (i < 0) { lyPlot.emptyText = "Not measured"; lyPlot.setData(null); return; }
+  const { nb, V, base, nu, noise } = R.prep, { k, W, H } = R.comps;
+  const bl = Float64Array.from(base.subarray(i * nb, (i + 1) * nb)), raw = Float64Array.from(V.subarray(i * nb, (i + 1) * nb), (v, j) => v + bl[j]);
+  const comps = Array.from({ length: k }, (_, a) => {
+    const y = new Float64Array(nb); let hi = 0, at = 0;
+    for (let j = 0; j < nb; j++) { y[j] = W[i * k + a] * H[a * nb + j]; if (H[a * nb + j] > hi) { hi = H[a * nb + j]; at = j; } }
+    return { name: lyName(R, a), y, A: W[i * k + a] * hi > 3 * noise[i] ? 1 : 0, pos: nu[at] };
+  });
+  lyPlot.emptyText = null;
+  lyPlot.setData({ wn: nu, raw, range: R.prep.range, fit: { baseline: bl, total: Float64Array.from(bl, (b, j) => b + comps.reduce((t, c) => t + c.y[j], 0)), comps } });
+  const item = (name, text, colour) => tb.append(el("span", {}, el("b", colour ? { style: `color:${colour}` } : {}, name), ` ${text}`));
+  for (let a = 0; a < k; a++) item(lyName(R, a), (W[i * k + a] / R.L.plateau[a]).toFixed(2), lyColour(a));
+  const li = R.L.layerOf[p], lab = R.L.label[p];
+  item("Layer", li >= 0 ? `${li + 1}, ${lyName(R, R.L.layers[li].mat)}` : Number.isNaN(lab) ? "–" : lab < 0 ? "none: outside the sample" : `${lyName(R, lab)}, on a line with another stack`);
+  item("Residual", `${fmt(R.comps.resid[i], 3)} × noise`);
+}
+// the materials' spectra, each scaled to 1 and offset; a matched reference dashed
+function lyRenderSpec() {
+  const R = lyCur(), info = $("#ly-spec-info");
+  if (!R) { lySpec.setData(null); info.textContent = ""; return; }
+  const { k, H } = R.comps, nb = R.prep.nb, norm = (y, off) => { let hi = 0; for (const v of y) if (v > hi) hi = v; return Float64Array.from(y, v => v / (hi || 1) + off); }, series = [];
+  for (let a = 0; a < k; a++) {
+    const off = 1.1 * (k - 1 - a);
+    series.push({ x: R.prep.nu, y: norm(H.subarray(a * nb, (a + 1) * nb), off), colour: lyColour(a), label: lyName(R, a), width: 1.4 });
+    const m = R.match && R.match[a];
+    if (m && m.best >= 0) {
+      const ref = LY.refs[m.best];
+      if (!R.refPrep.has(ref.id)) R.refPrep.set(ref.id, prepRef(ref, R.prep));
+      series.push({ x: R.prep.nu, y: norm(R.refPrep.get(ref.id).y.map(v => (Number.isFinite(v) ? v : NaN)), off), colour: lyColour(a), width: 1, dash: [4, 3] });
+    }
+  }
+  lySpec.setData({ series, xl: "Raman shift (cm⁻¹)", xu: "cm⁻¹", yl: "Spectrum (scaled, offset)", legend: true });
+  info.textContent = R.comps.mode === "refs" ? "· the references unmixed against" : `· ${k} found in the spectra${R.match ? ", the matched references dashed" : ""}`;
+}
+
+// --------------------------------------------------------------------------
+// the side panel
+// --------------------------------------------------------------------------
+function lyFormFields() {
+  const s = LY.settings, line = !S.ds || lyIsLine();
+  $("#ly-kind").value = s.kind; $("#ly-depth").value = s.depthScale; $("#ly-axis").value = s.axis;
+  $("#ly-lo").value = s.range[0]; $("#ly-hi").value = s.range[1]; $("#ly-base").value = String(s.baseline); $("#ly-k").value = String(s.k);
+  $("#ly-minpts").value = s.minPts; $("#ly-tilt").checked = !!s.tilt; $("#ly-userefs").checked = !!s.useRefs;
+  $("#ly-depth-row").classList.toggle("hidden", s.kind !== "depth");
+  $("#ly-axis").disabled = line; $("#ly-tilt").disabled = line;
+}
+// the tables are rebuilt only here (on showing the tab, a run, a reset, a theme change, a new
+// reference), never on an edit in them, so a click into the next field is not lost
+function lyForm() { lyFormFields(); lyMatTable(); lyRefList(); lyLimitsTable(); }
+function lyMatTable() {
+  const R = lyCur(), t = $("#ly-mat-table"), note = $("#ly-mat-note");
+  if (!R) { t.replaceChildren(); note.textContent = "Load a reference spectrum per material (text, two columns: Raman shift and intensity), or pin a point and use its spectrum. The materials found then take the name of the reference each matches best."; return; }
+  const k = R.comps.k, counts = new Float64Array(k + 1);
+  let tot = 0;
+  for (const v of R.L.label) if (!Number.isNaN(v)) { tot++; counts[v < 0 ? k : v]++; }
+  const matched = a => {
+    const m = R.match && R.match[a];
+    if (!m) return "–";
+    const top = m.hqi.reduce((b, h, r) => (Number.isFinite(h) && (b < 0 || h > m.hqi[b]) ? r : b), -1);
+    return top < 0 ? "–" : `${LY.refs[top].name} (${fmt(m.hqi[top], 3)})${m.best < 0 ? ", below the match" : ""}`;
+  };
+  t.replaceChildren(el("tr", {}, ...["", "Name", R.refNames ? "Unmixed as" : "Best reference (HQI)", "Points"].map((h, i) => el("th", { class: i && i < 2 ? "l" : "" }, h))),
+    ...Array.from({ length: k }, (_, a) => {
+      const inp = el("input", { class: "ly-in", title: "Type a name; clear it for the default" });
+      inp.value = lyName(R, a);
+      inp.onchange = () => { R.userNames[a] = inp.value.trim(); inp.value = lyName(R, a); lyRender(); lyLimitsTable(); };
+      return el("tr", {}, el("td", {}, el("span", { class: "sw", style: `background:${lyColour(a)}` })), el("td", { class: "l" }, inp),
+        el("td", {}, R.refNames ? "a reference" : matched(a)), el("td", {}, tot ? dlcPct(counts[a] / tot) : "–"));
+    }),
+    el("tr", {}, el("td", {}, el("span", { class: "sw", style: `background:${T.muted}` })), el("td", { class: "l muted" }, "No material"), el("td", {}, "below half of every plateau"), el("td", {}, tot ? dlcPct(counts[k] / tot) : "–")));
+  const st = R.comps.steps, last = st && st[st.length - 1];
+  note.textContent = (R.comps.mode === "refs" ? `Every spectrum unmixed against the ${k} references by non-negative least squares; a material they lack shows as a high residual (Checks). `
+    : `${R.settings.k ? `Set to ${k}` : `${k} found`} by successive projections${last ? `: with ${k}, ${fmt(last.over)} of ${fmt(R.prep.n)} spectra have more than ${R.settings.stop} × their noise left` : ""}; refined by non-negative matrix factorisation. `) +
+    (R.refNames ? "" : `A material takes the name of the reference it matches best at HQI ${LY.settings.minHQI} or above (100 r² over the range), unless you type one. `) +
+    "References stay until the page is closed. Points: the share of measured points where the material has the largest amount.";
+}
+function lyRefList() {
+  $("#ly-refs").replaceChildren(...LY.refs.map((r, ix) => {
+    const inp = el("input", { class: "ly-in", title: "The reference's name" });
+    inp.value = r.name;
+    inp.onchange = () => { r.name = inp.value.trim() || r.name; inp.value = r.name; lyRefsChanged(false); };
+    return el("div", { class: "ly-ref" }, inp, el("button", { class: "icon", title: "Remove this reference", onclick: () => { LY.refs.splice(ix, 1); lyRefsChanged(true); } }, "✕"));
+  }));
+}
+function lyRefsChanged(rebuild) {
+  for (const R of LY.res.values()) lyMatch(R);
+  if (rebuild) lyRefList();
+  lyMatTable(); lyLimitsTable(); lyRender();
+}
+// a reference: one spectrum, two columns (Raman shift, intensity); lines of words before the numbers skipped
+function lyParseRef(text, name) {
+  const xs = [], ys = [];
+  for (const ln of text.split(/\r?\n/)) {
+    const t = ln.trim();
+    if (!t || t.startsWith("#")) continue;
+    const v = t.split(/[\t,; ]+/).map(Number);
+    if (!v.every(Number.isFinite)) { if (xs.length) throw new Error(`${name}: words after the numbers start`); continue; }
+    if (v.length !== 2) throw new Error(`${name}: a reference is one spectrum in two columns (Raman shift, intensity), not ${v.length}`);
+    xs.push(v[0]); ys.push(v[1]);
+  }
+  if (xs.length < 20) throw new Error(`${name}: fewer than 20 points`);
+  return { id: ++lyRefSeq, name, wn: Float64Array.from(xs), y: Float64Array.from(ys) };
+}
+$("#ly-ref-load").onclick = () => $("#ly-ref-file").click();
+$("#ly-ref-file").onchange = async e => {
+  const files = [...e.target.files];
+  e.target.value = "";
+  for (const f of files) { try { LY.refs.push(lyParseRef(await f.text(), f.name.replace(/\.[^.]+$/, ""))); } catch (err) { toast(err.message, "error", 8000); } }
+  lyRefsChanged(true);
+};
+$("#ly-ref-pin").onclick = () => {
+  const p = LY.pinned;
+  if (p == null || !S.cube || !lyCur() || lyCur().prep.rowOf[p] < 0) { toast("Pin a measured point first: click it on a map or the profile.", "error"); return; }
+  LY.refs.push({ id: ++lyRefSeq, name: `${S.ds.name} point ${p + 1}`, wn: Float64Array.from(S.wn), y: Float64Array.from(S.cube.subarray(p * S.k, (p + 1) * S.k)) });
+  lyRefsChanged(true);
+};
+// a minimum and a maximum per layer of the stack, each with its tick; typing a value ticks it
+function lyLimitsTable() {
+  const R = lyCur(), t = $("#ly-limits");
+  if (!R || !R.L.layers.length) { t.replaceChildren(el("tr", {}, el("td", { class: "l muted" }, "Find the layers first: every layer of the stack then takes a minimum and a maximum thickness."))); return; }
+  t.replaceChildren(el("tr", {}, el("th", { class: "l" }, "Layer"), el("th", {}, "Minimum (µm)"), el("th", {}, "Maximum (µm)")),
+    ...R.L.layers.map((Ly, i) => {
+      const L = LY.limits[i] || (LY.limits[i] = { lo: null, hi: null, use_lo: false, use_hi: false });
+      const cell = side => {
+        const use = `use_${side}`, box = el("input", { type: "checkbox", title: `Test every line's thickness against this ${side === "lo" ? "minimum" : "maximum"}` }), num = el("input", { type: "number", step: "any", min: "0" });
+        box.checked = !!L[use]; num.value = Number.isFinite(L[side]) ? L[side] : "";
+        box.onchange = () => { L[use] = box.checked && Number.isFinite(L[side]); box.checked = L[use]; lyLimitsChanged(); };
+        num.onchange = () => { const v = parseFloat(num.value); L[side] = Number.isFinite(v) ? v : null; L[use] = Number.isFinite(v); box.checked = L[use]; lyLimitsChanged(); };
+        return el("td", {}, el("div", { class: "lim" }, box, num));
+      };
+      return el("tr", {}, el("td", { class: "l" }, el("span", { class: "sw", style: `background:${lyColour(Ly.mat)}` }), `${i + 1} · ${lyName(R, Ly.mat)}`), cell("lo"), cell("hi"));
+    }));
+}
+function lyLimitsChanged() { lySave(); lyRenderTable(); lyRenderLimits(); }
+// the decomposition's settings wait for Find layers; the rest re-read the layers at once
+const lyOn = (id, set, relayer) => $(id).addEventListener("change", e => {
+  set(e.target);
+  lyFormFields(); lySave();
+  if (relayer) { const R = lyCur(); if (R) lyLayers(R); lyMatTable(); lyLimitsTable(); }
+  lyRender();
+});
+lyOn("#ly-kind", t => { LY.settings.kind = t.value; }, true);
+lyOn("#ly-depth", t => { const v = parseFloat(t.value); if (v > 0) LY.settings.depthScale = v; }, true);
+lyOn("#ly-axis", t => { LY.settings.axis = t.value; }, true);
+lyOn("#ly-minpts", t => { const v = Math.round(parseFloat(t.value)); if (v >= 1) LY.settings.minPts = v; }, true);
+lyOn("#ly-tilt", t => { LY.settings.tilt = t.checked; }, true);
+lyOn("#ly-lo", t => { const v = parseFloat(t.value); if (Number.isFinite(v)) LY.settings.range = [v, LY.settings.range[1]]; }, false);
+lyOn("#ly-hi", t => { const v = parseFloat(t.value); if (Number.isFinite(v)) LY.settings.range = [LY.settings.range[0], v]; }, false);
+lyOn("#ly-base", t => { LY.settings.baseline = +t.value; }, false);
+lyOn("#ly-k", t => { LY.settings.k = +t.value; }, false);
+lyOn("#ly-userefs", t => { LY.settings.useRefs = t.checked; }, false);
+$("#ly-run").onclick = $("#ly-run2").onclick = () => lyRun();
+$("#ly-reset").onclick = () => {
+  LY.settings = structuredClone(LAYER_DEFAULTS); lySave();
+  const R = lyCur(); if (R) lyLayers(R);
+  lyForm(); lyRender();
+};
+
+function lyShow() {
+  lyForm();
+  lyRender();
+  if (lyCanRun() && !lyCur() && !LY.running) lyRun();          // one click: opening the tab finds the open file's layers
+  setTimeout(() => { lyMaps.forEach(m => m.render()); lyProf.render(); lyPlot.render(); lySpec.render(); }, 0);
+}
+
+function lyRender() {
+  const R = lyCur(), empty = $("#ly-empty");
+  $("#tab-layers").classList.toggle("ly-line", !!S.ds && lyIsLine());
+  const why = !S.ds ? "Open a line scan or a map across a cut edge, or a confocal depth profile, first."
+    : !S.cube ? "This file holds fitted values, not spectra: open the map itself (.l6m) or a text export of the spectra."
+    : S.points ? "ParticleFinder particles have no order across a film: open a line scan or a map across a cut edge, or a depth profile."
+    : S.nx * S.ny < 3 ? "One spectrum has no layers: open a line scan or a map across the layers."
+    : !R ? (LY.running ? "Finding the materials…"
+      : "Every spectrum is unmixed into its materials (found in the spectra, or your reference spectra), and every line across the layers is split where the material changes: a table of the layers (number, from, to, thickness, material, spectrum, comment), with the stack's tilt, the width of its steps and thickness limits.")
+    : null;
+  empty.classList.toggle("hidden", !why);
+  empty.classList.toggle("can-fit", lyCanRun() && !R && !LY.running);
+  if (why) $("#ly-empty-p").textContent = why;
+  if (R && R.lkey !== lyLKey()) lyLayers(R);
+  if (R && !LY.running) {
+    lyStatusText(`${R.comps.k} material${R.comps.k > 1 ? "s" : ""} in ${fmt(R.prep.n)} spectra, found in ${R.seconds.toFixed(1)} s over ${R.prep.range[0].toFixed(0)}–${R.prep.range[1].toFixed(0)} cm⁻¹` +
+      `${R.prep.spikes ? `; ${fmt(R.prep.spikes)} cosmic ray${R.prep.spikes > 1 ? "s" : ""} taken out` : ""}.` + (R.key !== lyKey(LY.settings) ? " The settings have changed since: Find layers to apply them." : ""));
+  } else if (!R && !LY.running) { lyStatusText(""); $("#ly-prog > div").style.width = "0%"; }
+  lyMaps.forEach((_, i) => lyRenderMap(i));
+  lyRenderProfile(); lyRenderCursor(); lyRenderSpec(); lyRenderTable(); lyRenderLimits(); lyRenderChecks();
+}
+
+// the layer table: as LabSpec's Layers app gives it, with the spread over the lines of a map
+function lyRenderTable() {
+  const R = lyCur(), t = $("#ly-table"), box = $("#ly-verdict"), note = $("#ly-table-note");
+  if (!R) { box.className = "verdict"; box.textContent = ""; t.replaceChildren(); note.textContent = ""; return; }
+  const L = R.L, line = lyIsLine(), Q = thicknessTest(L, LY.limits), s = LY.settings;
+  if (!L.layers.length) {
+    box.className = "verdict warn";
+    box.replaceChildren(el("b", {}, "No layers found"), el("div", {}, "No point reaches half of any material's plateau along the lines. Check the range and the background, or set the number of materials."));
+    t.replaceChildren(); note.textContent = ""; return;
+  }
+  const n = L.layers.length, open = L.layers.some(x => x.open);
+  box.className = `verdict${!line && L.nCons < 0.5 * L.nLines ? " warn" : ""}`;
+  box.replaceChildren(el("b", {}, `${n} layer${n > 1 ? "s" : ""}, ${open ? "at least " : ""}${fmt(L.total.mean, 4)} µm in all`),
+    el("div", {}, line ? `Along ${fmt(L.m)} points ${fmt(L.step, 3)} µm apart.`
+      : `${fmt(L.nCons)} of ${fmt(L.nLines)} lines across the layers share this stack; thicknesses are their mean ± SD${L.tilt && s.tilt ? `, the layers' tilt of ${fmt(L.tilt.deg, 2)}° taken out` : ""}.`));
+  const mark = { good: "✓ pass", warn: "! check", bad: "✕ fail" };
+  t.replaceChildren(el("tr", {}, ...["#", "From", "To", line ? "Thickness" : "Thickness", "Material", "Limits", "Comment"].map((h, i) => el("th", { class: i === 4 || i === 6 ? "l" : "" }, h))),
+    ...L.layers.map((Ly, i) => {
+      const c = el("input", { class: "ly-in", placeholder: "comment", title: "A note on this layer, e.g. its function; it goes into the CSV and the report" });
+      c.value = R.comments[i] || "";
+      c.onchange = () => { R.comments[i] = c.value; };
+      const q = Q.rows[i], th = `${Ly.open ? "≥ " : ""}${lyUm(Ly.t.mean)}${line || !(Ly.t.n > 1) ? "" : ` ± ${lyUm(Ly.t.sd)}`}${Ly.thin ? " ⚠" : ""}`;
+      const tr = el("tr", { "data-i": i, class: LY.sel === i ? "sel" : "", title: Ly.thin ? "Thinner than the resolution: it never reaches its pure level and reads too thick" : "Click for this layer's mean spectrum" },
+        el("td", {}, String(i + 1)), el("td", {}, lyUm(Ly.from)), el("td", {}, lyUm(Ly.to)), el("td", {}, th),
+        el("td", { class: "l" }, el("span", { class: "sw", style: `background:${lyColour(Ly.mat)}` }), lyName(R, Ly.mat)),
+        el("td", { class: q && q.level ? q.level : "" }, q ? (q.level ? mark[q.level] : "untested") : "–"), el("td", { class: "l" }, c));
+      tr.onclick = e => { if (e.target.tagName === "INPUT") return; LY.sel = LY.sel === i ? null : i; LY.hover = LY.pinned = null; lyMaps.forEach(m => m.setCursor(null, null)); lyRenderTable(); lyRenderCursor(); lyRenderProfile(); };
+      return tr;
+    }),
+    el("tr", {}, el("td", {}, ""), el("td", { colspan: 2, class: "l muted" }, "Total"), el("td", {}, `${open ? "≥ " : ""}${lyUm(L.total.mean)}${line || !(L.total.n > 1) ? "" : ` ± ${lyUm(L.total.sd)}`}`), el("td", { colspan: 3 }, "")));
+  note.textContent = `In µm along the ${s.kind === "depth" ? `depth (the stage's travel × ${fmt(s.depthScale, 3)})` : "scan"}. From and To: ${line ? "" : "the median over the lines of "}the boundaries, where the two materials' scaled amounts cross (an outer edge where the layer's amount falls to one half). ` +
+    `≥: the layer runs past the scan's edge, so its thickness is a lower bound. ⚠: thinner than about 1.65 × the steps' width (${fmt(L.resolution, 3)} µm), so it never reaches its pure level and reads too thick.`;
+}
+function lyRenderLimits() {
+  const R = lyCur(), box = $("#ly-lim-verdict"), note = $("#ly-lim-note");
+  if (!R) { box.className = "verdict"; box.textContent = ""; note.textContent = ""; return; }
+  const Q = thicknessTest(R.L, LY.limits), line = lyIsLine();
+  if (!Q.set) {
+    box.className = "verdict";
+    box.replaceChildren(el("b", {}, "No limits set"), el("div", {}, `Enter a minimum, a maximum or both for any layer: ${line ? "its thickness" : "its thickness on every line"} is then tested.`));
+    note.textContent = ""; return;
+  }
+  box.className = `verdict ${Q.level || "warn"}`;
+  const head = Q.level === "good" ? "Pass: every layer tested is inside its limits" : Q.level === "warn" ? "Mostly inside the limits" : Q.level === "bad" ? "Fail: a layer is outside its limits" : "Nothing could be tested";
+  const rows = Q.rows.map((q, i) => (q ? `Layer ${i + 1}: ${q.n ? (line ? (q.pass ? "inside" : "outside") : `${fmt(q.pass)} of ${fmt(q.n)} lines inside (${dlcPct(q.ci[0])}–${dlcPct(q.ci[1])})`) : "not tested"}${q.undet ? `; ${fmt(q.undet)} undetermined (past the scan's edge)` : ""}.` : null)).filter(Boolean);
+  box.replaceChildren(el("b", {}, head), ...rows.map(r => el("div", {}, r)));
+  note.textContent = `${line ? "" : "Pass when every line is inside, check when at least 95 % are (95 % CI by Wilson), fail below that. "}A layer that runs past the scan's edge has a lower bound for a thickness: it passes a minimum when that bound is above it, and cannot be tested against a maximum.`;
+}
+// what to know before trusting the table, as data (the report takes them too)
+function lyChecks(R) {
+  const L = R.L, s = LY.settings, line = lyIsLine(), out = [], add = (text, warn = false) => out.push({ text, warn });
+  if (R.comps.mode === "auto") {
+    const st = R.comps.steps, last = st[st.length - 1], prev = st[st.length - 2], need = Math.max(2, Math.ceil(0.002 * R.prep.n));
+    add(R.settings.k ? `${R.comps.k} materials, as set: with them, ${fmt(last.over)} of ${fmt(R.prep.n)} spectra have more than ${R.settings.stop} × their noise left${last.over >= need ? ": more materials are there" : ""}.`
+      : `${R.comps.k} material${R.comps.k > 1 ? "s" : ""} found: with ${R.comps.k}, ${fmt(last.over)} of ${fmt(R.prep.n)} spectra have more than ${R.settings.stop} × their noise left${prev ? `, against ${fmt(prev.over)} with ${prev.k}` : ""}.`,
+    R.settings.k > 0 && last.over >= need);
+  }
+  const rs = Float64Array.from(R.comps.resid).sort(), med = quantile(rs, 0.5), hi = rs.filter(v => v > 3).length / rs.length;
+  add(hi > 0.02 ? `${dlcPct(hi)} of the spectra have more than 3 × their noise left (median ${fmt(med, 3)} ×): ${R.comps.mode === "refs" ? "a material the references lack" : "a material too rare to stand out"}, or a background the polynomial does not follow. The Residual map shows where.`
+    : `The materials explain the spectra to their noise: the median residual is ${fmt(med, 3)} × the noise.`, hi > 0.02);
+  if (!line) {
+    const other = L.axis === "x" ? "y" : "x";
+    add(L.share ? `The layers lie across ${L.axis.toUpperCase()}: positions along ${L.axis.toUpperCase()} explain ${dlcPct(L.share[L.axis])} of the variation in the materials' amounts, along ${other.toUpperCase()} ${dlcPct(L.share[other])}.`
+      : `The lines run along ${L.axis.toUpperCase()}, as set.`, !!L.share && L.share[L.axis] < 0.3);
+    if (L.nLines > L.nCons && L.others.length) {
+      const o = L.others[0];
+      add(`${fmt(L.nLines - L.nCons)} of ${fmt(L.nLines)} lines show another stack (most often ${o.mats.map(a => lyName(R, a)).join(", ")}, on ${fmt(o.n)}): a missing or broken layer, a defect, debris or the end of the cut. They are left out of the thicknesses; the Layer number map shows the lines that count.`, L.nCons < 0.8 * L.nLines);
+    }
+    if (L.empty) add(`${fmt(L.empty)} line${L.empty > 1 ? "s have" : " has"} no layer at all (nothing above half a plateau).`);
+    add(L.tilt ? `The boundaries drift ${fmt(L.tilt.slope, 3)} µm per µm along the layers: they are tilted ${fmt(L.tilt.deg, 2)}° in the map, ${s.tilt ? `so every thickness is multiplied by cos ${fmt(L.tilt.deg, 2)}° = ${fmt(L.tilt.cos, 4)}` : "not taken out (ticked off above)"}. About straight lines they scatter by ${fmt(L.tilt.scatter, 3)} µm${L.tilt.scatter > L.step ? ", more than a step: wavy or rough interfaces" : ""}. A cut that is not square to the film (tilted out of the map's plane) cannot be seen here and thickens every layer.`
+      : "Too few lines share the stack to measure the layers' tilt.", !!L.tilt && Math.abs(L.tilt.deg) > 20);
+  } else add("One line: the thicknesses hold if the line crosses the layers at right angles (a tilt of θ thickens every layer by 1/cos θ); a map across the edge measures the tilt and takes it out.");
+  add(Number.isFinite(L.resolution) ? `The steps between layers are ${fmt(L.resolution, 3)} µm wide (16 to 84 %: the laser spot's blur${s.kind === "depth" ? " in depth" : ""} and any roughness), with points ${fmt(L.step, 3)} µm apart. A layer thinner than about ${fmt(1.65 * L.resolution, 3)} µm never reaches its pure level and reads too thick (⚠ in the table).`
+    : "The steps' width could not be measured: no step has a thick enough layer on both sides.", L.layers.some(x => x.thin));
+  const open = L.layers.filter(x => x.open);
+  if (open.length) add(`Layer${open.length > 1 ? "s" : ""} ${open.map(x => x.i + 1).join(" and ")} run${open.length > 1 ? "" : "s"} past the scan's edge, so ${open.length > 1 ? "their thicknesses are lower bounds" : "its thickness is a lower bound"} (≥). Extend the scan beyond the sample on both sides to measure every layer.`, true);
+  const gaps = L.layers.filter(x => x.mat < 0);
+  if (gaps.length) add(`Layer ${gaps.map(x => x.i + 1).join(", ")}: no material above half its plateau inside the stack: a gap (delamination, a void) or a material too weak or too thin to show.`, true);
+  if (s.kind === "depth") add(`Depths are the stage's travel × ${fmt(s.depthScale, 3)}. Focused into a film through its surface with a dry objective, the focus goes deeper than the stage moves (by about the film's refractive index at low NA, more at high NA) and the depth resolution worsens with depth; measure the scale on a film of known thickness.`, s.depthScale === 1);
+  return out;
+}
+function lyRenderChecks() {
+  const R = lyCur();
+  $("#ly-checks").replaceChildren(...(R ? lyChecks(R) : []).map(c => el("li", { class: c.warn ? "warn" : "" }, c.text)));
+}
+
+// --------------------------------------------------------------------------
+// export and report
+// --------------------------------------------------------------------------
+const lyCell = v => (typeof v === "number" ? (Number.isFinite(v) ? String(v) : "") : v == null ? "" : /[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v);
+$("#ly-csv").onclick = () => {
+  const R = lyCur(); if (!R) { toast("Find the layers first.", "error"); return; }
+  const L = R.L, Q = thicknessTest(L, LY.limits);
+  const rows = [["Layer", "Material", "From (µm)", "To (µm)", "Thickness (µm)", "SD (µm)", "Min (µm)", "Max (µm)", "Lines", "Past the scan's edge", "Step width at from (µm)", "Step width at to (µm)",
+    "Thinner than the resolution", "Minimum (µm)", "Maximum (µm)", "Share inside the limits", "Comment"],
+    ...L.layers.map((Ly, i) => { const q = Q.rows[i]; return [i + 1, lyName(R, Ly.mat), Ly.from, Ly.to, Ly.t.mean, Ly.t.sd, Ly.t.min, Ly.t.max, Ly.t.n, Ly.open ? "yes" : "no", Ly.wFrom, Ly.wTo,
+      Ly.thin ? "yes" : "no", q ? q.lo : null, q ? q.hi : null, q && q.n ? q.share : null, R.comments[i] || ""]; }),
+    ["Total", "", null, null, L.total.mean, L.total.sd, L.total.min, L.total.max, L.total.n, "", null, null, "", null, null, null, ""]];
+  download(`${S.ds.name}_layers.csv`, rows.map(r => r.map(lyCell).join(",")).join("\n") + "\n", "text/csv");
+};
+$("#ly-csv-lines").onclick = () => {
+  const R = lyCur(); if (!R || !R.L.layers.length) { toast("Find the layers first.", "error"); return; }
+  const L = R.L, across = L.axis === "x" ? "Y" : "X";
+  const rows = [[lyIsLine() ? "Line" : `Line at ${across} (µm)`, ...L.layers.map((Ly, i) => `Layer ${i + 1} ${lyName(R, Ly.mat)} (µm)`), "Total (µm)"],
+    ...Array.from(L.lineT, (t, j) => [t, ...L.layers.map(Ly => Ly.vals[j]), L.layers.reduce((a, Ly) => a + Ly.vals[j], 0)])];
+  download(`${S.ds.name}_layers_by_line.csv`, rows.map(r => r.map(lyCell).join(",")).join("\n") + "\n", "text/csv");
+};
+$("#ly-png").onclick = () => (lyIsLine() ? toast("A line scan has no maps: its profile is in the report.", "error") : lyMaps.forEach((m, i) => setTimeout(() => m.save(), i * 250)));
+$("#ly-report").onclick = () => { $("#rp-kind").value = "layers"; rpTitle(); switchTab("report"); };
+
+// the tab's maps and plots drawn off-screen for the report
+function lyFigures(R) {
+  const figs = { maps: [] };
+  if (!lyIsLine()) lyMaps.forEach((src, i) => {
+    const host = offscreen(520, 440), mv = new MapView(host, {}), M = lyMapData(LY.specs[i], R);
+    Object.assign(mv, { cmap: src.cmap, scale: src.scale, manual: src.manual, smooth: src.smooth, filter: src.filter });
+    mv.setGeometry({ nx: S.nx, ny: S.ny, x: S.x, y: S.y, points: null });
+    mv.setTitle(`Layers : <u>${escHTML(M.label)}</u>`);
+    mv.categories = M.categories || null;
+    mv.setData(M.values, { valid: null, label: M.label, unit: M.unit });
+    mv.setCursor(null, LY.pinned);
+    figs.maps.push({ url: onDark(mv.canvas), title: M.label });
+    host.remove();
+  });
+  for (const [key, src, h] of [["profile", lyProf, 320], ["spectra", lySpec, 360]]) {
+    const host = offscreen(760, h), pl = new LinesPlot(host);
+    pl.setData(src.d ? { ...src.d, cursor: null } : null);
+    figs[key] = src.d ? onDark(pl.canvas) : null;
+    host.remove();
+  }
+  return figs;
+}
+function makeLayersReport() {
+  const R = lyCur();
+  if (!R) { $("#report-paper").replaceChildren(el("p", {}, S.ds ? "Find the layers first: open Layers, then Find layers." : "Open a line scan, a map across a cut edge or a depth profile, and find its layers on the Layers tab first.")); return; }
+  if (R.lkey !== lyLKey()) lyLayers(R);
+  lyRenderProfile(); lyRenderSpec();
+  buildLayersReport($("#report-paper"), { title: $("#rp-title").value, ds: S.ds, R, L: R.L, line: lyIsLine(), name: a => lyName(R, a), Q: thicknessTest(R.L, LY.limits),
+    settings: LY.settings, comments: R.comments, checks: lyChecks(R), figs: lyFigures(R), refs: LY.refs.map(r => r.name) });
+}
 
 // =========================================================================
 // report
@@ -4782,6 +5288,7 @@ async function reportAnalysis() {
 let reportRun = 0;
 async function makeReport() {
   if ($("#rp-kind").value === "dlc") { ++reportRun; makeDlcReport(); return; }
+  if ($("#rp-kind").value === "layers") { ++reportRun; makeLayersReport(); return; }
   if (!S.fit) { $("#report-paper").replaceChildren(el("p", {}, "Open and fit a map first.")); return; }
   const run = ++reportRun;
   $("#report-paper").replaceChildren(el("p", { class: "note" }, "Gathering the analysis…"));
@@ -4820,6 +5327,9 @@ function repaintAll() {
   dlcForm();                                      // band swatches
   for (const m of dlcMaps) m._dirty = true;
   dlcRender();                                    // status colours follow the theme
+  lyForm();                                       // material swatches
+  for (const m of lyMaps) m._dirty = true;
+  lyRender();
 }
 themeButton();
 

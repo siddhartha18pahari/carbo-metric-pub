@@ -107,7 +107,7 @@ async function upload(files) {
     catch (e) {
       // a ParticleFinder spectra list: positions come from the project dropped with it
       if (!e.pointList) throw e;
-      if (!projects.length) throw new Error(`${e.message} (drop the .l6m together with its .l6pf, or the .l6pf alone)`);
+      if (!projects.length) throw new Error(`${e.message}. For a ParticleFinder list, drop the .l6m together with its .l6pf, or the .l6pf alone.`);
       const pf = readL6pf(await projects[0].arrayBuffer(), projects[0].name);
       map = placeSpectraList(e, pf, main.name); pfVideo = pf.video;
     }

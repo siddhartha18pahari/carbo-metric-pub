@@ -37,6 +37,7 @@
     <button data-tab="splat">Splat&nbsp;3D</button>
     <button data-tab="particles">Particles</button>
     <button data-tab="dlc" title="Diamond-like carbon coatings: D and G fit, hydrogen content, quality test, homogeneity">DLC</button>
+    <button data-tab="layers" title="Multilayer films: the materials, order and thickness of each layer, across a cut edge or in depth">Layers</button>
     <button data-tab="report">Report</button>
   </nav>
   <div class="status" id="status"><span class="dot"></span><span id="status-text">Ready</span></div>
@@ -584,10 +585,98 @@
     </aside>
   </section>
 
+  <!-- ======================= Layers ======================= -->
+  <section id="tab-layers" class="tab">
+    <div class="ly-main">
+      <div class="ly-maps">
+        <div class="panel map" id="ly-map-0"></div>
+        <div class="panel map" id="ly-map-1"></div>
+      </div>
+      <div class="panel col">
+        <div class="panel-h">Across the layers <span class="muted" id="ly-prof-info"></span>
+          <span class="grow"></span><span class="muted small hint" id="ly-prof-hint">amounts scaled to the pure material (1)</span></div>
+        <div class="plot" id="ly-prof"></div>
+      </div>
+      <div class="ly-lower">
+        <div class="panel col">
+          <div class="panel-h">Spectrum <span class="muted" id="ly-cursor-info"></span>
+            <span class="grow"></span><span class="muted small hint">drag to zoom · click to pin</span></div>
+          <div class="plot" id="ly-cursor"></div>
+          <div class="cursor-table" id="ly-cursor-table"></div>
+        </div>
+        <div class="panel col">
+          <div class="panel-h">Materials <span class="muted small" id="ly-spec-info"></span></div>
+          <div class="plot" id="ly-spec"></div>
+        </div>
+      </div>
+      <div class="dlc-empty hidden" id="ly-empty">
+        <div><h2>Multilayer analysis</h2><p id="ly-empty-p"></p><button class="primary" id="ly-run2">Find layers</button></div>
+      </div>
+    </div>
+    <aside class="side">
+      <div class="sec" data-sec="ly-set">
+        <div class="sec-h toggle">Find layers <span class="muted small">the materials, then their layers</span></div>
+        <div class="sec-b">
+          <div class="frow"><label>Measurement</label><select id="ly-kind"><option value="section">Across a cut edge (line or map)</option><option value="depth">Confocal depth profile</option></select></div>
+          <div class="frow" id="ly-depth-row"><label>Depth scale</label><div class="kx"><input type="number" id="ly-depth" step="any" min="0.1" title="True depth over the stage's travel: about the film's refractive index for a dry objective at low NA, more at high NA; best measured on a film of known thickness"><span>× the stage's travel</span></div></div>
+          <div class="frow" id="ly-axis-row"><label>Across the layers</label><select id="ly-axis"><option value="auto">Found from the map</option><option value="x">Along X</option><option value="y">Along Y</option></select></div>
+          <div class="frow"><label>Range (cm⁻¹)</label><div class="row2"><input type="number" id="ly-lo" step="any"><input type="number" id="ly-hi" step="any"></div></div>
+          <div class="frow"><label>Background</label><select id="ly-base"><option value="0">None</option><option value="1">Straight line</option><option value="2">Polynomial, degree 2</option><option value="3">Polynomial, degree 3</option></select></div>
+          <div class="frow"><label>Materials</label><select id="ly-k"><option value="0">Found from the spectra</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option><option value="6">6</option><option value="7">7</option><option value="8">8</option></select></div>
+          <div class="frow"><label>Thinnest layer</label><div class="kx"><input type="number" id="ly-minpts" min="1" step="1" title="A run of fewer points inside the stack goes to its neighbour: noise at a boundary, not a layer"><span>points along a line</span></div></div>
+          <label class="chk" id="ly-tilt-row"><input type="checkbox" id="ly-tilt"> Take the layers' tilt in the map out of their thickness</label>
+          <div class="btnrow"><button class="primary" id="ly-run">Find layers</button><button id="ly-reset" title="The default settings (the limits and references stay)">Defaults</button></div>
+          <div class="progress" id="ly-prog"><div></div></div>
+          <div class="muted small" id="ly-status"></div>
+        </div>
+      </div>
+      <div class="sec" data-sec="ly-mat">
+        <div class="sec-h toggle">Materials <span class="muted small">name them, or match references</span></div>
+        <div class="sec-b">
+          <div class="pf-scroll"><table class="stats" id="ly-mat-table"></table></div>
+          <div class="btnrow"><button id="ly-ref-load">Load reference spectra…</button><button id="ly-ref-pin" title="The pinned point's spectrum as a reference">Pinned point as reference</button></div>
+          <input type="file" id="ly-ref-file" multiple accept=".txt,.csv,.tsv,.dat,.asc" class="hidden">
+          <div id="ly-refs"></div>
+          <label class="chk"><input type="checkbox" id="ly-userefs"> Unmix against the references instead (two or more)</label>
+          <div class="muted small" id="ly-mat-note"></div>
+        </div>
+      </div>
+      <div class="sec" data-sec="ly-tab">
+        <div class="sec-h toggle">Layer table <span class="muted small">click a row for its spectrum</span></div>
+        <div class="sec-b">
+          <div class="verdict" id="ly-verdict"></div>
+          <div class="pf-scroll"><table class="stats ly-table" id="ly-table"></table></div>
+          <div class="muted small" id="ly-table-note"></div>
+        </div>
+      </div>
+      <div class="sec" data-sec="ly-lim">
+        <div class="sec-h toggle">Thickness limits <span class="muted small">by layer number</span></div>
+        <div class="sec-b">
+          <table class="peaks dlc-limits" id="ly-limits"></table>
+          <div class="verdict" id="ly-lim-verdict"></div>
+          <div class="muted small" id="ly-lim-note"></div>
+        </div>
+      </div>
+      <div class="sec" data-sec="ly-chk">
+        <div class="sec-h toggle">Checks</div>
+        <div class="sec-b"><ul class="ly-checks" id="ly-checks"></ul></div>
+      </div>
+      <div class="sec" data-sec="ly-exp">
+        <div class="sec-h toggle">Export and report</div>
+        <div class="sec-b btnrow">
+          <button id="ly-csv">Layer table (CSV)</button>
+          <button id="ly-csv-lines" title="Every layer's thickness on every line that shares the stack">Per line (CSV)</button>
+          <button id="ly-png">Save maps</button>
+          <button class="primary" id="ly-report">Layers report</button>
+        </div>
+      </div>
+    </aside>
+  </section>
+
   <!-- ======================= Report ======================= -->
   <section id="tab-report" class="tab">
     <div class="report-bar">
-      <select id="rp-kind" title="Which analysis the report covers"><option value="carbon">Carbon fit report</option><option value="dlc">DLC coating report</option></select>
+      <select id="rp-kind" title="Which analysis the report covers"><option value="carbon">Carbon fit report</option><option value="dlc">DLC coating report</option><option value="layers">Layers report</option></select>
       <input id="rp-title" value="Raman carbon analysis">
       <button id="rp-refresh">Refresh</button>
       <button class="primary" id="rp-print">Print / Save as PDF</button>

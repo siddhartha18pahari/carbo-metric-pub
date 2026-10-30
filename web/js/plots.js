@@ -197,6 +197,77 @@ export class HistogramPlot extends Base {
 }
 
 // ---------------------------------------------------------------------------
+// Lines over one x axis, with shaded spans and marks: the Layers tab's profile
+// across the layers and its materials' spectra. d: { series: [{ x, y, colour,
+// width, dash, label }], spans: [{ from, to, colour, label }], vlines, hlines,
+// cursor, xl, xu, yl, xr, yr, legend }. onHover / onPick get the x under the mouse.
+export class LinesPlot extends Base {
+  constructor(host, { onHover = null, onPick = null } = {}) {
+    super(host);
+    this.onHover = onHover; this.onPick = onPick;
+    const inside = e => this.F && e.offsetX >= this.F.x && e.offsetX <= this.F.x + this.F.w;
+    const xAt = e => this.xr[0] + (e.offsetX - this.F.x) / this.F.w * (this.xr[1] - this.xr[0]);
+    this.canvas.addEventListener("mousemove", e => { this.mouse = e.offsetX; this.render(); if (this.onHover && this.xr) this.onHover(inside(e) ? xAt(e) : null); });
+    this.canvas.addEventListener("mouseleave", () => { this.mouse = null; this.render(); if (this.onHover) this.onHover(null); });
+    this.canvas.addEventListener("click", e => { if (this.onPick && this.xr && inside(e)) this.onPick(xAt(e)); });
+  }
+  setData(d) { this.d = d; this.render(); }
+  render() {
+    const F = this.frame({ l: 50, r: 12, t: 16, b: 34 }); if (!F) return;
+    this.F = F;
+    const d = this.d, { ctx } = F;
+    if (!d || !d.series.length) {
+      this.xr = null;
+      ctx.fillStyle = T.label; ctx.font = font(13); ctx.textAlign = "center"; ctx.fillText(this.emptyText || "", F.x + F.w / 2, F.y + F.h / 2);
+      return;
+    }
+    let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+    for (const s of d.series) for (let i = 0; i < s.x.length; i++) {
+      if (!Number.isFinite(s.y[i])) continue;
+      x0 = Math.min(x0, s.x[i]); x1 = Math.max(x1, s.x[i]); y0 = Math.min(y0, s.y[i]); y1 = Math.max(y1, s.y[i]);
+    }
+    const pad = (y1 - y0) * 0.06 || 1, xr = d.xr || [x0, x1 > x0 ? x1 : x0 + 1], yr = d.yr || [Math.min(0, y0 - pad), y1 + pad];
+    this.xr = xr;
+    const { X, Y } = this.axes(F, xr, yr, { yl: d.yl || "" });
+    ctx.save(); ctx.beginPath(); ctx.rect(F.x, F.y, F.w, F.h); ctx.clip();
+    for (const sp of d.spans || []) { ctx.fillStyle = sp.colour + "26"; ctx.fillRect(X(sp.from), F.y, X(sp.to) - X(sp.from), F.h); }
+    ctx.strokeStyle = T.frame; ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
+    for (const v of d.hlines || []) { ctx.beginPath(); ctx.moveTo(F.x, Y(v)); ctx.lineTo(F.x + F.w, Y(v)); ctx.stroke(); }
+    for (const v of d.vlines || []) { ctx.beginPath(); ctx.moveTo(X(v), F.y); ctx.lineTo(X(v), F.y + F.h); ctx.stroke(); }
+    ctx.setLineDash([]);
+    for (const s of d.series) {
+      ctx.strokeStyle = s.colour; ctx.lineWidth = s.width || 1.4; ctx.setLineDash(s.dash || []); ctx.beginPath();
+      let on = false;
+      for (let i = 0; i < s.x.length; i++) {
+        if (!Number.isFinite(s.y[i])) { on = false; continue; }
+        const px = X(s.x[i]), py = Y(s.y[i]);
+        if (on) ctx.lineTo(px, py); else ctx.moveTo(px, py);
+        on = true;
+      }
+      ctx.stroke(); ctx.setLineDash([]);
+    }
+    if (d.cursor != null) { ctx.fillStyle = T.pin; ctx.fillRect(X(d.cursor) - 0.75, F.y, 1.5, F.h); }
+    // the spans' labels (layer numbers) along the top
+    ctx.font = font(11, "600"); ctx.textAlign = "center"; ctx.textBaseline = "top";
+    for (const sp of d.spans || []) if (sp.label && X(sp.to) - X(sp.from) > 14) { ctx.fillStyle = sp.colour; ctx.fillText(sp.label, (X(sp.from) + X(sp.to)) / 2, F.y + 3); }
+    ctx.restore();
+    ctx.fillStyle = T.label; ctx.font = font(11); ctx.textAlign = "center"; ctx.textBaseline = "bottom";
+    ctx.fillText(d.xl || "", F.x + F.w / 2, F.y + F.h + 33);
+    if (d.legend) {
+      ctx.textAlign = "right"; ctx.textBaseline = "top";
+      d.series.filter(s => s.label).forEach((s, i) => { ctx.fillStyle = s.colour; ctx.fillText(s.label, F.x + F.w - 6, F.y + 6 + i * 15); });
+    }
+    if (this.mouse != null && this.mouse > F.x && this.mouse < F.x + F.w) {
+      const v = xr[0] + (this.mouse - F.x) / F.w * (xr[1] - xr[0]), txt = `${fmt(v, 4)}${d.xu ? ` ${d.xu}` : ""}`;
+      ctx.fillStyle = T.hair; ctx.fillRect(this.mouse, F.y, 1, F.h);
+      ctx.font = font(11); const tw = ctx.measureText(txt).width + 10, tx = Math.min(this.mouse + 8, F.x + F.w - tw);
+      ctx.fillStyle = T.tipBg; ctx.fillRect(tx, F.y + F.h - 26, tw, 18);
+      ctx.fillStyle = T.tipInk; ctx.textAlign = "left"; ctx.textBaseline = "middle"; ctx.fillText(txt, tx + 5, F.y + F.h - 17);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 export class DensityPlot extends Base {
   setData(d) { this.d = d; this._img = null; this.render(); }
   _build() {

@@ -242,7 +242,7 @@ export function readL6m(buf, name) {
     wn = spec.reduce((a, b) => (b[1].length > a[1].length ? b : a))[1];
     const n = payload.length / wn.length;
     const err = new Error(`${name}: ${n} spectra with no stage grid. This is a ParticleFinder spectra list: ` +
-      "open its .l6pf project, which holds the particle positions");
+      "open its .l6pf project, which holds the particle positions. A line scan or depth profile opens from LabSpec's text export (.l6m line and depth scans are not read yet)");
     Object.assign(err, { pointList: true, spectra: payload, wn, n, settings: settings(raw) });
     throw err;
   }
