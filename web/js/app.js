@@ -9,7 +9,7 @@ import { MapView } from "./mapview.js";
 import { SpectrumPlot, HistogramPlot, DensityPlot, LinesPlot, ScatterPlot, DendrogramPlot, PEAK_COLOURS } from "./plots.js";
 import { SplatView, sliceField } from "./splat3d.js";
 import { segment, outlineOverlay, distance, PARTICLE_COLOURS } from "./particles.js";
-import { buildReport, buildDlcReport, buildLayersReport, buildMvaReport } from "./report.js";
+import { buildReport, buildDlcReport, buildLayersReport, buildMvaReport, buildPeakFitReport, buildGrapheneReport, buildSiliconReport, buildIdentifyReport } from "./report.js";
 import { rng, wilson, weightedQuantile, laCancado, robustScale, bestGmm, bootstrapShares, median, quantileSorted,
          heightCovariances, ratioVariance, heterogeneity, moranI, spearmanCI, coverage, pairRatio,
          binomLower, certifyCount, detectionPower, signalFloor, gini, noiseGini, logCV, lognormalPreferred,
@@ -23,6 +23,13 @@ import { PRESET_21OCT, SC_SETTINGS, BANDS as D3G_BANDS, prepare as d3gPrepare, u
 import { DLC_DEFAULTS, DLC_PARAMS, SE_KEYS as DLC_SE_KEYS, STATUS as DLC_STATUS, FLAG as DLC_FLAG, prepare as dlcPrepare, fitMean as dlcFitMean,
          fitSpectra as dlcFitSpectra, makeFitter as dlcFitter, components as dlcComponents, bwfFwhm, qcTest, paramStats, homogeneity, homogeneityLevel } from "./dlc.js";
 import { MVA_DEFAULTS, METHODS, runMva, identify, compareLoadings } from "./mva.js";
+import { SHAPES as PK_SHAPES, PARAMS as PK_PARAMS, paramLabel as PK_PARAM_LABEL_OF, OUT as PK_OUT, OUT_LABEL as PK_OUT_LABEL, OUT_UNIT as PK_OUT_UNIT, STATUS as PK_STATUS,
+         MODEL_DEFAULTS as PK_MODEL_DEFAULTS, newPeak as pkNewPeak, reshape as pkReshape, checkModel as pkCheckModel, compile as pkCompile, cut as pkCut, prepareY as pkPrepY,
+         solveLinear as pkSolveLinear, fitOne as pkFitOne, fitMany as pkFitMany, curves as pkCurves, fwhmOf as pkFwhmOf, findPeaks as pkFindPeaks } from "./peakfit.js";
+import { BASELINES as PK_BASELINES, background as pkBackground, despikeSpectrum as pkDespike, OPS as TB_OPS, NORMS as TB_NORMS, applyOp as tbApplyOp } from "./spectra.js";
+import { GRAPHENE_DEFAULTS, models as grModels, readOne as grReadOne, QUANT as GR_QUANT, LAYERS as GR_LAYERS, defectType as grDefectType } from "./graphene.js";
+import { SI_DEFAULTS, model as siModel, readOne as siReadOne, QUANT as SI_QUANT, calCheck as siCalCheck, controlLimits as siControl } from "./silicon.js";
+import { ID_DEFAULTS, refVectors as idRefVectors, hqi as idHqi, hits as idHitList, searchAll as idSearchAll, mixture as idMixture } from "./identify.js";
 import { LAYER_DEFAULTS, prepare as lyPrepare, decompose as lyDecomp, prepRef, matchRefs, findLayers as lyFind, thicknessTest, amountMap, layerSpectra } from "./layers.js";
 import { T, font, setTheme, currentTheme } from "./theme.js";
 import { lut, rgbAt } from "./colormaps.js";
@@ -40,6 +47,12 @@ const S = {
   seg: null, splat: {}, health: {}, fitSeq: 0, fitRunning: false, pendingFit: false, library: [],
 };
 const P = () => S.nx * S.ny;
+// a point as the cursor lines name it: its name in a set of spectra, its particle, or its stage position
+function whereOf(p) {
+  if (S.names) return `· ${S.names[p]} (spectrum ${p + 1} of ${P()})`;
+  if (S.points) return `· particle ${p + 1}`;
+  return `· point ${p + 1} · X ${fmt(S.x[p % S.nx], 4)} µm, Y ${fmt(S.y[Math.floor(p / S.nx)], 4)} µm`;
+}
 
 // =========================================================================
 // derived quantities
@@ -265,7 +278,7 @@ function renderCursor() {
   const i = Math.floor(p / S.nx), j = p % S.nx;
   const where = S.points
     ? `· particle ${p + 1} · X ${fmt(S.points.x[p], 4)} µm, Y ${fmt(S.points.y[p], 4)} µm · ⌀ ${fmt(S.points.ecd[p], 3)} µm`
-    : `· point ${p + 1} · X ${fmt(S.x[j], 4)} µm, Y ${fmt(S.y[i], 4)} µm`;
+    : S.names ? whereOf(p) : `· point ${p + 1} · X ${fmt(S.x[j], 4)} µm, Y ${fmt(S.y[i], 4)} µm`;
   $("#cursor-info").textContent = `${where}${S.hover != null && S.hover !== S.pinned ? "" : " · pinned"}${S.valid && !S.valid[p] ? " · not valid" : ""}`;
   const tb = $("#cursor-table"); tb.textContent = "";
   if (S.fit) {
@@ -717,13 +730,14 @@ async function loadDataset(info) {
   S.wn = f32(info.wn); S.x = f32(info.x); S.y = f32(info.y);
   S.points = info.points ? Object.fromEntries(Object.entries(info.points).map(([k, v]) => [k, f32(v)])) : null;
   S.pointLabels = info.point_labels || null;
+  S.names = info.names || null;
   document.body.classList.toggle("particles-mode", !!S.points);
   // neighbouring particle numbers are not neighbouring places
   $("#cfg-spatial").disabled = !!S.points;
   $("#cfg-spatial").closest(".frow").title = S.points ? "Not for ParticleFinder data: each particle has one spectrum, and its neighbours in the list are not its neighbours on the sample" : "";
   S.fit = null; $("#held-note").textContent = ""; S.ratio = null; S.valid = null; S.counts = null; S.seg = null; S.pinned = null; S.hover = null;
   $("#file-name").textContent = info.name;
-  $("#spec-name").textContent = S.points ? `${fmt(info.nx)} particles · ${info.k} ch`
+  $("#spec-name").textContent = S.names ? `${fmt(S.names.length)} spectra · ${info.k} ch` : S.points ? `${fmt(info.nx)} particles · ${info.k} ch`
     : `${info.nx} × ${info.ny} · ${info.k} ch${info.missing ? ` · ${info.missing} not measured` : ""}`;
   document.title = `${info.name} · Carbo Metrics`;
   $("#welcome").classList.add("hidden"); document.body.classList.remove("no-data");
@@ -738,7 +752,7 @@ async function loadDataset(info) {
   }
   // particles are drawn over their camera image (a grid map covers its own)
   const back = S.points && S.video && info.video ? { img: S.video, ...info.video } : null;
-  for (const m of [...maps, pmap, ...dlcMaps, ...lyMaps, ...mvMaps]) { m.setGeometry({ nx: S.nx, ny: S.ny, x: S.x, y: S.y, points: S.points }); m.values = null; m.backdrop = back; }
+  for (const m of [...maps, pmap, ...dlcMaps, ...lyMaps, ...mvMaps, ...pkMaps, ...grMaps, ...siMaps, ...idMaps]) { m.setGeometry({ nx: S.nx, ny: S.ny, x: S.x, y: S.y, points: S.points }); m.values = null; m.backdrop = back; }
   fitMapRow();
   S.vidFull = false;
   setActive(S.active);
@@ -751,12 +765,21 @@ async function loadDataset(info) {
   if ($("#tab-layers").classList.contains("on")) lyShow();
   MV.hover = MV.pinned = null;
   if ($("#tab-mva").classList.contains("on")) mvShow();
+  PK.hover = PK.pinned = null; PK.one = null; PK.which = "mean"; PK.specs = null;
+  if ($("#tab-fit").classList.contains("on")) pkShow();
+  GR.hover = GR.pinned = null; SI.hover = SI.pinned = null; SI.calNow = null; ID.hover = ID.pinned = null; ID.which = "mean"; ID.show = null; TB.which = "mean";
+  if ($("#tab-graphene").classList.contains("on")) grShow();
+  if ($("#tab-si").classList.contains("on")) siShow();
+  if ($("#tab-id").classList.contains("on")) idShow();
+  if ($("#tab-tools").classList.contains("on")) tbShow();
   // reopening a map the server already fitted with these settings: reuse it
   const prev = await api(`/api/ds/${info.id}/fit?result=1`).catch(() => null);
   if (prev && prev.state === "done" && prev.result && JSON.stringify(prev.result.config) === JSON.stringify(S.cfg)) {
     rememberFit(info.id, prev.result);
     decodeFit(prev.result);
     setStatus(`Fitted ${fmt(P() - (S.ds.missing || 0))} spectra (kept from earlier)`);
+  } else if (Array.from(S.wn).filter(v => v >= S.cfg.range_lo && v <= S.cfg.range_hi).length < 10) {
+    setStatus(`Outside the carbon fit's ${S.cfg.range_lo}–${S.cfg.range_hi} cm⁻¹: see Peak fit, Silicon, Identify`);
   } else startFit();
 }
 
@@ -843,7 +866,7 @@ async function loadResults(grid) {
   const { info, fit } = R.resultsDataset(r, grid, S.cfg);
   S.ds = info; S.nx = info.nx; S.ny = info.ny; S.k = 0; S.openedAt = Date.now();
   S.wn = new Float32Array(0); S.x = f32(info.x); S.y = f32(info.y);
-  S.points = null; S.pointLabels = null; document.body.classList.remove("particles-mode");
+  S.points = null; S.pointLabels = null; S.names = null; document.body.classList.remove("particles-mode");
   $("#cfg-spatial").disabled = false; $("#cfg-spatial").closest(".frow").title = "";
   S.cube = null; S.fit = null; S.ratio = null; S.valid = null; S.counts = null; S.seg = null; S.pinned = null; S.hover = null;
   S.cfg.ratio_num = fit.config.ratio_num; S.cfg.ratio_den = fit.config.ratio_den;
@@ -944,6 +967,7 @@ async function uploadFiles(files) {
   try {
     const { groups, tables } = await mapGroups(files);
     if (groups.length > 1) { await openMany(groups, tables); $("#library").classList.add("hidden"); return; }
+    if (groups.length === 1 && !files.includes(groups[0][0])) files = groups[0];          // spectra opened as one set
     const R = await import("./engine/results-file.js");
     const table = await R.findResultsFile(files);
     if (table) {
@@ -998,14 +1022,22 @@ function switchTab(name) {
   if (name === "dlc") dlcShow();
   if (name === "layers") lyShow();
   if (name === "mva") mvShow();
+  if (name === "fit") pkShow();
+  if (name === "graphene") grShow();
+  if (name === "si") siShow();
+  if (name === "id") idShow();
+  if (name === "tools") tbShow();
   if (name === "report") makeReport();
   if (name === "files") setTimeout(() => renderFiles(), 0);
   if (name === "qc") setTimeout(() => { fitMapRow(); maps.forEach(m => m.render()); renderVideo(); cursorPlot.render(); hist.render(); density.render(); }, 0);
 }
 function moveInk() {
-  const on = $("#tabs button.on"), ink = $(".tab-ink");
+  const on = $("#tabs button.on"), ink = $(".tab-ink"), bar = $("#tabs");
   ink.style.left = on.offsetLeft + "px"; ink.style.width = on.offsetWidth + "px";
+  // the open tab in view when the tabs scroll
+  if (on.offsetLeft < bar.scrollLeft || on.offsetLeft + on.offsetWidth > bar.scrollLeft + bar.clientWidth) bar.scrollLeft = on.offsetLeft - (bar.clientWidth - on.offsetWidth) / 2;
 }
+$("#tabs").addEventListener("wheel", e => { const t = e.currentTarget; if (t.scrollWidth > t.clientWidth && Math.abs(e.deltaY) > Math.abs(e.deltaX)) { t.scrollLeft += e.deltaY; e.preventDefault(); } }, { passive: false });
 $$("#tabs button").forEach(b => b.addEventListener("click", () => switchTab(b.dataset.tab)));
 window.addEventListener("resize", () => { moveInk(); fitMapRow(); });
 
@@ -1204,16 +1236,30 @@ async function fitOne(f, cfg) {
 // several maps dropped together: one group per map, each with its white-light
 // image (matched by name) or its ParticleFinder project; result tables left out
 async function mapGroups(files) {
-  const { isResultsTable } = await import("./engine/readers.js");
+  const { isResultsTable, readText, combineSpectra } = await import("./engine/readers.js");
   const stem = f => f.name.toLowerCase().replace(/\.[^.]+$/, "");
-  const maps_ = [], pfs = [], vids = [], tables = [];
+  const maps_ = [], pfs = [], vids = [], tables = [], spectra = [];
   for (const f of files) {
     if (/\.l6v$/i.test(f.name)) vids.push(f);
     else if (/\.l6pf$/i.test(f.name)) pfs.push(f);
     else if (/\.l6m$/i.test(f.name)) maps_.push(f);
-    else if (/\.(txt|csv|tsv|dat)$/i.test(f.name)) (isResultsTable(await f.slice(0, 65536).text()) ? tables : maps_).push(f);
+    else if (/\.(txt|csv|tsv|dat)$/i.test(f.name)) {
+      const text = await f.text();
+      if (isResultsTable(text.slice(0, 65536))) { tables.push(f); continue; }
+      // single spectra and spectra in columns, when several files come together, open as one set
+      let m = null; try { m = readText(text, f.name); } catch { /* the upload says why */ }
+      if (m && (m.layout === "spectrum" || m.layout === "columns")) spectra.push({ f, map: m }); else maps_.push(f);
+    }
   }
   const groups = maps_.map(f => [f]);
+  if (spectra.length === 1) groups.push([spectra[0].f]);
+  else if (spectra.length > 1) {
+    const C = combineSpectra(spectra.map(({ f, map }) => ({ name: f.name, map })));
+    const set = new File([C.csv], `${spectra.length} files, ${C.n} spectra.csv`, { type: "text/csv" });
+    groups.push([set]);
+    toast(`${spectra.length} files opened as one set of ${C.n} spectra over ${C.range[0].toFixed(0)}–${C.range[1].toFixed(0)} cm⁻¹` +
+      (C.resampled ? ` (${C.resampled} interpolated onto ${spectra[0].f.name}'s channels)` : ""), "info", 8000);
+  }
   for (const pf of pfs) { const g = groups.find(g => stem(g[0]).startsWith(stem(pf))); if (g) g.push(pf); else groups.push([pf]); }
   const common = (a, b) => { let i = 0; while (i < a.length && a[i] === b[i]) i++; return i; };
   for (const v of vids) {
@@ -4403,7 +4449,7 @@ function dlcRenderCursor() {
   if (p == null) info.textContent = `· mean of ${fmt(R.mean.n)} spectra · hover or click a map for one`;
   else {
     const st = dlcStatus(R)[p];
-    const where = S.points ? `· particle ${p + 1}` : `· point ${p + 1} · X ${fmt(S.x[p % S.nx], 4)} µm, Y ${fmt(S.y[Math.floor(p / S.nx)], 4)} µm`;
+    const where = whereOf(p);
     info.textContent = `${where}${DLC.hover != null && DLC.hover !== DLC.pinned ? "" : " · pinned"} · ${DLC_STATUS[st]}`;
     if (st === 0) { dlcPlot.emptyText = "Not measured"; dlcPlot.setData(null); dlcPlot.emptyText = null; return; }
   }
@@ -4693,7 +4739,7 @@ function makeDlcReport() {
     status: DLC_STATUS, pf: !!S.points, pinned: DLC.pinned, figs: dlcFigures(R), qcKeys: DLC_QC_KEYS, homKeys: DLC_HOM_KEYS });
 }
 // the report's title follows its kind while it is one of the defaults
-const RP_TITLES = { carbon: "Raman carbon analysis", dlc: "DLC coating analysis", layers: "Multilayer analysis", mva: "Multivariate analysis" };
+const RP_TITLES = { carbon: "Raman carbon analysis", dlc: "DLC coating analysis", layers: "Multilayer analysis", mva: "Multivariate analysis", fit: "Peak fit analysis", graphene: "Graphene analysis", si: "Silicon analysis", id: "Identification" };
 function rpTitle() { const t = $("#rp-title"); if (Object.values(RP_TITLES).includes(t.value)) t.value = RP_TITLES[$("#rp-kind").value]; }
 $("#rp-kind").onchange = () => { rpTitle(); makeReport(); };
 
@@ -5432,7 +5478,7 @@ function mvRenderCursor() {
   if (!R || !D || !D.prep) { mvPlot.setData(null); return; }
   const p = MV.hover ?? MV.pinned;
   if (p == null) { mvPlot.emptyText = "Hover or click a map, or a point of the score scatter"; mvPlot.setData(null); return; }
-  const where = S.points ? `· particle ${p + 1}` : `· point ${p + 1} · X ${fmt(S.x[p % S.nx], 4)} µm, Y ${fmt(S.y[Math.floor(p / S.nx)], 4)} µm`;
+  const where = whereOf(p);
   info.textContent = `${where}${MV.hover != null && MV.hover !== MV.pinned ? "" : " · pinned"}`;
   const i = D.prep.rowOf[p];
   if (i < 0) { mvPlot.emptyText = "Not measured"; mvPlot.setData(null); return; }
@@ -5640,6 +5686,1350 @@ function makeMvaReport() {
 }
 
 // =========================================================================
+// shared by the Peak fit, Graphene, Silicon and Identify tabs
+// =========================================================================
+// a menu of what a map can show, under its title
+function pickMenu(e, items, cur, onPick) {
+  e.stopPropagation();
+  $$(".popover").forEach(p => p.remove());
+  const pop = el("div", { class: "popover", style: "max-height:70vh;overflow:auto", onclick: ev => ev.stopPropagation() });
+  for (const g of items) {
+    pop.append(el("div", { class: "pop-h" }, g.title));
+    pop.append(el("div", { class: "menu-list" }, ...g.items.map(([k, label]) => el("button", { class: k === cur ? "on" : "", onclick: () => { pop.remove(); onPick(k); } }, label))));
+  }
+  document.body.append(pop);
+  const r = e.currentTarget.getBoundingClientRect();
+  pop.style.left = Math.max(8, Math.min(window.innerWidth - 250, r.left)) + "px";
+  pop.style.top = Math.max(8, Math.min(window.innerHeight - pop.offsetHeight - 8, r.bottom + 6)) + "px";
+  setTimeout(() => document.addEventListener("click", () => pop.remove(), { once: true }));
+}
+// four linked maps: hover and pin together, zoom together
+function linkedMaps(prefix, { onTitle, onHover, onPick }) {
+  const list = [];
+  for (let i = 0; i < 4; i++) list.push(new MapView($(`#${prefix}-map-${i}`), {
+    onTitle: (mv, e) => onTitle(e, i), onHover, onPick,
+    onView: (v, src) => { for (const m of list) if (m !== src) m.setView(v ? { ...v } : null); },
+    onProfile: on => { for (const m of list) m.setProfile(on); },
+    onBackdrop: on => { for (const m of list) { m.backdropOn = on; m._ptsCache = null; m.render(); } },
+  }));
+  return list;
+}
+function showOnMap(mv, title, M) {
+  if (!M) { mv.setTitle(title); Object.assign(mv, { categories: null, values: null, emptyText: null, _dirty: true }); mv.render(); return; }
+  mv.setTitle(`${title} : <u>${escHTML(M.label)}</u>`);
+  Object.assign(mv, { categories: M.categories || null, emptyText: null, _ptsCache: null });
+  mv.setData(M.values, { valid: null, label: M.label, unit: M.unit });
+}
+// a map drawn off-screen for a report
+function mapFigure(src, title, M, pinned) {
+  const host = offscreen(520, 440), mv = new MapView(host, {});
+  Object.assign(mv, { cmap: src.cmap, scale: src.scale, manual: src.manual, smooth: src.smooth, filter: src.filter });
+  mv.setGeometry({ nx: S.nx, ny: S.ny, x: S.x, y: S.y, points: S.points });
+  mv.backdrop = src.backdrop;
+  showOnMap(mv, title, M);
+  mv.setCursor(null, pinned);
+  const url = onDark(mv.canvas);
+  host.remove();
+  return { url, title: M ? M.label : title };
+}
+// the spectra of the open file that were measured, over the channels of idx
+function measuredList(idx) {
+  const out = [], K = S.k;
+  for (let p = 0; p < P(); p++) {
+    let ok = true, any = false;
+    for (const c of idx) { const v = S.cube[p * K + c]; if (!Number.isFinite(v)) { ok = false; break; } if (v !== 0) any = true; }
+    if (ok && any) out.push(p);
+  }
+  return out;
+}
+// the mean of the measured spectra (all channels)
+function meanSpectrum() {
+  if (S.meanSpec && S.meanSpec.ds === S.ds) return S.meanSpec.y;
+  const K = S.k, y = new Float64Array(K), all = Array.from({ length: K }, (_, c) => c), list = measuredList(all);
+  for (const p of list) for (let c = 0; c < K; c++) y[c] += S.cube[p * K + c] / list.length;
+  S.meanSpec = { ds: S.ds, y, n: list.length };
+  return y;
+}
+const pointSpectrum = p => Float64Array.from(S.cube.subarray(p * S.k, (p + 1) * S.k));
+
+// every measured spectrum fitted with one model, in chunks over a pool of workers (in the page
+// when workers cannot start); each starts from x0
+async function pkBatch(model, wn, x0, onProgress) {
+  const C = pkCompile(model, wn), N = C.N, nP = C.peaks.length, nO = PK_OUT.length, n = P(), chunk = 48, list = measuredList(C.idx);
+  const out = { vals: new Float64Array(n * nP * nO).fill(NaN), ses: new Float64Array(n * nP * nO).fill(NaN), xs: new Float64Array(n * C.nx).fill(NaN),
+    stats: new Float64Array(n * 4).fill(NaN), status: new Uint8Array(n) };
+  const jobs = []; for (let a = 0; a < list.length; a += chunk) jobs.push(a);
+  let done = 0;
+  const put = (a, r) => {
+    const m = r.status.length, w = nP * nO;
+    for (let i = 0; i < m; i++) {
+      const p = list[a + i];
+      out.vals.set(r.vals.subarray(i * w, (i + 1) * w), p * w); out.ses.set(r.ses.subarray(i * w, (i + 1) * w), p * w);
+      out.xs.set(r.xs.subarray(i * C.nx, (i + 1) * C.nx), p * C.nx); out.stats.set(r.stats.subarray(i * 4, (i + 1) * 4), p * 4); out.status[p] = r.status[i];
+    }
+    done += m; onProgress(done, list.length);
+  };
+  const sub = a => { const ids = list.slice(a, a + chunk), y = new Float32Array(ids.length * N); ids.forEach((p, i) => { for (let k = 0; k < N; k++) y[i * N + k] = S.cube[p * S.k + C.idx[k]]; }); return y; };
+  const cutWn = Float64Array.from(C.idx, c => wn[c]), job = { model, wn: cutWn, x0 };
+  let pool = [];
+  try { for (let i = 0, m = Math.max(1, Math.min(8, (navigator.hardwareConcurrency || 4) - 1)); i < m; i++) pool.push(new Worker(new URL("./peakfit-worker.js", import.meta.url), { type: "module" })); }
+  catch { pool.forEach(w => w.terminate()); pool = []; }
+  if (!pool.length) {
+    for (const a of jobs) { put(a, pkFitMany(job, sub(a))); await xcTick(); }
+  } else {
+    try {
+      let next = 0;
+      await Promise.all(pool.map(w => new Promise((res, rej) => {
+        const go = () => {
+          if (next >= jobs.length) { res(); return; }
+          const a = jobs[next++], y = sub(a);
+          w.onmessage = e => { if (e.data.error) rej(new Error(e.data.error)); else { put(a, e.data); go(); } };
+          w.onerror = e => rej(new Error(e.message || "a fit worker failed"));
+          w.postMessage({ id: a, ...job, Y: y }, [y.buffer]);
+        };
+        go();
+      })));
+    } finally { pool.forEach(w => w.terminate()); }
+  }
+  return { C, n, list, ...out };
+}
+const pkVal = (R, p, j, q) => R.vals[(p * R.C.peaks.length + j) * PK_OUT.length + PK_OUT.indexOf(q)];
+const pkSe = (R, p, j, q) => R.ses[(p * R.C.peaks.length + j) * PK_OUT.length + PK_OUT.indexOf(q)];
+const pkStat = (R, p, k) => R.stats[p * 4 + ["rn", "r2", "chi2", "iter"].indexOf(k)];
+
+// =========================================================================
+// Peak fit (peakfit.js): your own bands on any spectrum, one or every one of the file
+// =========================================================================
+const PK_STORE = "carbo-peakfit";
+const PK_PRESETS = {
+  si: { label: "Silicon, 520 cm⁻¹", model: { range: [440, 600], baseline: { kind: "poly", order: 1 }, peaks: [["lorentz", 520.7, 1000, 4, "Si"]] } },
+  dg: { label: "Carbon: D and G (Lorentz)", model: { range: [1000, 1800], baseline: { kind: "poly", order: 1 }, peaks: [["lorentz", 1350, 500, 60, "D"], ["lorentz", 1585, 500, 50, "G"]] } },
+  five: { label: "Carbon: five bands (Sadezky 2005)", model: { range: [1000, 1800], baseline: { kind: "poly", order: 1 },
+    peaks: [["lorentz", 1200, 50, 150, "D4"], ["lorentz", 1350, 500, 120, "D1"], ["gauss", 1500, 100, 150, "D3"], ["lorentz", 1585, 500, 50, "G"], ["lorentz", 1620, 100, 30, "D2"]] } },
+  graphene: { label: "Graphene: D, G, D′ and 2D", model: { range: [1250, 2850], baseline: { kind: "poly", order: 2 },
+    peaks: [["lorentz", 1345, 50, 20, "D"], ["lorentz", 1582, 500, 15, "G"], ["lorentz", 1620, 20, 10, "D′"], ["lorentz", 2690, 800, 30, "2D"]] } },
+  dlc: { label: "DLC: D (Lorentz) and G (BWF)", model: { range: [800, 2000], baseline: { kind: "poly", order: 1 }, peaks: [["lorentz", 1360, 300, 250, "D"], ["bwf", 1540, 600, 160, "G"]] } },
+  ps: { label: "Polystyrene, 1001 cm⁻¹ (calibration)", model: { range: [960, 1050], baseline: { kind: "poly", order: 1 }, peaks: [["voigt", 1001.4, 1000, 4, "PS 1001"]] } },
+};
+function pkPreset(key) {
+  const P0 = PK_PRESETS[key].model;
+  return { ...structuredClone(PK_MODEL_DEFAULTS), range: [...P0.range], baseline: { ...P0.baseline }, despike: true,
+    peaks: P0.peaks.map(([shape, c, h, w, name]) => { const pk = pkNewPeak(shape, c, h, w, name); if (pk.q) pk.q.v = -0.2; return pk; }) };
+}
+const PK = { model: null, which: "mean", res: new Map(), one: null, running: false, sel: null, specs: null, hover: null, pinned: null, newShape: "lorentz", prom: 6 };
+try {
+  const saved = JSON.parse(localStorage.getItem(PK_STORE) || "null");
+  if (saved && saved.model) PK.model = pkRevive(saved.model);
+  if (saved && saved.newShape) PK.newShape = saved.newShape;
+  if (saved && Number.isFinite(saved.prom)) PK.prom = saved.prom;
+} catch { /* storage blocked or unreadable: the defaults */ }
+if (!PK.model) PK.model = { ...structuredClone(PK_MODEL_DEFAULTS), despike: true };
+// JSON has no Infinity: an open bound is saved as null
+function pkRevive(m) {
+  for (const pk of m.peaks || []) for (const k of PK_PARAMS[pk.shape] || []) if (pk[k]) { if (pk[k].lo == null) pk[k].lo = -Infinity; if (pk[k].hi == null) pk[k].hi = Infinity; }
+  return { ...structuredClone(PK_MODEL_DEFAULTS), ...m };
+}
+function pkSave() { try { localStorage.setItem(PK_STORE, JSON.stringify({ model: PK.model, newShape: PK.newShape, prom: PK.prom })); } catch { /* not remembered */ } }
+// what a fit depends on: everything but the start values of free parameters
+const pkKey = m => stableJSON({ ...m, peaks: m.peaks.map(pk => Object.fromEntries(Object.entries(pk).map(([k, v]) => [k, v && typeof v === "object" && v.mode === "free" ? { ...v, v: null } : v]))) });
+const pkCur = () => { const R = S.ds ? PK.res.get(S.ds.id) : null; return R && R.ds === S.ds ? R : null; };
+const pkStatusText = t => { $("#pk-status").textContent = t; };
+const pkColour = j => PEAK_COLOURS[j % PEAK_COLOURS.length];
+const pkSet = () => !!S.names;                                      // a set of spectra, not a map
+const pkMany = () => P() > 1;
+
+// which spectrum is in view: a set's own spectrum, the mean, or the pinned point
+function pkWhich() {
+  if (!S.cube) return null;
+  const hov = PK.hover;
+  if (hov != null) return { p: hov, y: pointSpectrum(hov), label: S.names ? S.names[hov] : `point ${hov + 1}`, hover: true };
+  if (!pkMany()) return { p: 0, y: pointSpectrum(0), label: S.names ? S.names[0] : "the spectrum" };
+  if (PK.which === "mean") return { p: null, y: meanSpectrum(), label: `the mean of ${fmt(S.meanSpec.n)} spectra` };
+  const p = PK.which === "pin" ? PK.pinned : +PK.which;
+  if (p == null || !(p >= 0 && p < P())) return { p: null, y: meanSpectrum(), label: `the mean of ${fmt(S.meanSpec.n)} spectra` };
+  return { p, y: pointSpectrum(p), label: S.names ? S.names[p] : `point ${p + 1}` };
+}
+function pkFillWhich() {
+  const sel = $("#pk-which"), opts = [];
+  if (!S.cube) opts.push(["", "No spectra"]);
+  else if (!pkMany()) opts.push(["0", S.names ? S.names[0] : "This spectrum"]);
+  else {
+    opts.push(["mean", "Mean spectrum"]);
+    if (S.names) S.names.forEach((n, i) => opts.push([String(i), n]));
+    else opts.push(["pin", PK.pinned != null ? `Pinned point ${PK.pinned + 1}` : "Pinned point (click a map)"]);
+  }
+  sel.replaceChildren(...opts.map(([v, t]) => el("option", { value: v }, t)));
+  sel.value = opts.some(o => o[0] === String(PK.which)) ? String(PK.which) : opts[0][0];
+}
+$("#pk-which").onchange = e => { PK.which = e.target.value; PK.one = null; pkRender(); };
+
+// the model compiled for this file's channels, or why not
+function pkTry(model = PK.model) { try { return { C: pkCompile(model, S.wn) }; } catch (e) { return { error: e.message }; } }
+// the start (the model's values, heights and background solved for this spectrum) or the fit of it
+function pkView() {
+  const W = pkWhich(); if (!W) return null;
+  const T0 = pkTry(); if (T0.error) return { W, error: T0.error };
+  const C = T0.C, yCut = pkCut(C, W.y), R = pkCur();
+  if (W.p != null && R && R.key === pkKey(PK.model) && R.status[W.p] > 0) {
+    const x = R.xs.subarray(W.p * R.C.nx, (W.p + 1) * R.C.nx);
+    if (!x.every(Number.isFinite)) return { W, C, prep: pkPrepY(C, yCut), failed: true };
+    return { W, C, prep: pkPrepY(C, yCut), x, from: "all", status: R.status[W.p], D: { vals: Array.from({ length: C.peaks.length }, (_, j) => PK_OUT.map(q => pkVal(R, W.p, j, q))),
+      ses: Array.from({ length: C.peaks.length }, (_, j) => PK_OUT.map(q => pkSe(R, W.p, j, q))), rn: pkStat(R, W.p, "rn"), r2: pkStat(R, W.p, "r2"), chi2: pkStat(R, W.p, "chi2") } };
+  }
+  const one = PK.one;
+  if (one && one.key === `${S.ds.id}|${W.p}|${pkKey(PK.model)}`) return { W, C, prep: { y: one.r.y, base: one.r.base }, x: one.r.fit.x, from: "one", status: one.r.status, D: one.r.D, fit: one.r.fit };
+  const prep = pkPrepY(C, yCut);
+  return { W, C, prep, x: pkSolveLinear(C, prep.y, C.x0), from: "start" };
+}
+
+async function pkFitThis() {
+  const W = pkWhich(); if (!W) return;
+  const T0 = pkTry(); if (T0.error) { toast(`Peak fit: ${T0.error}`, "error", 8000); return; }
+  const C = T0.C, r = pkFitOne(C, pkCut(C, W.y));
+  if (r.status === 3) { toast("The fit did not converge: check the start values and limits.", "error", 8000); return; }
+  // the table now starts from the fitted values (the limits stay)
+  C.xs.forEach((v, i) => { if (v.j >= 0) PK.model.peaks[v.j][v.kind].v = r.fit.x[i]; });
+  pkSave();
+  PK.one = { key: `${S.ds.id}|${W.p}|${pkKey(PK.model)}`, r };
+  pkStatusText(`Fitted ${W.label} in ${fmt(r.fit.iter)} iterations: residual ${fmt(r.D.rn, 3)} × the noise.`);
+  pkForm(); pkRender();
+}
+async function pkFitAll() {
+  if (PK.running || !S.ds || !S.cube) return;
+  if (!pkMany()) { pkFitThis(); return; }
+  const T0 = pkTry(); if (T0.error) { toast(`Peak fit: ${T0.error}`, "error", 8000); return; }
+  const ds = S.ds, model = structuredClone(PK.model), key = pkKey(model), t0 = performance.now();
+  const x0 = PK.one && PK.one.key.endsWith(`|${key}`) ? PK.one.r.fit.x : T0.C.x0;
+  PK.running = true; $("#pk-fitall").disabled = $("#pk-fit1").disabled = true;
+  const prog = $("#pk-prog > div"); prog.style.width = "0%";
+  try {
+    const R = await pkBatch(model, S.wn, Float64Array.from(x0), (d, n) => { prog.style.width = `${(100 * d / n).toFixed(1)}%`; pkStatusText(`Fitting ${fmt(d)} of ${fmt(n)} spectra…`); });
+    Object.assign(R, { ds, key, model, seconds: (performance.now() - t0) / 1000 });
+    PK.res.set(ds.id, R);
+    const names = R.C.peaks.map(p => p.name).join("|");
+    if (!PK.specs || PK.specsFor !== names || PK.specs.some(s => !pkSpecOk(s, R))) { PK.specs = pkDefaultSpecs(R); PK.specsFor = names; }
+    prog.style.width = "100%";
+  } catch (e) { pkStatusText(`Could not fit: ${e.message}`); toast(`Peak fit: ${e.message}`, "error", 8000); }
+  finally { PK.running = false; $("#pk-fitall").disabled = $("#pk-fit1").disabled = false; }
+  if (S.ds === ds) pkRender();
+}
+$("#pk-fit1").onclick = () => pkFitThis();
+$("#pk-fitall").onclick = () => pkFitAll();
+
+// bands at the maxima of the spectrum in view (its background off), then fitted
+$("#pk-find").onclick = () => {
+  const W = pkWhich(); if (!W) return;
+  const m = { ...PK.model, peaks: [] }, idx = [];
+  for (let c = 0; c < S.k; c++) if (S.wn[c] >= m.range[0] && S.wn[c] <= m.range[1]) idx.push(c);
+  idx.sort((a, b) => S.wn[a] - S.wn[b]);
+  if (idx.length < 10) { toast("Fewer than 10 channels in the range.", "error"); return; }
+  const nu = Float64Array.from(idx, c => S.wn[c]);
+  let y = Float64Array.from(idx, c => W.y[c]);
+  if (m.despike) y = pkDespike(y).y;
+  const base = pkBackground(nu, y, m.baseline.kind === "poly" || m.baseline.kind === "none" ? { kind: "modpoly", order: Math.max(1, m.baseline.order ?? 1) } : m.baseline);
+  const found = pkFindPeaks(nu, Float64Array.from(y, (v, n) => v - base[n]), { prominence: PK.prom, maxPeaks: 15 });
+  if (!found.length) { toast(`No band stands ${PK.prom} × the noise above its surroundings: lower the prominence.`, "error"); return; }
+  PK.model.peaks = found.map(f => pkNewPeak(PK.newShape, f.c, f.h, f.w, `${Math.round(f.c)}`));
+  PK.sel = null; PK.one = null; pkSave(); pkForm();
+  pkFitThis();
+};
+$("#pk-clear").onclick = () => { PK.model.peaks = []; PK.sel = null; PK.one = null; pkSave(); pkForm(); pkRender(); };
+$("#pk-prom").onchange = e => { const v = parseFloat(e.target.value); if (v > 0) PK.prom = v; pkSave(); };
+$("#pk-new-shape").onchange = e => { PK.newShape = e.target.value; pkSave(); };
+// a click on the spectrum adds a band there, as tall as the spectrum above its background
+function pkAddAt(x) {
+  const W = pkWhich(); if (!W) return;
+  const idx = []; for (let c = 0; c < S.k; c++) if (S.wn[c] >= PK.model.range[0] && S.wn[c] <= PK.model.range[1]) idx.push(c);
+  idx.sort((a, b) => S.wn[a] - S.wn[b]);
+  const nu = Float64Array.from(idx, c => S.wn[c]), y = Float64Array.from(idx, c => W.y[c]);
+  if (nu.length < 10 || x < nu[0] || x > nu[nu.length - 1]) { toast("Click inside the fit range to add a band there.", "info"); return; }
+  let k = 0; while (k < nu.length - 1 && nu[k] < x) k++;
+  // as tall as the spectrum stands above the bands already there, or above its background
+  const V = pkView(), cur = V && V.x ? pkCurves(V.C, V.x, V.prep.base) : null, base = cur ? null : pkBackground(nu, y, { kind: "modpoly", order: 1 });
+  const h = Math.max(cur ? y[k] - cur.total[k] : y[k] - base[k], 1);
+  const step = Math.abs(nu[Math.min(nu.length - 1, k + 1)] - nu[Math.max(0, k - 1)]) / 2 || 1;
+  let name = `${Math.round(x)}`, i = 2; while (PK.model.peaks.some(p => p.name === name)) name = `${Math.round(x)}-${i++}`;
+  PK.model.peaks.push(pkNewPeak(PK.newShape, x, h, Math.max(4 * step, 8), name));
+  PK.model.peaks.sort((a, b) => a.c.v - b.c.v);
+  PK.one = null; pkSave(); pkForm(); pkRender();
+}
+
+// --------------------------------------------------------------------------
+// the side panel: range, background, the band table and one band's limits and links
+// --------------------------------------------------------------------------
+function pkFormFields() {
+  const m = PK.model, b = m.baseline;
+  $("#pk-lo").value = m.range[0]; $("#pk-hi").value = m.range[1]; $("#pk-base").value = b.kind;
+  $("#pk-order").value = String(b.order ?? (b.kind === "poly" ? 1 : 3)); $("#pk-lambda").value = b.lambda ?? 1e5; $("#pk-p").value = b.p ?? 0.01; $("#pk-width").value = b.width ?? 40;
+  $("#pk-order-row").classList.toggle("hidden", !(b.kind === "poly" || b.kind === "modpoly"));
+  $("#pk-als-row").classList.toggle("hidden", b.kind !== "als"); $("#pk-snip-row").classList.toggle("hidden", b.kind !== "snip");
+  $("#pk-despike").checked = m.despike !== false; $("#pk-prom").value = PK.prom;
+  $("#pk-new-shape").replaceChildren(...Object.entries(PK_SHAPES).map(([k, t]) => el("option", { value: k }, t))); $("#pk-new-shape").value = PK.newShape;
+  $("#pk-preset").replaceChildren(el("option", { value: "" }, "Choose a preset…"), ...Object.entries(PK_PRESETS).map(([k, p]) => el("option", { value: k }, p.label)));
+}
+function pkForm() { pkFormFields(); pkBandTable(); pkDetail(); }
+const pkChanged = () => { PK.one = null; pkSave(); pkRender(); };
+const pkOn = (id, set) => $(id).addEventListener("change", e => { set(e.target); pkFormFields(); pkChanged(); });
+pkOn("#pk-lo", t => { const v = parseFloat(t.value); if (Number.isFinite(v)) PK.model.range = [v, PK.model.range[1]]; });
+pkOn("#pk-hi", t => { const v = parseFloat(t.value); if (Number.isFinite(v)) PK.model.range = [PK.model.range[0], v]; });
+pkOn("#pk-base", t => { PK.model.baseline = { ...PK.model.baseline, kind: t.value, order: t.value === "modpoly" ? Math.max(PK.model.baseline.order ?? 3, 1) : PK.model.baseline.order ?? 1 }; });
+pkOn("#pk-order", t => { PK.model.baseline.order = +t.value; });
+pkOn("#pk-lambda", t => { const v = parseFloat(t.value); if (v > 0) PK.model.baseline.lambda = v; });
+pkOn("#pk-p", t => { const v = parseFloat(t.value); if (v > 0 && v < 1) PK.model.baseline.p = v; });
+pkOn("#pk-width", t => { const v = parseInt(t.value, 10); if (v >= 1) PK.model.baseline.width = v; });
+pkOn("#pk-despike", t => { PK.model.despike = t.checked; });
+$("#pk-preset").onchange = e => { if (!e.target.value) return; PK.model = pkPreset(e.target.value); PK.sel = null; PK.one = null; pkSave(); pkForm(); pkRender(); };
+
+const pkNum = (v, d = 4) => (Number.isFinite(v) ? fmt(v, d) : "–");
+function pkInput(value, onSet, title = "") {
+  const inp = el("input", { class: "ly-in", type: "number", step: "any", title });
+  inp.value = Number.isFinite(value) ? +value.toPrecision(7) : "";
+  inp.onchange = () => { const v = parseFloat(inp.value); if (Number.isFinite(v)) onSet(v); };
+  inp.onclick = e => e.stopPropagation();
+  return inp;
+}
+function pkBandTable() {
+  const t = $("#pk-bands"), m = PK.model;
+  if (!m.peaks.length) { t.replaceChildren(); $("#pk-bands-note").textContent = "No bands yet: Find peaks, choose a preset, or click the spectrum where a band should go."; return; }
+  $("#pk-bands-note").textContent = "Values are where each fit starts; after Fit this spectrum they are its fitted values. Position and FWHM move their limits with them.";
+  t.replaceChildren(el("tr", {}, ...["", "Name", "Shape", "Position", "FWHM", ""].map((h, i) => el("th", { class: i === 1 ? "l" : "" }, h))),
+    ...m.peaks.map((pk, j) => {
+      const name = el("input", { class: "ly-in", title: "The band's name" }); name.value = pk.name; name.onclick = e => e.stopPropagation();
+      name.onchange = () => { const v = name.value.trim(); if (v && !m.peaks.some((q, i) => i !== j && q.name === v)) pk.name = v; name.value = pk.name; pkSave(); pkRender(); };
+      const shape = el("select", { title: "Line shape", onclick: e => e.stopPropagation() }, ...Object.entries(PK_SHAPES).map(([k, s]) => el("option", { value: k }, s)));
+      shape.value = pk.shape;
+      shape.onchange = () => { m.peaks[j] = pkReshape(pk, shape.value); pkForm(); pkChanged(); };
+      const e3 = pk.shape === "pv" ? pk.eta.v : pk.shape === "voigt" ? pk.wl.v : pk.shape === "bwf" ? pk.q.v : 0;
+      const pos = pkInput(pk.c.v, v => { const d = v - pk.c.v; pk.c.v = v; if (Number.isFinite(pk.c.lo)) pk.c.lo += d; if (Number.isFinite(pk.c.hi)) pk.c.hi += d; pkForm(); pkChanged(); }, "Position (cm⁻¹)");
+      const fw = pkInput(pkFwhmOf(pk.shape, pk.w.v, e3), v => { const r = v / pkFwhmOf(pk.shape, pk.w.v, e3); if (!(r > 0)) return; for (const k of ["w", ...(pk.shape === "voigt" ? ["wl"] : [])]) { pk[k].v *= r; pk[k].lo *= r; pk[k].hi *= r; } pkForm(); pkChanged(); }, "FWHM (cm⁻¹)");
+      const tr = el("tr", { class: `click${PK.sel === j ? " on" : ""}`, onclick: () => { PK.sel = PK.sel === j ? null : j; pkBandTable(); pkDetail(); } },
+        el("td", {}, el("span", { class: "sw", style: `background:${pkColour(j)}` })), el("td", { class: "l" }, name), el("td", {}, shape), el("td", {}, pos), el("td", {}, fw),
+        el("td", {}, el("button", { class: "icon", title: "Remove this band", onclick: e => { e.stopPropagation(); pkRemove(j); } }, "✕")));
+      return tr;
+    }));
+}
+function pkRemove(j) {
+  const m = PK.model;
+  // links to it become fixed at their current value
+  m.peaks.forEach(pk => { for (const k of PK_PARAMS[pk.shape]) { const P0 = pk[k]; if (P0.mode === "link") { if (P0.to === j) Object.assign(P0, { mode: "fixed" }); else if (P0.to > j) P0.to--; } } });
+  m.peaks.splice(j, 1);
+  PK.sel = null; pkForm(); pkChanged();
+}
+// one band's parameters: value, free between limits, fixed, or linked to another band's
+function pkDetail() {
+  const host = $("#pk-detail"), j = PK.sel, m = PK.model, pk = j != null ? m.peaks[j] : null;
+  if (!pk) { host.replaceChildren(); return; }
+  const rows = PK_PARAMS[pk.shape].map(k => {
+    const P0 = pk[k], others = m.peaks.map((q, i) => [i, q]).filter(([i, q]) => i !== j && PK_PARAMS[q.shape].includes(k));
+    const mode = el("select", {}, el("option", { value: "free" }, "Free"), el("option", { value: "fixed" }, "Fixed"), ...(others.length ? [el("option", { value: "link" }, "Linked")] : []));
+    mode.value = P0.mode;
+    mode.onchange = () => {
+      P0.mode = mode.value;
+      if (P0.mode === "link") { P0.to = P0.to != null && others.some(([i]) => i === P0.to) ? P0.to : others[0][0]; P0.rel = P0.rel || (k === "c" ? "offset" : k === "h" ? "ratio" : "equal"); P0.k = P0.rel === "offset" ? P0.v - m.peaks[P0.to][k].v : P0.rel === "ratio" ? P0.v / (m.peaks[P0.to][k].v || 1) : 0; }
+      if (P0.mode === "free") { if (!(P0.lo <= P0.v)) P0.lo = Math.min(P0.v, P0.lo); if (!(P0.hi >= P0.v)) P0.hi = Math.max(P0.v, P0.hi); }
+      pkDetail(); pkChanged();
+    };
+    const cells = [el("td", { class: "l" }, PK_PARAM_LABEL_OF(pk.shape, k)), el("td", {}, pkInput(P0.v, v => { P0.v = v; pkForm(); pkChanged(); })), el("td", {}, mode)];
+    if (P0.mode === "free") cells.push(el("td", {}, pkInput(P0.lo, v => { P0.lo = v; pkChanged(); }, "Minimum")), el("td", {}, pkInput(P0.hi, v => { P0.hi = v; pkChanged(); }, "Maximum")));
+    else if (P0.mode === "link") {
+      const to = el("select", {}, ...others.map(([i, q]) => el("option", { value: i }, q.name))); to.value = String(P0.to);
+      to.onchange = () => { P0.to = +to.value; pkChanged(); };
+      const rel = el("select", {}, el("option", { value: "equal" }, "="), el("option", { value: "offset" }, "+"), el("option", { value: "ratio" }, "×")); rel.value = P0.rel || "equal";
+      rel.onchange = () => { P0.rel = rel.value; P0.k = P0.rel === "ratio" ? 1 : 0; pkDetail(); pkChanged(); };
+      cells.push(el("td", {}, to), el("td", {}, el("div", { class: "row2" }, rel, P0.rel === "equal" ? el("span") : pkInput(P0.k, v => { P0.k = v; pkChanged(); }, P0.rel === "offset" ? "Offset" : "Ratio"))));
+    } else cells.push(el("td", { colspan: 2, class: "muted" }, "held at this value"));
+    return el("tr", {}, ...cells);
+  });
+  host.replaceChildren(el("div", { class: "pk-detail-h" }, el("b", { style: `color:${pkColour(j)}` }, pk.name), " · limits and links"),
+    el("div", { class: "pf-scroll" }, el("table", { class: "stats" }, el("tr", {}, ...["", "Value", "", "Min / band", "Max / ×"].map((h, i) => el("th", { class: i === 0 ? "l" : "" }, h))), ...rows)),
+    el("div", { class: "muted small" }, "Linked: the value follows the same parameter of another band, equal to it, at a fixed offset (+) or in a fixed ratio (×). Widths and positions in cm⁻¹, heights in counts."));
+}
+
+// --------------------------------------------------------------------------
+// the spectrum, the maps or the list, the results
+// --------------------------------------------------------------------------
+const pkPlot = new SpectrumPlot($("#pk-plot"), { onPick: x => pkAddAt(x) });
+const pkMaps = linkedMaps("pk", { onTitle: (e, i) => pkMenu(e, i), onHover: p => pkHover(p), onPick: p => pkPin(p) });
+function pkHover(p) { PK.hover = p; pkMaps.forEach(m => m.setCursor(p, PK.pinned)); pkRenderSpec(); }
+function pkPin(p) { PK.pinned = p; PK.hover = null; PK.which = "pin"; pkMaps.forEach(m => m.setCursor(null, p)); pkFillWhich(); pkRenderSpec(); pkRenderResult(); }
+const pkBandOpts = R => R.C.peaks.map(p => p.name);
+const PK_WORD = { h: "height", c: "position", fwhm: "FWHM", area: "area" };
+function pkSpecOk(spec, R) {
+  if (["rn", "r2", "status"].includes(spec)) return true;
+  const a = spec.split(":"), n = R.C.peaks.length;
+  return a[0] === "r" ? +a[1] < n && +a[2] < n : +a[0] < n && (a[1] !== "x" || R.C.peaks[+a[0]].keys.length > 3);
+}
+function pkDefaultSpecs(R) {
+  const n = R.C.peaks.length;
+  return n >= 2 ? ["0:c", "0:fwhm", "r:0:1:h", "rn"] : ["0:c", "0:fwhm", "0:h", "rn"];
+}
+function pkLabel(spec, R) {
+  if (spec === "rn") return "Residual / noise"; if (spec === "r2") return "R²"; if (spec === "status") return "Fit status";
+  const a = spec.split(":"), names = pkBandOpts(R);
+  if (a[0] === "r") return `${a[3] === "h" ? "I" : "A"}(${names[+a[1]]})/${a[3] === "h" ? "I" : "A"}(${names[+a[2]]})`;
+  const shape = R.C.peaks[+a[0]].shape;
+  return `${names[+a[0]]} ${a[1] === "x" ? PK_PARAM_LABEL_OF(shape, PK_PARAMS[shape][3]).toLowerCase() : PK_WORD[a[1]]}`;
+}
+function pkMapData(spec, R) {
+  const n = R.n, v = new Float32Array(n).fill(NaN), a = spec.split(":");
+  if (spec === "status") {
+    const index = Int8Array.from(R.status, s => (s === 0 ? -1 : s - 1));
+    return { values: Float32Array.from(index), label: "Fit status", unit: "", categories: { index, colours: [T.good, T.warn, T.bad], names: PK_STATUS.slice(1) } };
+  }
+  for (let p = 0; p < n; p++) {
+    if (R.status[p] === 0 || R.status[p] === 3) continue;
+    if (spec === "rn" || spec === "r2") v[p] = pkStat(R, p, spec);
+    else if (a[0] === "r") { const d = pkVal(R, p, +a[2], a[3]); v[p] = d > 0 ? pkVal(R, p, +a[1], a[3]) / d : NaN; }
+    else v[p] = pkVal(R, p, +a[0], a[1]);
+  }
+  const unit = spec === "rn" ? "× noise" : spec === "r2" || a[0] === "r" ? "" : PK_OUT_UNIT[a[1]] || "";
+  return { values: v, label: pkLabel(spec, R), unit };
+}
+function pkMenu(e, i) {
+  const R = pkCur(); if (!R || R.key !== pkKey(PK.model)) return;
+  const names = pkBandOpts(R), groups = R.C.peaks.map((pk, j) => ({ title: names[j],
+    items: [...["c", "fwhm", "h", "area"].map(q => [`${j}:${q}`, `${names[j]} ${PK_WORD[q]}`]), ...(pk.keys.length > 3 ? [[`${j}:x`, pkLabel(`${j}:x`, R)]] : [])] }));
+  if (names.length >= 2) {
+    const ratios = [];
+    for (let a = 0; a < names.length; a++) for (let b = 0; b < names.length; b++) if (a !== b) ratios.push([`r:${a}:${b}:h`, `I(${names[a]})/I(${names[b]})`], [`r:${a}:${b}:area`, `A(${names[a]})/A(${names[b]})`]);
+    groups.push({ title: "Ratios", items: ratios });
+  }
+  groups.push({ title: "Fit", items: [["rn", "Residual / noise"], ["r2", "R²"], ["status", "Fit status"]] });
+  pickMenu(e, groups, PK.specs[i], k => { PK.specs[i] = k; pkRenderMap(i); });
+}
+function pkRenderMap(i) {
+  const R = pkCur(), fresh = R && R.key === pkKey(PK.model);
+  showOnMap(pkMaps[i], "Peak fit", fresh ? pkMapData(PK.specs[i], R) : null);
+}
+function pkRenderSpec() {
+  const V = pkView(), info = $("#pk-info"), tb = $("#pk-cursor-table");
+  tb.textContent = ""; info.textContent = "";
+  if (!V) { pkPlot.emptyText = "Open a file with spectra"; pkPlot.setData(null); return; }
+  info.textContent = `· ${V.W.hover ? whereOf(V.W.p).slice(2) : V.W.label}${V.from === "start" ? " · start values" : V.from === "all" ? " · from Fit all" : V.from === "one" ? " · fitted" : ""}`;
+  if (V.error) {
+    pkPlot.emptyText = null;
+    pkPlot.setData({ wn: S.wn, raw: V.W.y, range: PK.model.range });
+    tb.append(el("span", { class: "muted" }, V.error));
+    return;
+  }
+  const { C, prep } = V, raw = prep.base ? Float64Array.from(prep.y, (v, n) => v + prep.base[n]) : prep.y;
+  if (!V.x) { pkPlot.setData({ wn: C.nu, raw, range: C.range }); tb.append(el("span", { class: "muted" }, "This spectrum could not be fitted.")); return; }
+  const fit = pkCurves(C, V.x, prep.base);
+  pkPlot.emptyText = null;
+  pkPlot.setData({ wn: C.nu, raw, range: C.range, fit });
+  fit.comps.forEach((c, j) => tb.append(el("span", {}, el("b", { style: `color:${pkColour(j)}` }, c.name), ` ${pkNum(c.pos, 5)} cm⁻¹ · FWHM ${pkNum(c.width, 3)} · I ${pkNum(c.A, 3)}`)));
+  if (V.D) tb.append(el("span", {}, `residual ${fmt(V.D.rn, 3)} × noise · R² ${fmt(V.D.r2, 4)}`));
+}
+// the bands of the spectrum in view, with their errors
+function pkRenderResult() {
+  const V = pkView(), t = $("#pk-result"), note = $("#pk-result-note");
+  if (!V || !V.D) { t.replaceChildren(); note.textContent = V && !V.error ? "Fit this spectrum to see each band's values with their errors." : ""; return; }
+  const pm = (v, s, d) => (Number.isFinite(v) ? `${pkNum(v, d)}${s > 0 ? ` ± ${fmt(s, 2)}` : ""}` : "–");
+  t.replaceChildren(el("tr", {}, ...["Band", "Position", "FWHM", "Height", "Area", "Shape"].map((h, i) => el("th", { class: i === 0 ? "l" : "" }, h))),
+    ...V.C.peaks.map((pk, j) => {
+      const v = V.D.vals[j], s = V.D.ses[j];
+      return el("tr", {}, el("td", { class: "l" }, el("span", { class: "sw", style: `background:${pkColour(j)}` }), pk.name), el("td", {}, pm(v[1], s[1], 5)), el("td", {}, pm(v[2], s[2], 3)),
+        el("td", {}, pm(v[0], s[0], 3)), el("td", {}, pm(v[3], s[3], 3)), el("td", {}, pk.keys.length > 3 ? `${PK_PARAM_LABEL_OF(pk.shape, pk.keys[3]).toLowerCase()} ${pm(v[4], s[4], 3)}` : PK_SHAPES[pk.shape]));
+    }));
+  note.textContent = `${V.from === "all" ? "From Fit all. " : ""}Residual ${fmt(V.D.rn, 3)} × the noise, R² ${fmt(V.D.r2, 4)}, reduced χ² ${fmt(V.D.chi2, 3)} (at the noise of the spectrum). ` +
+    "Errors are one standard error from the fit's covariance; a parameter on its limit or held has none. Areas are over all shifts (BWF: over the fit range).";
+}
+// every spectrum of a set as a row
+function pkRenderList() {
+  const R = pkCur(), fresh = R && R.key === pkKey(PK.model), t = $("#pk-list-table");
+  $("#pk-list-info").textContent = fresh ? `· ${fmt(R.list.length)} fitted in ${R.seconds.toFixed(1)} s · click a row to see it` : "· Fit all spectra to fill this table";
+  if (!fresh) { t.replaceChildren(); return; }
+  const names = pkBandOpts(R);
+  t.replaceChildren(el("tr", {}, el("th", { class: "l" }, "Spectrum"), ...names.flatMap(n => [`${n} position`, `${n} FWHM`, `${n} height`].map(h => el("th", {}, h))), el("th", {}, "Residual / noise")),
+    ...Array.from({ length: R.n }, (_, p) => el("tr", { class: `click${String(PK.which) === String(p) ? " on" : ""}`, onclick: () => { PK.which = String(p); pkFillWhich(); pkRender(); } },
+      el("td", { class: "l" }, S.names ? S.names[p] : `point ${p + 1}`),
+      ...names.flatMap((_, j) => (R.status[p] === 1 || R.status[p] === 2 ? [pkNum(pkVal(R, p, j, "c"), 5), pkNum(pkVal(R, p, j, "fwhm"), 3), pkNum(pkVal(R, p, j, "h"), 3)] : ["–", "–", "–"]).map(v => el("td", {}, v))),
+      el("td", { class: R.status[p] === 2 ? "warn" : "" }, R.status[p] ? (R.status[p] === 3 ? "failed" : pkNum(pkStat(R, p, "rn"), 3)) : "not measured"))));
+}
+// what to know before trusting the fit, as data (the report takes them too)
+function pkChecks() {
+  const out = [], add = (text, warn = false) => out.push({ text, warn }), V = pkView();
+  if (V && V.D && V.C) {
+    const { C, D } = V;
+    if (D.rn > 1.5) add(`The fit of ${V.W.label} leaves ${fmt(D.rn, 3)} × the noise: a band is missing or a line shape is wrong. The residual strip under the spectrum shows where.`, true);
+    else add(`The fit of ${V.W.label} leaves ${fmt(D.rn, 3)} × the noise: the bands explain the spectrum.`);
+    C.peaks.forEach((pk, j) => {
+      const v = D.vals[j], s = D.ses[j];
+      if (V.fit) {
+        const on = C.xs.map((x, i) => [x, i]).filter(([x, i]) => x.j === j && V.fit.onB[i] && x.kind !== "h").map(([x]) => PK_PARAM_LABEL_OF(pk.shape, x.kind).toLowerCase());
+        if (on.length) add(`${pk.name}: the ${on.join(" and ")} ended on ${on.length > 1 ? "their limits" : "its limit"}. Widen the limit, or the band is not in this spectrum.`, true);
+      }
+      if (!(v[0] > 3 * (s[0] || 0))) add(`${pk.name} is below 3 × its own error in height: it is not detected in ${V.W.label}.`, true);
+      else if (s[2] > 0.3 * v[2]) add(`${pk.name}'s FWHM is uncertain (± ${fmt(100 * s[2] / v[2], 2)} %): the band is weak or overlaps another.`, true);
+    });
+    if (V.fit) {
+      const nx = C.nx, cov = V.fit.cov; let worst = null;
+      for (let a = 0; a < nx; a++) for (let b = a + 1; b < nx; b++) {
+        if (C.xs[a].kind === "base" || C.xs[b].kind === "base") continue;
+        const r = cov[a * nx + b] / Math.sqrt(cov[a * nx + a] * cov[b * nx + b]);
+        if (Math.abs(r) > 0.95 && (!worst || Math.abs(r) > Math.abs(worst.r))) worst = { a, b, r };
+      }
+      if (worst) {
+        const nm = i => `${C.peaks[C.xs[i].j].name}'s ${PK_PARAM_LABEL_OF(C.peaks[C.xs[i].j].shape, C.xs[i].kind).toLowerCase()}`;
+        add(`${nm(worst.a)} and ${nm(worst.b)} are ${fmt(worst.r, 3)} correlated: the spectrum cannot tell them apart. Fix or link one of them.`, true);
+      }
+    }
+    if (C.peaks.some(p => p.shape === "bwf")) add("A BWF band's tail does not end, so its area is over the fit range only and changes with the range.");
+  }
+  const R = pkCur();
+  if (R && R.key === pkKey(PK.model)) {
+    const c = [0, 0, 0, 0]; for (const s of R.status) c[s]++;
+    const rn = []; for (const p of R.list) if (R.status[p] === 1 || R.status[p] === 2) rn.push(pkStat(R, p, "rn"));
+    rn.sort((a, b) => a - b);
+    const hi = rn.filter(v => v > 2).length;
+    add(`Fit all: ${fmt(c[1])} fitted${c[2] ? `, ${fmt(c[2])} with a position or width on its limit` : ""}${c[3] ? `, ${fmt(c[3])} failed` : ""} of ${fmt(R.list.length)} spectra; median residual ${fmt(quantile(rn, 0.5), 3)} × the noise${hi ? `, ${fmt(hi)} above 2 ×` : ""}.`, c[2] + c[3] > 0.05 * R.list.length || hi > 0.05 * rn.length);
+  }
+  const b = PK.model.baseline;
+  add(b.kind === "poly" ? `The background is a degree-${b.order} polynomial fitted with the bands.` : b.kind === "none" ? "No background: the bands sit on zero." : `The background (${PK_BASELINES[b.kind].toLowerCase()}) is taken off before the bands are fitted.`);
+  return out;
+}
+function pkRenderChecks() { $("#pk-checks").replaceChildren(...pkChecks().map(c => el("li", { class: c.warn ? "warn" : "" }, c.text))); }
+
+function pkShow() {
+  if (S.cube && !PK.model.peaks.length) {
+    // a new model covers the file's range
+    let lo = Infinity, hi = -Infinity; for (const v of S.wn) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
+    PK.model.range = [Math.floor(lo), Math.ceil(hi)];
+  }
+  pkForm(); pkFillWhich(); pkRender();
+  setTimeout(() => { pkMaps.forEach(m => m.render()); pkPlot.render(); }, 0);
+}
+function pkRender() {
+  const empty = $("#pk-empty"), why = !S.ds ? "Open a spectrum, a set of spectra or a map first: a CSV of one spectrum, several CSVs at once, spectra in columns, or a LabSpec map."
+    : !S.cube ? "This file holds fitted values, not spectra: open the spectra themselves." : null;
+  empty.classList.toggle("hidden", !why);
+  if (why) $("#pk-empty-p").textContent = why;
+  const R = pkCur(), fresh = R && R.key === pkKey(PK.model);
+  $("#tab-fit").classList.toggle("pk-single", !pkMany());
+  $("#pk-maps").classList.toggle("hidden", !pkMany() || pkSet());
+  $("#pk-list").classList.toggle("hidden", !pkSet());
+  $("#pk-fitall").disabled = PK.running || !pkMany();
+  if (!PK.running) pkStatusText(R && !fresh ? "The model has changed since Fit all: fit again to update the maps." : fresh ? `Fit all: ${fmt(R.list.length)} spectra in ${R.seconds.toFixed(1)} s.` : $("#pk-status").textContent);
+  if (!PK.specs && fresh) PK.specs = pkDefaultSpecs(R);
+  if (PK.specs) pkMaps.forEach((_, i) => pkRenderMap(i)); else pkMaps.forEach(m => showOnMap(m, "Peak fit", null));
+  pkRenderSpec(); pkRenderResult(); pkRenderList(); pkRenderChecks();
+}
+
+// --------------------------------------------------------------------------
+// model files, export and report
+// --------------------------------------------------------------------------
+$("#pk-save").onclick = () => download(`${S.ds ? S.ds.name : "peak"} model.json`, JSON.stringify({ kind: "Carbo Metrics peak model", version: 1, model: PK.model }, null, 1), "application/json");
+$("#pk-load").onclick = () => $("#pk-load-file").click();
+$("#pk-load-file").onchange = async e => {
+  const f = e.target.files[0]; e.target.value = ""; if (!f) return;
+  try {
+    const j = JSON.parse(await f.text()), m = pkRevive(j.model || j);
+    pkCheckModel({ ...m, peaks: m.peaks.length ? m.peaks : [pkNewPeak("lorentz", 1000, 1, 10)] });
+    PK.model = m; PK.sel = null; PK.one = null; pkSave(); pkForm(); pkRender();
+  } catch (err) { toast(`Not a peak model: ${err.message}`, "error", 8000); }
+};
+const pkCell = v => (typeof v === "number" ? (Number.isFinite(v) ? String(+v.toPrecision(7)) : "") : `"${String(v).replace(/"/g, "'")}"`);
+$("#pk-csv").onclick = () => {
+  const R = pkCur(), fresh = R && R.key === pkKey(PK.model), V = pkView();
+  if (!fresh && !(V && V.D)) { toast("Fit first.", "error"); return; }
+  const C = fresh ? R.C : V.C, cols = [];
+  C.peaks.forEach(pk => { for (const q of PK_OUT) if (q !== "x" || pk.keys.length > 3) cols.push(`${pk.name} ${q === "x" ? PK_PARAM_LABEL_OF(pk.shape, pk.keys[3]) : PK_OUT_LABEL[q]}`, `${pk.name} ${q === "x" ? PK_PARAM_LABEL_OF(pk.shape, pk.keys[3]) : PK_OUT_LABEL[q]} SE`); });
+  const head = [S.names ? "Spectrum" : S.points ? "Particle" : "Point", "X (um)", "Y (um)", "Status", ...cols, "Residual (x noise)", "R2", "Reduced chi2"];
+  const rowOf = (who, x, y, st, get, se, rn, r2, chi) => [who, x, y, st, ...C.peaks.flatMap((pk, j) => PK_OUT.filter(q => q !== "x" || pk.keys.length > 3).flatMap(q => [get(j, q), se(j, q)])), rn, r2, chi];
+  const rows = [head];
+  if (fresh) {
+    for (let p = 0; p < R.n; p++) {
+      if (!R.status[p]) continue;
+      const x = S.points ? S.points.x[p] : S.x[p % S.nx], y = S.points ? S.points.y[p] : S.y[Math.floor(p / S.nx)];
+      rows.push(rowOf(S.names ? S.names[p] : p + 1, x, y, PK_STATUS[R.status[p]], (j, q) => pkVal(R, p, j, q), (j, q) => pkSe(R, p, j, q), pkStat(R, p, "rn"), pkStat(R, p, "r2"), pkStat(R, p, "chi2")));
+    }
+  } else rows.push(rowOf(V.W.label, "", "", PK_STATUS[V.status], (j, q) => V.D.vals[j][PK_OUT.indexOf(q)], (j, q) => V.D.ses[j][PK_OUT.indexOf(q)], V.D.rn, V.D.r2, V.D.chi2));
+  download(`${S.ds.name}_peakfit.csv`, rows.map(r => r.map(pkCell).join(",")).join("\n") + "\n", "text/csv");
+};
+$("#pk-csv-curve").onclick = () => {
+  const V = pkView(); if (!V || !V.x) { toast("Nothing fitted to export.", "error"); return; }
+  const fit = pkCurves(V.C, V.x, V.prep.base), raw = V.prep.base ? Float64Array.from(V.prep.y, (v, n) => v + V.prep.base[n]) : V.prep.y;
+  const rows = [["Raman shift (cm-1)", "Spectrum", "Background", ...fit.comps.map(c => c.name), "Fit", "Residual"],
+    ...Array.from(V.C.nu, (v, n) => [v, raw[n], fit.baseline[n], ...fit.comps.map(c => c.y[n]), fit.total[n], raw[n] - fit.total[n]])];
+  download(`${S.ds.name}_peakfit_${V.W.label.replace(/[^\w.-]+/g, "_")}.csv`, rows.map(r => r.map(pkCell).join(",")).join("\n") + "\n", "text/csv");
+};
+$("#pk-png").onclick = () => pkMaps.forEach((m, i) => setTimeout(() => m.save(), i * 250));
+$("#pk-report").onclick = () => { $("#rp-kind").value = "fit"; rpTitle(); switchTab("report"); };
+function makePeakFitReport() {
+  const V = pkView(), R = pkCur(), fresh = R && R.key === pkKey(PK.model);
+  if (!V || !(V.D || fresh)) { $("#report-paper").replaceChildren(el("p", {}, S.ds ? "Fit first: open Peak fit, then Fit this spectrum or Fit all spectra." : "Open a file and fit it on the Peak fit tab first.")); return; }
+  const host = offscreen(760, 380), sp = new SpectrumPlot(host); sp.setData(pkPlot.d); const spec = pkPlot.d ? onDark(sp.canvas) : null; host.remove();
+  const C = fresh ? R.C : V.C, stats = fresh ? C.peaks.map((pk, j) => ({ name: pk.name, q: ["c", "fwhm", "h", "area"].map(q => {
+    const a = []; for (const p of R.list) if (R.status[p] === 1) a.push(pkVal(R, p, j, q));
+    a.sort((x, y) => x - y);
+    return { q, n: a.length, median: quantile(a, 0.5), q1: quantile(a, 0.25), q3: quantile(a, 0.75) };
+  }) })) : null;
+  const counts = fresh ? [0, 0, 0, 0] : null; if (fresh) for (const s of R.status) counts[s]++;
+  buildPeakFitReport($("#report-paper"), { title: $("#rp-title").value, ds: S.ds, model: PK.model, C, V, spec, stats, counts, R: fresh ? R : null,
+    maps: fresh && pkMany() && !pkSet() ? PK.specs.map((s, i) => mapFigure(pkMaps[i], "Peak fit", pkMapData(s, R), PK.pinned)) : [],
+    checks: pkChecks(), shapes: PK_SHAPES, label: PK_PARAM_LABEL_OF, baselines: PK_BASELINES });
+}
+
+// =========================================================================
+// Graphene and Silicon (graphene.js, silicon.js): fixed peak-fit models over every spectrum, read
+// as layers, defects, strain and doping, or as stress and crystalline fraction
+// =========================================================================
+// one batch's bands at point p as the readers take them
+const bandsAt = (B, p) => B.C.peaks.map((_, j) => ({ h: pkVal(B, p, j, "h"), sh: pkSe(B, p, j, "h"), c: pkVal(B, p, j, "c"), sc: pkSe(B, p, j, "c"), w: pkVal(B, p, j, "fwhm"), a: pkVal(B, p, j, "area") }));
+const fitted = (B, p) => B.status[p] === 1 || B.status[p] === 2;
+// a batch's fit at p drawn on a SpectrumPlot (the spectrum as the model saw it)
+function batchSpectrum(B, p) {
+  const x = B.xs.subarray(p * B.C.nx, (p + 1) * B.C.nx), prep = pkPrepY(B.C, pkCut(B.C, pointSpectrum(p)));
+  const raw = prep.base ? Float64Array.from(prep.y, (v, n) => v + prep.base[n]) : prep.y;
+  return x.every(Number.isFinite) ? { wn: B.C.nu, raw, range: B.C.range, fit: pkCurves(B.C, x, prep.base) } : { wn: B.C.nu, raw, range: B.C.range };
+}
+// median (quartiles) of v over the points where ok
+function medIQR(v, ok) {
+  const a = []; for (let p = 0; p < v.length; p++) if (ok(p) && Number.isFinite(v[p])) a.push(v[p]);
+  a.sort((x, y) => x - y);
+  return { n: a.length, median: quantile(a, 0.5), q1: quantile(a, 0.25), q3: quantile(a, 0.75) };
+}
+const miq = (m, d = 3) => (m.n ? `${fmt(m.median, d)} (${fmt(m.q1, d)} – ${fmt(m.q3, d)})` : "–");
+function storeGet(key) { try { return JSON.parse(localStorage.getItem(key) || "null"); } catch { return null; } }
+function storeSet(key, v) { try { localStorage.setItem(key, JSON.stringify(v)); return true; } catch { return false; } }
+
+// --------------------------------------------------------------------------
+// Graphene
+// --------------------------------------------------------------------------
+const GR_STORE = "carbo-graphene";
+const GR = { settings: { ...structuredClone(GRAPHENE_DEFAULTS), ...((storeGet(GR_STORE) || {}).settings || {}) }, res: new Map(), running: false, specs: ["layer", "i2dg", "idg", "eps"], hover: null, pinned: null };
+const grSave = () => storeSet(GR_STORE, { settings: GR.settings });
+const GR_Q = Object.fromEntries(GR_QUANT.map(q => [q.key, q]));
+const grFitKey = s => stableJSON({ win1: s.win1, win2: s.win2, laser: Math.round(s.laser) });
+const grCur = () => { const R = S.ds ? GR.res.get(S.ds.id) : null; return R && R.ds === S.ds ? R : null; };
+const GR_COLOURS = () => [T.accent, T.warn, T.bad, T.muted];
+// each spectrum read at the settings in use (no refit for thresholds, the neutral point or the laser)
+function grRead(R) {
+  const key = stableJSON(GR.settings);
+  if (R.read && R.read.key === key) return R.read;
+  const s = GR.settings, n = R.n, q = Object.fromEntries(GR_QUANT.map(x => [x.key, new Float64Array(n).fill(NaN)]));
+  for (let p = 0; p < n; p++) {
+    if (!fitted(R.B1, p) || !fitted(R.B2, p)) continue;
+    const o = grReadOne(bandsAt(R.B1, p), bandsAt(R.B2, p)[0], Math.max(pkStat(R.B1, p, "rn"), pkStat(R.B2, p, "rn")), s);
+    for (const k in q) q[k][p] = o[k];
+  }
+  return (R.read = { key, q });
+}
+const grIsGraphene = (Q, p) => Q.layer[p] >= 0 && Q.layer[p] <= 2;
+async function grRun() {
+  if (GR.running || !S.ds || !S.cube) return;
+  const s = structuredClone(GR.settings), M = grModels(s), ds = S.ds, t0 = performance.now(), prog = $("#gr-prog > div");
+  GR.running = true; $("#gr-run").disabled = $("#gr-run2").disabled = true; prog.style.width = "0%";
+  try {
+    const st = t => { $("#gr-status").textContent = t; };
+    const B1 = await pkBatch(M.m1, S.wn, pkCompile(M.m1, S.wn).x0, (d, n) => { prog.style.width = `${(50 * d / n).toFixed(1)}%`; st(`D, G and D′: ${fmt(d)} of ${fmt(n)} spectra…`); });
+    const B2 = await pkBatch(M.m2, S.wn, pkCompile(M.m2, S.wn).x0, (d, n) => { prog.style.width = `${(50 + 50 * d / n).toFixed(1)}%`; st(`2D: ${fmt(d)} of ${fmt(n)} spectra…`); });
+    GR.res.set(ds.id, { ds, B1, B2, n: P(), key: grFitKey(s), seconds: (performance.now() - t0) / 1000 });
+    prog.style.width = "100%";
+  } catch (e) { $("#gr-status").textContent = `Could not fit: ${e.message}`; toast(`Graphene: ${e.message}`, "error", 8000); }
+  finally { GR.running = false; $("#gr-run").disabled = $("#gr-run2").disabled = false; }
+  if (S.ds === ds) { GR.hover = GR.pinned = null; grRender(); }
+}
+$("#gr-run").onclick = $("#gr-run2").onclick = () => grRun();
+$("#gr-reset").onclick = () => { GR.settings = structuredClone(GRAPHENE_DEFAULTS); if (S.ds && Number.isFinite(S.ds.laser_nm)) GR.settings.laser = S.ds.laser_nm; grSave(); grForm(); grRender(); };
+
+const grMaps = linkedMaps("gr", { onTitle: (e, i) => pickMenu(e, [{ title: "Show", items: GR_QUANT.map(q => [q.key, q.label]) }], GR.specs[i], k => { GR.specs[i] = k; grRenderMap(i); }),
+  onHover: p => { GR.hover = p; grMaps.forEach(m => m.setCursor(p, GR.pinned)); grRenderCursor(); },
+  onPick: p => { GR.pinned = p; GR.hover = null; grMaps.forEach(m => m.setCursor(null, p)); grRenderCursor(); grRenderScatter(); } });
+const grSpec1 = new SpectrumPlot($("#gr-spec1")), grSpec2 = new SpectrumPlot($("#gr-spec2"));
+const grScatter = new ScatterPlot($("#gr-scatter"), { onPick: i => { const R = grCur(); if (R && R.sIdx) { GR.pinned = R.sIdx[i]; grMaps.forEach(m => m.setCursor(null, GR.pinned)); grRenderCursor(); grRenderScatter(); } } });
+function grMapData(key, R) {
+  const Q = grRead(R).q;
+  if (key === "layer") {
+    const index = Int8Array.from(Q.layer, v => (Number.isFinite(v) ? v : -1));
+    return { values: Float32Array.from(index), label: "Layers", unit: "", categories: { index, colours: GR_COLOURS(), names: GR_LAYERS } };
+  }
+  const v = Float32Array.from(Q[key], (x, p) => (key === "rn" || grIsGraphene(Q, p) ? x : NaN));
+  return { values: v, label: GR_Q[key].label, unit: GR_Q[key].unit };
+}
+function grRenderMap(i) { const R = grCur(), fresh = R && R.key === grFitKey(GR.settings); showOnMap(grMaps[i], "Graphene", fresh ? grMapData(GR.specs[i], R) : null); }
+function grRenderCursor() {
+  const R = grCur(), tb = $("#gr-cursor-table"), info = $("#gr-info"); tb.textContent = ""; info.textContent = "";
+  const p = GR.hover ?? GR.pinned ?? (P() === 1 ? 0 : null);
+  if (!R || p == null) { grSpec1.emptyText = grSpec2.emptyText = R ? "Hover or click a map" : "Analyse first"; grSpec1.setData(null); grSpec2.setData(null); return; }
+  info.textContent = whereOf(p);
+  grSpec1.emptyText = grSpec2.emptyText = null;
+  if (!R.B1.status[p]) { grSpec1.emptyText = grSpec2.emptyText = "Not measured"; grSpec1.setData(null); grSpec2.setData(null); return; }
+  grSpec1.setData(batchSpectrum(R.B1, p)); grSpec2.setData(batchSpectrum(R.B2, p));
+  const Q = grRead(R).q, item = (k, d = 3) => tb.append(el("span", {}, el("b", {}, GR_Q[k].label), ` ${fmt(Q[k][p], d)}${GR_Q[k].unit ? ` ${GR_Q[k].unit}` : ""}`));
+  tb.append(el("span", {}, el("b", { style: `color:${GR_COLOURS()[Q.layer[p]] || T.muted}` }, GR_LAYERS[Q.layer[p]] || "–")));
+  ["i2dg", "w2d", "idg", "ld", "iddp", "eps", "dop"].forEach(k => { if (Number.isFinite(Q[k][p])) item(k); });
+  const t = grDefectType(Q.iddp[p]); if (t) tb.append(el("span", { class: "muted" }, `defects most like ${t.name}`));
+}
+// Pos(G) against Pos(2D) with Lee et al.'s strain and doping axes through the neutral point
+function grRenderScatter() {
+  const R = grCur(); if (!R) { grScatter.setData(null); return; }
+  const Q = grRead(R).q, s = GR.settings, idx = [];
+  for (let p = 0; p < R.n; p++) if (grIsGraphene(Q, p) && Number.isFinite(Q.pg[p]) && Number.isFinite(Q.p2d[p])) idx.push(p);
+  R.sIdx = idx;
+  const xs = Float64Array.from(idx, p => Q.pg[p]), ys = Float64Array.from(idx, p => Q.p2d[p]);
+  let lo = Math.min(s.g0, ...xs), hi = Math.max(s.g0, ...xs); const pad = Math.max(4, (hi - lo) * 0.3); lo -= pad; hi += pad;
+  const axis = (k, colour, label) => ({ x: [lo, hi], y: [s.d0 + k * (lo - s.g0), s.d0 + k * (hi - s.g0)], colour, dash: [5, 4], label });
+  const mark = GR.pinned != null ? idx.indexOf(GR.pinned) : -1;
+  grScatter.setData({ x: xs, y: ys, cls: Uint8Array.from(idx, p => Q.layer[p]), colours: GR_COLOURS(), xl: "Pos(G) (cm⁻¹)", yl: "Pos(2D) (cm⁻¹)", mark: mark >= 0 ? mark : null,
+    lines: [axis(s.slopeT, T.bad, "strain"), axis(s.slopeH, T.accent, "hole doping")] });
+}
+function grFormFields() {
+  const s = GR.settings, set = (id, v) => { $(id).value = v; };
+  set("#gr-laser", s.laser); set("#gr-w1lo", s.win1[0]); set("#gr-w1hi", s.win1[1]); set("#gr-w2lo", s.win2[0]); set("#gr-w2hi", s.win2[1]);
+  set("#gr-mono", s.mono); set("#gr-bi", s.bi); set("#gr-g0", s.g0); set("#gr-d0", s.d0); set("#gr-slt", s.slopeT); set("#gr-slh", s.slopeH); set("#gr-sens", s.sensG);
+}
+const grForm = () => grFormFields();
+const grOn = (id, set) => $(id).addEventListener("change", e => { const v = parseFloat(e.target.value); if (Number.isFinite(v)) set(v); grFormFields(); grSave(); grRender(); });
+grOn("#gr-laser", v => { if (v > 200 && v < 1200) GR.settings.laser = v; });
+grOn("#gr-w1lo", v => { GR.settings.win1 = [v, GR.settings.win1[1]]; }); grOn("#gr-w1hi", v => { GR.settings.win1 = [GR.settings.win1[0], v]; });
+grOn("#gr-w2lo", v => { GR.settings.win2 = [v, GR.settings.win2[1]]; }); grOn("#gr-w2hi", v => { GR.settings.win2 = [GR.settings.win2[0], v]; });
+grOn("#gr-mono", v => { GR.settings.mono = v; }); grOn("#gr-bi", v => { GR.settings.bi = v; });
+grOn("#gr-g0", v => { GR.settings.g0 = v; }); grOn("#gr-d0", v => { GR.settings.d0 = v; });
+grOn("#gr-slt", v => { GR.settings.slopeT = v; }); grOn("#gr-slh", v => { GR.settings.slopeH = v; }); grOn("#gr-sens", v => { if (v) GR.settings.sensG = v; });
+function grLayerRows(R) {
+  const Q = grRead(R).q, c = [0, 0, 0, 0]; let n = 0;
+  for (let p = 0; p < R.n; p++) if (Number.isFinite(Q.layer[p])) { c[Q.layer[p]]++; n++; }
+  return GR_LAYERS.map((name, k) => ({ name, k, n: c[k], share: n ? c[k] / n : NaN, ci: wilson(c[k], n) }));
+}
+function grResultRows(R) {
+  const Q = grRead(R).q, ok = p => grIsGraphene(Q, p);
+  return GR_QUANT.filter(q => q.key !== "layer").map(q => ({ ...q, m: medIQR(Q[q.key], q.key === "rn" ? p => Number.isFinite(Q.layer[p]) : ok) }));
+}
+function grChecks(R) {
+  const out = [], add = (text, warn = false) => out.push({ text, warn }), s = GR.settings, Q = grRead(R).q;
+  const rows = grLayerRows(R), nG = rows[0].n + rows[1].n + rows[2].n;
+  if (!nG) { add("No spectrum has both a G and a 2D band standing above its errors: these are not graphene spectra, or the windows miss the bands.", true); return out; }
+  if (Math.abs(s.laser - 514.5) > 2 && s.d0 === GRAPHENE_DEFAULTS.d0) add(`The neutral point (${s.g0}, ${s.d0}) is Lee et al.'s at 514.5 nm and the laser is ${fmt(s.laser, 4)} nm: the 2D band moves about 100 cm⁻¹ per eV, so the strain and doping are off until the neutral Pos(2D) for this laser is entered.`, true);
+  add("Layers come from FWHM(2D): it counts layers for Bernal (AB) stacked graphene; randomly stacked (turbostratic) multilayers keep a single 2D band about 45 to 60 cm⁻¹ wide. I(2D)/I(G) is not used: doping and the substrate change it.");
+  const mono = medIQR(Q.i2dg, p => Q.layer[p] === 0);
+  if (mono.n && mono.median < 1) add(`The monolayer spectra have a median I(2D)/I(G) of ${fmt(mono.median, 3)}, below 1: doped, or not monolayers after all.`, true);
+  let over = 0, dn = 0; for (let p = 0; p < R.n; p++) if (grIsGraphene(Q, p) && Q.idg[p] > 0) { dn++; if (!Number.isFinite(Q.ld[p])) over++; }
+  if (over) add(`${fmt(over)} of ${fmt(dn)} spectra with a D band are past the low-defect regime (L_D would be under 10 nm): Cançado et al.'s formula does not hold there, so L_D and n_D are left out.`, over > 0.2 * dn);
+  const dd = medIQR(Q.iddp, p => grIsGraphene(Q, p)), t = grDefectType(dd.median);
+  if (dd.n) add(`Median I(D)/I(D′) ${fmt(dd.median, 3)} over ${fmt(dd.n)} spectra: most like ${t.name} (about 13 for sp³ sites, 7 for vacancies, 3.5 for boundaries, Eckmann et al. 2012; meaningful at low defect density only).`);
+  const hi = Array.from(Q.rn).filter(v => v > 2).length;
+  if (hi) add(`${fmt(hi)} spectra leave more than 2 × their noise: a band the model lacks (a 2D that is not one Lorentzian, as in a bilayer, or another material).`, hi > 0.1 * nG);
+  return out;
+}
+function grShow() { if (S.ds && Number.isFinite(S.ds.laser_nm) && GR.laserFile !== S.ds) { GR.settings.laser = S.ds.laser_nm; GR.laserFile = S.ds; } grForm(); grRender(); setTimeout(() => { grMaps.forEach(m => m.render()); grSpec1.render(); grSpec2.render(); grScatter.render(); }, 0); if (S.cube && !grCur() && !GR.running) grRun(); }
+function grRender() {
+  const R = grCur(), fresh = R && R.key === grFitKey(GR.settings), empty = $("#gr-empty");
+  const why = !S.ds ? "Open a map, a set of spectra or one spectrum of graphene first." : !S.cube ? "This file holds fitted values, not spectra." : !R ? (GR.running ? "Fitting…" : "Every spectrum is fitted with D, G, D′ and 2D bands and read as layers (from the 2D band), defects (from I(D)/I(G) and I(D)/I(D′)), and strain and doping (from the positions of G and 2D).") : null;
+  empty.classList.toggle("hidden", !why); empty.classList.toggle("can-fit", !!S.cube && !R && !GR.running);
+  if (why) $("#gr-empty-p").textContent = why;
+  if (R && !GR.running) $("#gr-status").textContent = `${fmt(R.n)} spectra in ${R.seconds.toFixed(1)} s.${fresh ? "" : " The windows or the laser have changed: Analyse again."}`;
+  grMaps.forEach((_, i) => grRenderMap(i)); grRenderCursor(); grRenderScatter();
+  const lt = $("#gr-layer-table"), rt = $("#gr-res-table"), ck = $("#gr-checks");
+  if (!R) { lt.replaceChildren(); rt.replaceChildren(); ck.replaceChildren(); return; }
+  lt.replaceChildren(el("tr", {}, ...["", "Spectra", "Share (95 % interval)"].map((h, i) => el("th", { class: i ? "" : "l" }, h))),
+    ...grLayerRows(R).map(r => el("tr", {}, el("td", { class: "l" }, el("span", { class: "sw", style: `background:${GR_COLOURS()[r.k]}` }), r.name), el("td", {}, fmt(r.n)), el("td", {}, `${dlcPct(r.share)} (${dlcPct(r.ci[0])} – ${dlcPct(r.ci[1])})`))));
+  rt.replaceChildren(el("tr", {}, ...["", "Median (quartiles)", "n"].map((h, i) => el("th", { class: i ? "" : "l" }, h))),
+    ...grResultRows(R).map(r => el("tr", {}, el("td", { class: "l" }, `${r.label}${r.unit ? ` (${r.unit})` : ""}`), el("td", {}, miq(r.m)), el("td", {}, fmt(r.m.n)))));
+  $("#gr-res-note").textContent = `L_D and n_D from I(D)/I(G) at ${fmt(GR.settings.laser, 4)} nm (Cançado et al. 2011), only where L_D ≥ 10 nm. Strain and the doping shift of G from Lee et al. (2012).`;
+  ck.replaceChildren(...grChecks(R).map(c => el("li", { class: c.warn ? "warn" : "" }, c.text)));
+}
+$("#gr-csv").onclick = () => {
+  const R = grCur(); if (!R) { toast("Analyse first.", "error"); return; }
+  const Q = grRead(R).q, rows = [[S.names ? "Spectrum" : S.points ? "Particle" : "Point", "X (um)", "Y (um)", ...GR_QUANT.map(q => `${q.label}${q.unit ? ` (${q.unit.replace("cm⁻¹", "cm-1").replace("10¹⁰ cm⁻²", "1e10 cm-2")})` : ""}`)]];
+  for (let p = 0; p < R.n; p++) {
+    if (!R.B1.status[p]) continue;
+    rows.push([S.names ? S.names[p] : p + 1, S.points ? S.points.x[p] : S.x[p % S.nx], S.points ? S.points.y[p] : S.y[Math.floor(p / S.nx)], ...GR_QUANT.map(q => (q.key === "layer" ? GR_LAYERS[Q.layer[p]] || "" : Q[q.key][p]))]);
+  }
+  download(`${S.ds.name}_graphene.csv`, rows.map(r => r.map(pkCell).join(",")).join("\n") + "\n", "text/csv");
+};
+$("#gr-png").onclick = () => grMaps.forEach((m, i) => setTimeout(() => m.save(), i * 250));
+$("#gr-report").onclick = () => { $("#rp-kind").value = "graphene"; rpTitle(); switchTab("report"); };
+function makeGrapheneReport() {
+  const R = grCur();
+  if (!R) { $("#report-paper").replaceChildren(el("p", {}, "Analyse first: open Graphene, then Analyse.")); return; }
+  grRenderScatter();
+  const host = offscreen(620, 380), sp = new ScatterPlot(host); sp.setData(grScatter.d); const scatter = grScatter.d ? onDark(sp.canvas) : null; host.remove();
+  buildGrapheneReport($("#report-paper"), { title: $("#rp-title").value, ds: S.ds, R, s: GR.settings, layers: grLayerRows(R), rows: grResultRows(R), checks: grChecks(R), scatter,
+    colours: GR_COLOURS(), maps: P() > 1 ? GR.specs.map((k, i) => mapFigure(grMaps[i], "Graphene", grMapData(k, R), GR.pinned)) : [] });
+}
+
+// --------------------------------------------------------------------------
+// Silicon
+// --------------------------------------------------------------------------
+const SI_STORE = "carbo-silicon", SI_LOG = "carbo-si-log";
+const SI = { settings: { ...structuredClone(SI_DEFAULTS), ...((storeGet(SI_STORE) || {}).settings || {}) }, res: new Map(), running: false, specs: ["pos", "stress", "fwhm", "rn"], hover: null, pinned: null, log: storeGet(SI_LOG) || [] };
+const siSave = () => storeSet(SI_STORE, { settings: SI.settings });
+const SI_Q = Object.fromEntries(SI_QUANT.map(q => [q.key, q]));
+const SI_DIGITS = { pos: 6, h: 4 };                 // significant digits shown: a position to 0.01 cm⁻¹
+const siFitKey = s => stableJSON({ model: s.model, shape: s.shape, range: s.range });
+const siCur = () => { const R = S.ds ? SI.res.get(S.ds.id) : null; return R && R.ds === S.ds ? R : null; };
+function siRead(R) {
+  const key = stableJSON(SI.settings);
+  if (R.read && R.read.key === key) return R.read;
+  const n = R.n, q = Object.fromEntries([...SI_QUANT.map(x => x.key), "sPos", "sStress"].map(k => [k, new Float64Array(n).fill(NaN)]));
+  for (let p = 0; p < n; p++) { if (!fitted(R.B, p)) continue; const o = siReadOne(bandsAt(R.B, p), pkStat(R.B, p, "rn"), SI.settings); for (const k in q) q[k][p] = o[k]; }
+  return (R.read = { key, q });
+}
+async function siRun() {
+  if (SI.running || !S.ds || !S.cube) return;
+  const s = structuredClone(SI.settings), m = siModel(s), ds = S.ds, t0 = performance.now(), prog = $("#si-prog > div");
+  SI.running = true; $("#si-run").disabled = $("#si-run2").disabled = true; prog.style.width = "0%";
+  try {
+    const B = await pkBatch(m, S.wn, pkCompile(m, S.wn).x0, (d, n) => { prog.style.width = `${(100 * d / n).toFixed(1)}%`; $("#si-status").textContent = `Fitting ${fmt(d)} of ${fmt(n)} spectra…`; });
+    SI.res.set(ds.id, { ds, B, n: P(), key: siFitKey(s), seconds: (performance.now() - t0) / 1000 });
+    if (s.model === "film" && SI.specs.join() === "pos,stress,fwhm,rn") SI.specs = ["xc", "pos", "fwhm", "rn"];
+    prog.style.width = "100%";
+  } catch (e) { $("#si-status").textContent = `Could not fit: ${e.message}`; toast(`Silicon: ${e.message}`, "error", 8000); }
+  finally { SI.running = false; $("#si-run").disabled = $("#si-run2").disabled = false; }
+  if (S.ds === ds) { SI.hover = SI.pinned = null; siRender(); }
+}
+$("#si-run").onclick = $("#si-run2").onclick = () => siRun();
+$("#si-reset").onclick = () => { SI.settings = structuredClone(SI_DEFAULTS); siSave(); siForm(); siRender(); };
+const siMaps = linkedMaps("si", { onTitle: (e, i) => pickMenu(e, [{ title: "Show", items: SI_QUANT.filter(q => q.key !== "xc" || SI.settings.model === "film").map(q => [q.key, q.label]) }], SI.specs[i], k => { SI.specs[i] = k; siRenderMap(i); }),
+  onHover: p => { SI.hover = p; siMaps.forEach(m => m.setCursor(p, SI.pinned)); siRenderCursor(); },
+  onPick: p => { SI.pinned = p; SI.hover = null; siMaps.forEach(m => m.setCursor(null, p)); siRenderCursor(); siRenderCal(); } });
+const siSpec = new SpectrumPlot($("#si-spec")), siChart = new LinesPlot($("#si-chart"));
+function siRenderMap(i) {
+  const R = siCur(), fresh = R && R.key === siFitKey(SI.settings);
+  if (!fresh) { showOnMap(siMaps[i], "Silicon", null); return; }
+  const k = SI.specs[i], q = SI_Q[k] || SI_Q.pos;
+  showOnMap(siMaps[i], "Silicon", { values: Float32Array.from(siRead(R).q[q.key]), label: q.label, unit: q.unit });
+}
+// the spectrum in view: the hovered or pinned point, the only one, or (for the calibration) the mean
+const siPoint = () => SI.hover ?? SI.pinned ?? (P() === 1 ? 0 : null);
+function siRenderCursor() {
+  const R = siCur(), tb = $("#si-cursor-table"), info = $("#si-info"); tb.textContent = ""; info.textContent = "";
+  const p = siPoint();
+  if (!R || p == null) { siSpec.emptyText = R ? "Hover or click a map" : "Analyse first"; siSpec.setData(null); return; }
+  info.textContent = whereOf(p);
+  if (!R.B.status[p]) { siSpec.emptyText = "Not measured"; siSpec.setData(null); return; }
+  siSpec.emptyText = null; siSpec.setData(batchSpectrum(R.B, p));
+  const Q = siRead(R).q;
+  for (const k of ["pos", "shift", "stress", "fwhm", ...(SI.settings.model === "film" ? ["xc"] : [])]) tb.append(el("span", {}, el("b", {}, SI_Q[k].label), ` ${fmt(Q[k][p], SI_DIGITS[k] || 4)} ${SI_Q[k].unit}${k === "stress" && Q.sStress[p] > 0 ? ` ± ${fmt(Q.sStress[p], 2)}` : ""}`));
+}
+// the calibration check on the spectrum in view (a map: its mean), fitted here
+function siCalNow() {
+  if (!S.cube) return null;
+  const p = siPoint(), y = p != null ? pointSpectrum(p) : meanSpectrum(), label = p != null ? (S.names ? S.names[p] : P() === 1 ? S.ds.name : `point ${p + 1}`) : `mean of ${fmt(S.meanSpec.n)} spectra`;
+  try {
+    const s = { ...SI.settings, model: "single" }, C = pkCompile(siModel(s), S.wn), r = pkFitOne(C, pkCut(C, y));
+    if (r.status === 3) return { label, error: "the fit failed" };
+    const v = r.D.vals[0];
+    return { label, pos: v[1], fwhm: v[2], h: v[0], sPos: r.D.ses[0][1], ...siCalCheck(v[1], v[2], SI.settings) };
+  } catch (e) { return { label, error: e.message }; }
+}
+function siRenderCal() {
+  const host = $("#si-cal-now"), c = siCalNow();
+  if (!c) { host.replaceChildren(); return; }
+  if (c.error) { host.replaceChildren(el("div", { class: "muted small" }, `${c.label}: ${c.error}`)); return; }
+  const s = SI.settings;
+  host.replaceChildren(el("div", { class: `si-cal ${c.pass ? "good" : "bad"}` }, el("b", {}, c.pass ? "Pass" : "Fail"), ` · ${c.label}: ${fmt(c.pos, 6)} ± ${c.sPos < 0.001 ? "0.001" : c.sPos.toFixed(3)} cm⁻¹ (${c.d >= 0 ? "+" : "−"}${fmt(Math.abs(c.d), 2)} from ${s.w0}${c.okPos ? "" : `, beyond ±${s.tol}`}), FWHM ${fmt(c.fwhm, 3)} cm⁻¹${c.okW ? "" : ` (over ${s.fwhmMax})`}`));
+  SI.calNow = c;
+}
+function siRenderLog() {
+  const L = SI.log, t = $("#si-log-table"), info = $("#si-log-info"), s = SI.settings;
+  const lim = siControl(L.map(e => e.pos));
+  info.textContent = L.length ? `· ${L.length} check${L.length > 1 ? "s" : ""}${lim.n >= 2 ? `, mean ${fmt(lim.mean, 6)} ± ${fmt(lim.sd, 2)} cm⁻¹ (SD)` : ""}` : "· no checks yet";
+  t.replaceChildren(...(L.length ? [el("tr", {}, ...["Date", "File", "Position", "FWHM", ""].map((h, i) => el("th", { class: i < 2 ? "l" : "" }, h)))] : []),
+    ...L.map((e, i) => el("tr", { class: lim.out.includes(i) || !e.pass ? "warn" : "" }, el("td", { class: "l" }, new Date(e.at).toLocaleDateString()), el("td", { class: "l" }, e.file), el("td", {}, fmt(e.pos, 6)), el("td", {}, fmt(e.fwhm, 3)),
+      el("td", {}, el("button", { class: "icon", title: "Remove this check", onclick: () => { SI.log.splice(i, 1); storeSet(SI_LOG, SI.log); siRenderLog(); } }, "✕")))));
+  if (!L.length) { siChart.emptyText = "Add checks to see them over time"; siChart.setData(null); return; }
+  const xs = Float64Array.from(L, (_, i) => i + 1), flat = (v, colour, label, dash) => ({ x: Float64Array.of(0.5, L.length + 0.5), y: Float64Array.of(v, v), colour, label, dash, width: 1 });
+  const series = [{ x: xs, y: Float64Array.from(L, e => e.pos), colour: T.accent, label: "position", width: 1.8 }, flat(s.w0 + s.tol, T.bad, `tolerance ±${s.tol}`, [5, 4]), flat(s.w0 - s.tol, T.bad, "", [5, 4])];
+  if (lim.n >= 2) series.push(flat(lim.mean, T.strong, "mean", []), flat(lim.hi, T.warn, "mean ± 3 SD", [2, 3]), flat(lim.lo, T.warn, "", [2, 3]));
+  siChart.setData({ series, xl: "Check", yl: "Si position (cm⁻¹)", legend: true, xr: [0.5, L.length + 0.5] });
+}
+$("#si-log-add").onclick = () => {
+  const c = SI.calNow && !SI.calNow.error ? SI.calNow : siCalNow();
+  if (!c || c.error) { toast("Nothing to add: open a silicon spectrum.", "error"); return; }
+  SI.log.push({ at: Date.now(), file: S.ds.name, label: c.label, pos: c.pos, fwhm: c.fwhm, h: c.h, laser: S.ds.laser_nm ?? null, pass: c.pass });
+  storeSet(SI_LOG, SI.log); siRenderLog();
+};
+$("#si-log-clear").onclick = () => { if (!SI.log.length) return; SI.log = []; storeSet(SI_LOG, SI.log); siRenderLog(); };
+$("#si-log-csv").onclick = () => {
+  if (!SI.log.length) { toast("The log is empty.", "error"); return; }
+  const rows = [["Date", "File", "Spectrum", "Position (cm-1)", "FWHM (cm-1)", "Height", "Laser (nm)", "Pass"], ...SI.log.map(e => [new Date(e.at).toISOString(), e.file, e.label, e.pos, e.fwhm, e.h, e.laser ?? "", e.pass ? "yes" : "no"])];
+  download("silicon_calibration_log.csv", rows.map(r => r.map(pkCell).join(",")).join("\n") + "\n", "text/csv");
+};
+$("#si-w0-pin").onclick = () => {
+  const R = siCur(), p = SI.pinned;
+  if (!R || p == null || !fitted(R.B, p)) { toast("Analyse, then pin an unstressed point on a map.", "error"); return; }
+  SI.settings.w0 = +pkVal(R.B, p, R.B.C.peaks.length - 1, "c").toFixed(3); siSave(); siForm(); siRender();
+};
+function siFormFields() {
+  const s = SI.settings, set = (id, v) => { $(id).value = v; };
+  set("#si-model", s.model); set("#si-shape", s.shape); set("#si-lo", s.range[0]); set("#si-hi", s.range[1]); set("#si-w0", s.w0); set("#si-k", s.k); set("#si-y", s.y); set("#si-tol", s.tol); set("#si-fwmax", s.fwhmMax);
+}
+const siForm = () => siFormFields();
+const siOn = (id, set, num = true) => $(id).addEventListener("change", e => { const v = num ? parseFloat(e.target.value) : e.target.value; if (!num || Number.isFinite(v)) set(v); siFormFields(); siSave(); siRender(); });
+siOn("#si-model", v => { SI.settings.model = v; }, false); siOn("#si-shape", v => { SI.settings.shape = v; }, false);
+siOn("#si-lo", v => { SI.settings.range = [v, SI.settings.range[1]]; }); siOn("#si-hi", v => { SI.settings.range = [SI.settings.range[0], v]; });
+siOn("#si-w0", v => { SI.settings.w0 = v; }); siOn("#si-k", v => { SI.settings.k = v; }); siOn("#si-y", v => { if (v > 0) SI.settings.y = v; });
+siOn("#si-tol", v => { if (v > 0) SI.settings.tol = v; }); siOn("#si-fwmax", v => { if (v > 0) SI.settings.fwhmMax = v; });
+function siResultRows(R) {
+  const Q = siRead(R).q, ok = p => Number.isFinite(Q.pos[p]);
+  return SI_QUANT.filter(q => q.key !== "xc" || SI.settings.model === "film").map(q => ({ ...q, m: medIQR(Q[q.key], ok) }));
+}
+function siChecks(R) {
+  const out = [], add = (text, warn = false) => out.push({ text, warn }), s = SI.settings, Q = siRead(R).q;
+  const n = Array.from(Q.pos).filter(Number.isFinite).length;
+  if (!n) { add("No spectrum has a silicon band near 520 cm⁻¹ standing above its error.", true); return out; }
+  add(`Stress from σ = ${fmt(s.k, 4)} MPa per cm⁻¹ × (ω − ${s.w0}). ${s.k === -434 ? "That is the uniaxial coefficient (De Wolf 1996): " : ""}a shift up is compression. One band's shift gives one combination of the stress components: a biaxial or general stress state needs its own coefficient.`);
+  const w = medIQR(Q.fwhm, p => Number.isFinite(Q.pos[p]));
+  if (w.median > s.fwhmMax) add(`The median FWHM is ${fmt(w.median, 3)} cm⁻¹, over ${s.fwhmMax}: disorder, small crystallites, or laser heating (which also moves the band down, about 0.02 cm⁻¹ per K).`, true);
+  if (s.shape === "lorentz") add("The band is fitted as a Lorentzian; where the spectrometer's own width is comparable, a Voigt separates the two.");
+  const hi = Array.from(Q.rn).filter(v => v > 2).length;
+  if (hi) add(`${fmt(hi)} spectra leave more than 2 × their noise: a second band (a film's grain boundary or amorphous silicon) or a shoulder from a strained layer.`, hi > 0.1 * n);
+  if (s.model === "film") add(`Crystalline fraction Xc = (A_c + A_gb) / (A_c + A_gb + ${s.y} A_a); y is the ratio of the amorphous to the crystalline cross-section and depends on the crystallite size.`);
+  return out;
+}
+function siShow() { siForm(); siRender(); setTimeout(() => { siMaps.forEach(m => m.render()); siSpec.render(); siChart.render(); }, 0); if (S.cube && !siCur() && !SI.running) siRun(); }
+function siRender() {
+  const R = siCur(), fresh = R && R.key === siFitKey(SI.settings), empty = $("#si-empty");
+  const why = !S.ds ? "Open a silicon map, a set of spectra or one spectrum (a wafer for the calibration check)." : !S.cube ? "This file holds fitted values, not spectra." : !R ? (SI.running ? "Fitting…" : "Every spectrum's 520 cm⁻¹ band is fitted: its position, the shift from the unstressed position and the stress, its width, and for films the crystalline fraction. The calibration check tests one spectrum against the reference and keeps a log.") : null;
+  empty.classList.toggle("hidden", !why); empty.classList.toggle("can-fit", !!S.cube && !R && !SI.running);
+  if (why) $("#si-empty-p").textContent = why;
+  if (R && !SI.running) $("#si-status").textContent = `${fmt(R.n)} spectra in ${R.seconds.toFixed(1)} s.${fresh ? "" : " The bands or the range have changed: Analyse again."}`;
+  siMaps.forEach((_, i) => siRenderMap(i)); siRenderCursor(); siRenderCal(); siRenderLog();
+  const rt = $("#si-res-table"), ck = $("#si-checks");
+  if (!R || !fresh) { rt.replaceChildren(); ck.replaceChildren(); $("#si-res-note").textContent = ""; return; }
+  rt.replaceChildren(el("tr", {}, ...["", "Median (quartiles)", "n"].map((h, i) => el("th", { class: i ? "" : "l" }, h))),
+    ...siResultRows(R).map(r => el("tr", {}, el("td", { class: "l" }, `${r.label}${r.unit ? ` (${r.unit})` : ""}`), el("td", {}, miq(r.m, SI_DIGITS[r.key] || 3)), el("td", {}, fmt(r.m.n)))));
+  $("#si-res-note").textContent = "Over the spectra with a silicon band standing 5 × its error above zero.";
+  ck.replaceChildren(...siChecks(R).map(c => el("li", { class: c.warn ? "warn" : "" }, c.text)));
+}
+$("#si-csv").onclick = () => {
+  const R = siCur(); if (!R) { toast("Analyse first.", "error"); return; }
+  const Q = siRead(R).q, keys = SI_QUANT.filter(q => q.key !== "xc" || SI.settings.model === "film");
+  const rows = [[S.names ? "Spectrum" : S.points ? "Particle" : "Point", "X (um)", "Y (um)", ...keys.map(q => `${q.label}${q.unit ? ` (${q.unit.replace("cm⁻¹", "cm-1")})` : ""}`), "Position SE (cm-1)", "Stress SE (MPa)"]];
+  for (let p = 0; p < R.n; p++) {
+    if (!R.B.status[p]) continue;
+    rows.push([S.names ? S.names[p] : p + 1, S.points ? S.points.x[p] : S.x[p % S.nx], S.points ? S.points.y[p] : S.y[Math.floor(p / S.nx)], ...keys.map(q => Q[q.key][p]), Q.sPos[p], Q.sStress[p]]);
+  }
+  download(`${S.ds.name}_silicon.csv`, rows.map(r => r.map(pkCell).join(",")).join("\n") + "\n", "text/csv");
+};
+$("#si-png").onclick = () => siMaps.forEach((m, i) => setTimeout(() => m.save(), i * 250));
+$("#si-report").onclick = () => { $("#rp-kind").value = "si"; rpTitle(); switchTab("report"); };
+function makeSiliconReport() {
+  const R = siCur();
+  if (!R) { $("#report-paper").replaceChildren(el("p", {}, "Analyse first: open Silicon, then Analyse.")); return; }
+  siRenderLog();
+  const host = offscreen(620, 360), lp = new LinesPlot(host); lp.setData(siChart.d); const chart = siChart.d ? onDark(lp.canvas) : null; host.remove();
+  buildSiliconReport($("#report-paper"), { title: $("#rp-title").value, ds: S.ds, R, s: SI.settings, rows: siResultRows(R), checks: siChecks(R), cal: SI.calNow || siCalNow(), log: SI.log, chart,
+    maps: P() > 1 ? SI.specs.map((k, i) => mapFigure(siMaps[i], "Silicon", { values: Float32Array.from(siRead(R).q[(SI_Q[k] || SI_Q.pos).key]), label: (SI_Q[k] || SI_Q.pos).label, unit: (SI_Q[k] || SI_Q.pos).unit }, SI.pinned)) : [] });
+}
+
+// =========================================================================
+// Identify (identify.js): every spectrum against a library of references by HQI
+// =========================================================================
+const ID_STORE = "carbo-identify", ID_LIB = "carbo-id-library";
+const ID = { settings: { ...structuredClone(ID_DEFAULTS), ...((storeGet(ID_STORE) || {}).settings || {}) }, lib: [], files: new Map(), running: false,
+  specs: ["best", "hqi", "second", "hqi2"], which: "mean", hover: null, pinned: null, show: null, worker: null, seq: 0 };
+// the library is kept in this browser when it fits (a few MB), and in files otherwise
+try {
+  const saved = storeGet(ID_LIB);
+  if (Array.isArray(saved)) ID.lib = saved.map(r => ({ id: ++ID.seq, name: r.name, wn: Float64Array.from(r.wn), y: Float64Array.from(r.y) }));
+} catch { /* none kept */ }
+const idSave = () => storeSet(ID_STORE, { settings: ID.settings });
+function idLibChanged() {
+  const ok = storeSet(ID_LIB, ID.lib.map(r => ({ name: r.name, wn: Array.from(r.wn, v => +v.toFixed(3)), y: Array.from(r.y, v => +v.toPrecision(6)) })));
+  ID.libKept = ok;
+  for (const D of ID.files.values()) { D.res = null; D.refs = null; }
+  idLibList(); idRender();
+}
+const idPrepKey = s => stableJSON({ range: s.range, baseline: s.baseline });
+const idFile = () => (S.ds ? ID.files.get(S.ds.id) || null : null);
+const idLibKey = () => ID.lib.map(r => `${r.id}:${r.name}`).join("|");
+// the reference vectors for this file's prepared spectra (cached per library and comparison)
+function idRefs(D) {
+  const k = `${idLibKey()}|${ID.settings.deriv}`;
+  if (!D.refs || D.refs.key !== k) D.refs = { key: k, R: idRefVectors(ID.lib, D.prep, ID.settings.deriv) };
+  return D.refs.R;
+}
+async function idRun() {
+  if (ID.running || !S.ds || !S.cube) return;
+  if (!ID.lib.length) { toast("Add reference spectra to the library first.", "error"); return; }
+  const s = structuredClone(ID.settings), ds = S.ds, pkey = `${ds.id}|${idPrepKey(s)}`, prog = $("#id-prog > div"), t0 = performance.now();
+  let D = ID.files.get(ds.id);
+  if (!D) ID.files.set(ds.id, D = { prep: null, pkey: null, res: null });
+  ID.running = true; $("#id-run").disabled = true; prog.style.width = "3%";
+  const refs = ID.lib.map(r => ({ name: r.name, wn: r.wn, y: r.y }));
+  try {
+    const msg = { key: pkey, cube: S.cube, K: S.k, wn: S.wn, geom: { nx: S.nx, ny: S.ny }, settings: { ...s, deriv: !!s.deriv }, refs, havePrep: D.pkey === pkey && !!D.prep };
+    const out = await new Promise((res, rej) => {
+      if (ID.worker === null) { try { ID.worker = new Worker(new URL("./id-worker.js", import.meta.url), { type: "module" }); } catch { ID.worker = false; } }
+      if (!ID.worker) {
+        xcTick().then(() => {
+          try {
+            const prep = D.pkey === pkey && D.prep ? D.prep : lyPrepare(msg.cube, msg.K, msg.wn, msg.geom, s);
+            res({ prep, res: idSearchAll(prep, idRefVectors(refs, prep, !!s.deriv), !!s.deriv) });
+          } catch (e) { rej(e); }
+        });
+        return;
+      }
+      const w = ID.worker;
+      w.onmessage = e => { const d = e.data; if (d.stage) { $("#id-status").textContent = `${d.stage}…`; prog.style.width = "50%"; return; } if (d.error) rej(new Error(d.error)); else res(d); };
+      w.onerror = e => { w.terminate(); ID.worker = null; rej(new Error(e.message || "the search worker failed")); };
+      w.postMessage(msg);
+    });
+    if (out.prep) { D.prep = out.prep; D.pkey = pkey; D.refs = null; }
+    D.res = { ...out.res, lib: idLibKey(), deriv: !!s.deriv, seconds: (performance.now() - t0) / 1000 };
+    prog.style.width = "100%";
+  } catch (e) { $("#id-status").textContent = `Could not search: ${e.message}`; toast(`Identify: ${e.message}`, "error", 8000); }
+  finally { ID.running = false; $("#id-run").disabled = false; }
+  if (S.ds === ds) idRender();
+}
+$("#id-run").onclick = () => idRun();
+const idFresh = D => D && D.res && D.res.lib === idLibKey() && D.res.deriv === !!ID.settings.deriv && D.pkey === `${S.ds.id}|${idPrepKey(ID.settings)}`;
+const idColour = r => mvColour(r);
+// the best reference of row i when it reaches the match HQI, else -1
+const idBest = (res, i) => (res.best[i] >= 0 && res.hqi[i] >= ID.settings.minHQI ? res.best[i] : -1);
+function idMapData(spec, D) {
+  const { prep } = D, res = D.res, np = prep.P, names = ID.lib.map(r => r.name), nomatch = names.length;
+  const cat = which => {
+    const index = Int16Array.from({ length: np }, (_, p) => { const i = prep.rowOf[p]; if (i < 0) return -1; const b = which === "best" ? idBest(res, i) : res.second[i]; return b >= 0 ? b : nomatch; });
+    return { values: Float32Array.from(index), label: which === "best" ? "Best match" : "Second best", unit: "", categories: { index, colours: [...names.map((_, r) => idColour(r)), T.muted], names: [...names, "No match"] } };
+  };
+  if (spec === "best" || spec === "second") return cat(spec);
+  const v = new Float32Array(np).fill(NaN);
+  if (spec === "hqi" || spec === "hqi2") { for (let p = 0; p < np; p++) { const i = prep.rowOf[p]; if (i >= 0) v[p] = (spec === "hqi" ? res.hqi : res.hqi2)[i]; } return { values: v, label: spec === "hqi" ? "Best HQI" : "Second HQI", unit: "" }; }
+  const r = +spec.split(":")[1], R = idRefs(D)[r];
+  for (let p = 0; p < np; p++) { const i = prep.rowOf[p]; if (i >= 0) v[p] = idHqi(prep.V.subarray(i * prep.nb, (i + 1) * prep.nb), R, !!ID.settings.deriv); }
+  return { values: v, label: `HQI with ${names[r]}`, unit: "" };
+}
+const idMaps = linkedMaps("id", { onTitle: (e, i) => pickMenu(e, [{ title: "Show", items: [["best", "Best match"], ["hqi", "Best HQI"], ["second", "Second best"], ["hqi2", "Second HQI"]] },
+  { title: "HQI with", items: ID.lib.map((r, k) => [`ref:${k}`, r.name]) }], ID.specs[i], k => { ID.specs[i] = k; idRenderMap(i); }),
+  onHover: p => { ID.hover = p; idMaps.forEach(m => m.setCursor(p, ID.pinned)); idRenderSpec(); },
+  onPick: p => { ID.pinned = p; ID.hover = null; ID.which = "pin"; ID.show = null; idMaps.forEach(m => m.setCursor(null, p)); idFillWhich(); idRenderSpec(); idRenderHits(); } });
+function idRenderMap(i) {
+  const D = idFile();
+  if (!idFresh(D) || (ID.specs[i].startsWith("ref:") && +ID.specs[i].split(":")[1] >= ID.lib.length)) { showOnMap(idMaps[i], "Identify", null); return; }
+  showOnMap(idMaps[i], "Identify", idMapData(ID.specs[i], D));
+}
+const idPlot = new LinesPlot($("#id-spec"));
+function idFillWhich() {
+  const sel = $("#id-which"), opts = [];
+  if (!S.cube) opts.push(["", "No spectra"]);
+  else if (P() === 1) opts.push(["0", S.names ? S.names[0] : "This spectrum"]);
+  else {
+    opts.push(["mean", "Mean spectrum"]);
+    if (S.names) S.names.forEach((n, i) => opts.push([String(i), n]));
+    else opts.push(["pin", ID.pinned != null ? `Pinned point ${ID.pinned + 1}` : "Pinned point (click a map)"]);
+  }
+  sel.replaceChildren(...opts.map(([v, t]) => el("option", { value: v }, t)));
+  sel.value = opts.some(o => o[0] === String(ID.which)) ? String(ID.which) : opts[0][0];
+}
+$("#id-which").onchange = e => { ID.which = e.target.value; ID.show = null; idRenderSpec(); idRenderHits(); };
+// the prepared spectrum in view: a row of prep.V, or the mean of the rows
+function idView(D) {
+  if (!D || !D.prep) return null;
+  const { prep } = D, nb = prep.nb, hov = ID.hover;
+  const row = p => { const i = prep.rowOf[p]; return i >= 0 ? { x: prep.V.subarray(i * nb, (i + 1) * nb), i, p } : null; };
+  if (hov != null) { const r = row(hov); return r ? { ...r, label: S.names ? S.names[hov] : `point ${hov + 1}` } : null; }
+  if (P() === 1) { const r = row(0); return r ? { ...r, label: S.names ? S.names[0] : S.ds.name } : null; }
+  const p = ID.which === "pin" ? ID.pinned : ID.which === "mean" ? null : +ID.which;
+  if (p != null && p >= 0) { const r = row(p); return r ? { ...r, label: S.names ? S.names[p] : `point ${p + 1}` } : null; }
+  if (!D.mean) { const m = new Float64Array(nb); for (let i = 0; i < prep.n; i++) for (let j = 0; j < nb; j++) m[j] += prep.V[i * nb + j] / prep.n; D.mean = m; }
+  return { x: D.mean, i: -1, p: null, label: `the mean of ${fmt(prep.n)} spectra` };
+}
+function idHits(D, v) {
+  const key = `${v.p}|${v.i}|${idLibKey()}|${ID.settings.deriv}`;
+  if (!D.hitCache || D.hitCache.key !== key) {
+    const R = idRefs(D), h = idHitList(v.x, R, !!ID.settings.deriv), mix = h.length >= 2 ? idMixture(v.x, R, h.slice(0, 4).map(t => t.r)) : null;
+    D.hitCache = { key, h, mix };
+  }
+  return D.hitCache;
+}
+function idRenderSpec() {
+  const D = idFile(), info = $("#id-info"), tb = $("#id-cursor-table"); tb.textContent = ""; info.textContent = "";
+  const v = idView(D);
+  if (!v) { idPlot.emptyText = !D ? "Search first (or the spectra are being prepared)" : "Not measured"; idPlot.setData(null); return; }
+  info.textContent = `· ${v.label}`;
+  const scale = y => { let m = 0; for (const t of y) if (Number.isFinite(t)) m = Math.max(m, Math.abs(t)); return Float64Array.from(y, t => t / (m || 1)); };
+  const series = [{ x: D.prep.nu, y: scale(v.x), colour: T.strong, label: v.label, width: 1.4 }];
+  if (ID.lib.length) {
+    const { h } = idHits(D, v), R = idRefs(D), show = ID.show != null && ID.show < ID.lib.length ? ID.show : h.length ? h[0].r : null;
+    if (show != null) {
+      series.push({ x: D.prep.nu, y: scale(R[show].y), colour: idColour(show), label: ID.lib[show].name, width: 1.2, dash: [5, 3] });
+      const hit = h.find(t => t.r === show);
+      tb.append(el("span", {}, el("b", { style: `color:${idColour(show)}` }, ID.lib[show].name), ` HQI ${fmt(hit ? hit.hqi : NaN, 3)}`));
+    }
+  }
+  idPlot.setData({ series, xl: "Raman shift (cm⁻¹)", xu: "cm⁻¹", yl: "Scaled to 1", legend: true });
+}
+function idRenderHits() {
+  const D = idFile(), t = $("#id-hits"), mixEl = $("#id-mix"), v = idView(D);
+  if (!v || !ID.lib.length) { t.replaceChildren(); mixEl.textContent = ID.lib.length ? "" : "The library is empty."; return; }
+  const { h, mix } = idHits(D, v), top = h.slice(0, 10), min = ID.settings.minHQI;
+  t.replaceChildren(el("tr", {}, ...["", "Reference", "HQI"].map((x, i) => el("th", { class: i === 1 ? "l" : "" }, x))),
+    ...top.map((x, k) => el("tr", { class: `click${(ID.show ?? h[0].r) === x.r ? " on" : ""}`, onclick: () => { ID.show = x.r; idRenderSpec(); idRenderHits(); } },
+      el("td", {}, String(k + 1)), el("td", { class: "l" }, el("span", { class: "sw", style: `background:${idColour(x.r)}` }), x.name), el("td", { class: x.hqi >= min ? "" : "warn" }, fmt(x.hqi, 3)))));
+  const best = h[0];
+  mixEl.textContent = (best && best.hqi >= min ? `Identified as ${best.name} (HQI ${fmt(best.hqi, 3)}).` : `No reference reaches HQI ${min}: the best is ${best ? `${best.name} at ${fmt(best.hqi, 3)}` : "none"}.`) +
+    (mix && mix.hqi >= (best ? best.hqi : 0) + ID.settings.mixGain ? ` As a mixture: ${ID.lib[mix.a].name} ${dlcPct(mix.share)} and ${ID.lib[mix.b].name} ${dlcPct(1 - mix.share)} of the signal, HQI ${fmt(mix.hqi, 3)}.` : "");
+}
+function idLibList() {
+  $("#id-lib-count").textContent = `${ID.lib.length} spectr${ID.lib.length === 1 ? "um" : "a"}${ID.lib.length && ID.libKept === false ? " · too large to keep in the browser: save it" : ""}`;
+  $("#id-lib").replaceChildren(...ID.lib.map((r, ix) => {
+    const inp = el("input", { class: "ly-in", title: `${r.wn.length} channels, ${Math.round(r.wn[0])}–${Math.round(r.wn[r.wn.length - 1])} cm⁻¹` });
+    inp.value = r.name;
+    inp.onchange = () => { r.name = inp.value.trim() || r.name; inp.value = r.name; idLibChanged(); };
+    return el("div", { class: "ly-ref" }, el("span", { class: "sw", style: `background:${idColour(ix)};width:9px;height:9px;border-radius:2px;display:inline-block` }), inp,
+      el("button", { class: "icon", title: "Remove from the library", onclick: () => { ID.lib.splice(ix, 1); idLibChanged(); } }, "✕"));
+  }));
+}
+$("#id-lib-load").onclick = () => $("#id-lib-file").click();
+$("#id-lib-file").onchange = async e => {
+  const files = [...e.target.files]; e.target.value = "";
+  const { readText } = await import("./engine/readers.js"), bad = [];
+  for (const f of files) {
+    try {
+      const m = readText(await f.text(), f.name), K = m.wn.length, n = m.nx * m.ny, stem = f.name.replace(/\.[^.]+$/, "");
+      for (let s = 0; s < n; s++) ID.lib.push({ id: ++ID.seq, name: n === 1 ? stem : m.names ? m.names[s] : `${stem} ${s + 1}`, wn: Float64Array.from(m.wn), y: Float64Array.from(m.cube.subarray(s * K, (s + 1) * K)) });
+    } catch (err) { bad.push(`${f.name}: ${err.message}`); }
+  }
+  if (bad.length) toast(bad.join("; "), "error", 9000);
+  idLibChanged();
+};
+$("#id-lib-add").onclick = () => {
+  if (!S.cube) { toast("Open a file first.", "error"); return; }
+  const p = ID.hover ?? (P() === 1 ? 0 : ID.which === "pin" ? ID.pinned : ID.which === "mean" ? null : +ID.which);
+  const y = p != null ? pointSpectrum(p) : meanSpectrum(), name = p != null ? (S.names ? S.names[p] : `${S.ds.name} point ${p + 1}`) : `${S.ds.name} mean`;
+  ID.lib.push({ id: ++ID.seq, name, wn: Float64Array.from(S.wn), y: Float64Array.from(y) });
+  idLibChanged();
+};
+$("#id-lib-save").onclick = () => {
+  if (!ID.lib.length) { toast("The library is empty.", "error"); return; }
+  download("reference library.json", JSON.stringify({ kind: "Carbo Metrics library", version: 1, spectra: ID.lib.map(r => ({ name: r.name, wn: Array.from(r.wn), y: Array.from(r.y) })) }), "application/json");
+};
+$("#id-lib-open").onclick = () => $("#id-lib-json").click();
+$("#id-lib-json").onchange = async e => {
+  const f = e.target.files[0]; e.target.value = ""; if (!f) return;
+  try {
+    const j = JSON.parse(await f.text()), list = j.spectra || j;
+    if (!Array.isArray(list) || !list.every(r => r.name && r.wn && r.y && r.wn.length === r.y.length)) throw new Error("no spectra with names, shifts and intensities");
+    for (const r of list) ID.lib.push({ id: ++ID.seq, name: String(r.name), wn: Float64Array.from(r.wn), y: Float64Array.from(r.y) });
+    idLibChanged();
+  } catch (err) { toast(`Not a library: ${err.message}`, "error", 8000); }
+};
+function idSummary(D) {
+  const res = D.res, n = D.prep.n, rows = ID.lib.map((r, k) => ({ name: r.name, k, n: 0, hq: [] })), none = { name: "No match", k: -1, n: 0, hq: [] };
+  let ambiguous = 0;
+  for (let i = 0; i < n; i++) { const b = idBest(res, i); (b >= 0 ? rows[b] : none).n++; if (b >= 0) rows[b].hq.push(res.hqi[i]); if (b >= 0 && res.hqi[i] - res.hqi2[i] < 2) ambiguous++; }
+  for (const r of [...rows, none]) { r.hq.sort((a, b) => a - b); r.share = n ? r.n / n : NaN; r.ci = wilson(r.n, n); r.med = quantile(r.hq, 0.5); }
+  return { rows: rows.filter(r => r.n).sort((a, b) => b.n - a.n), none, n, ambiguous };
+}
+function idChecks(D) {
+  const out = [], add = (text, warn = false) => out.push({ text, warn });
+  if (!ID.lib.length) { add("The library is empty: add reference spectra (text files, one spectrum each or spectra in columns), or the spectrum in view.", true); return out; }
+  if (D && D.prep) {
+    const R = idRefs(D), poor = ID.lib.filter((_, k) => !R[k].ok).map(r => r.name);
+    if (poor.length) add(`${poor.join(", ")} cover${poor.length === 1 ? "s" : ""} less than half of the range searched and ${poor.length === 1 ? "is" : "are"} left out.`, true);
+  }
+  if (D && idFresh(D)) {
+    const Z = idSummary(D);
+    if (Z.none.n) add(`${fmt(Z.none.n)} of ${fmt(Z.n)} spectra match nothing at HQI ${ID.settings.minHQI} or above: a material missing from the library, a mixture, or too little signal.`, Z.none.n > 0.2 * Z.n);
+    if (Z.ambiguous) add(`${fmt(Z.ambiguous)} spectra have a second reference within 2 HQI of the best: those two cannot be told apart here.`, true);
+  }
+  add(`HQI = 100 r² over the channels a reference covers${ID.settings.deriv ? ", on first derivatives (band shapes; a leftover background matters less)" : ""}. It ranks how alike two spectra are; it is not a probability, and a material missing from the library still gets a best hit.`);
+  return out;
+}
+function idFormFields() {
+  const s = ID.settings, set = (id, v) => { $(id).value = v; };
+  set("#id-lo", s.range[0]); set("#id-hi", s.range[1]); set("#id-base", String(s.baseline)); set("#id-deriv", s.deriv ? "1" : "0"); set("#id-min", s.minHQI);
+}
+const idOn = (id, set) => $(id).addEventListener("change", e => { set(e.target.value); idFormFields(); idSave(); idRender(); });
+idOn("#id-lo", v => { v = parseFloat(v); if (Number.isFinite(v)) ID.settings.range = [v, ID.settings.range[1]]; });
+idOn("#id-hi", v => { v = parseFloat(v); if (Number.isFinite(v)) ID.settings.range = [ID.settings.range[0], v]; });
+idOn("#id-base", v => { ID.settings.baseline = +v; }); idOn("#id-deriv", v => { ID.settings.deriv = v === "1"; });
+idOn("#id-min", v => { v = parseFloat(v); if (v >= 0 && v <= 100) ID.settings.minHQI = v; });
+function idShow() { idFormFields(); idLibList(); idFillWhich(); idRender(); setTimeout(() => { idMaps.forEach(m => m.render()); idPlot.render(); }, 0); if (S.cube && ID.lib.length && !idFresh(idFile()) && !ID.running) idRun(); }
+function idRender() {
+  const D = idFile(), fresh = idFresh(D), empty = $("#id-empty");
+  const why = !S.ds ? "Open a map, a set of spectra or one spectrum, and add reference spectra to the library." : !S.cube ? "This file holds fitted values, not spectra." : null;
+  empty.classList.toggle("hidden", !why); if (why) $("#id-empty-p").textContent = why;
+  $("#id-maps").classList.toggle("hidden", P() <= 1);
+  if (!ID.running) $("#id-status").textContent = fresh ? `${fmt(D.prep.n)} spectra against ${ID.lib.length} references in ${D.res.seconds.toFixed(1)} s.` : D && D.res ? "The library or the settings have changed: Search again." : ID.lib.length ? "" : "Add references to the library, then Search.";
+  idMaps.forEach((_, i) => idRenderMap(i)); idRenderSpec(); idRenderHits();
+  const st = $("#id-sum");
+  if (fresh) {
+    const Z = idSummary(D);
+    st.replaceChildren(el("tr", {}, ...["Reference", "Spectra", "Share (95 % interval)", "Median HQI"].map((h, i) => el("th", { class: i ? "" : "l" }, h))),
+      ...[...Z.rows, Z.none].filter(r => r.n || r.k < 0).map(r => el("tr", {}, el("td", { class: "l" }, r.k >= 0 ? el("span", { class: "sw", style: `background:${idColour(r.k)}` }) : null, r.name), el("td", {}, fmt(r.n)),
+        el("td", {}, `${dlcPct(r.share)} (${dlcPct(r.ci[0])} – ${dlcPct(r.ci[1])})`), el("td", {}, r.k >= 0 ? fmt(r.med, 3) : "–"))));
+  } else st.replaceChildren();
+  $("#id-checks").replaceChildren(...idChecks(D).map(c => el("li", { class: c.warn ? "warn" : "" }, c.text)));
+}
+$("#id-csv").onclick = () => {
+  const D = idFile(); if (!idFresh(D)) { toast("Search first.", "error"); return; }
+  const res = D.res, rows = [[S.names ? "Spectrum" : S.points ? "Particle" : "Point", "X (um)", "Y (um)", "Match", "HQI", "Best", "Second", "Second HQI"]];
+  for (let p = 0; p < D.prep.P; p++) {
+    const i = D.prep.rowOf[p]; if (i < 0) continue;
+    const b = idBest(res, i);
+    rows.push([S.names ? S.names[p] : p + 1, S.points ? S.points.x[p] : S.x[p % S.nx], S.points ? S.points.y[p] : S.y[Math.floor(p / S.nx)], b >= 0 ? ID.lib[b].name : "No match", res.hqi[i],
+      res.best[i] >= 0 ? ID.lib[res.best[i]].name : "", res.second[i] >= 0 ? ID.lib[res.second[i]].name : "", res.hqi2[i]]);
+  }
+  download(`${S.ds.name}_identify.csv`, rows.map(r => r.map(pkCell).join(",")).join("\n") + "\n", "text/csv");
+};
+$("#id-png").onclick = () => idMaps.forEach((m, i) => setTimeout(() => m.save(), i * 250));
+$("#id-report").onclick = () => { $("#rp-kind").value = "id"; rpTitle(); switchTab("report"); };
+function makeIdentifyReport() {
+  const D = idFile();
+  if (!idFresh(D)) { $("#report-paper").replaceChildren(el("p", {}, "Search first: open Identify, add references, then Search.")); return; }
+  idRenderSpec();
+  const host = offscreen(760, 360), lp = new LinesPlot(host); lp.setData(idPlot.d); const spec = idPlot.d ? onDark(lp.canvas) : null; host.remove();
+  const v = idView(D), H = v ? idHits(D, v) : null;
+  buildIdentifyReport($("#report-paper"), { title: $("#rp-title").value, ds: S.ds, s: ID.settings, lib: ID.lib.map(r => r.name), Z: idSummary(D), checks: idChecks(D), spec, view: v ? v.label : "", hits: H ? H.h.slice(0, 10) : [],
+    mix: H && H.mix && H.h.length && H.mix.hqi >= H.h[0].hqi + ID.settings.mixGain ? { a: ID.lib[H.mix.a].name, b: ID.lib[H.mix.b].name, share: H.mix.share, hqi: H.mix.hqi } : null,
+    seconds: D.res.seconds, nb: D.prep.nb, range: D.prep.range, maps: P() > 1 ? ID.specs.map((k, i) => mapFigure(idMaps[i], "Identify", idMapData(k, D), ID.pinned)) : [] });
+}
+
+// =========================================================================
+// Toolbox (spectra.js): spectrum processing, previewed on one spectrum, applied to every one
+// =========================================================================
+const TB_STORE = "carbo-toolbox";
+const TB = { ops: (storeGet(TB_STORE) || {}).ops || [{ op: "despike", on: true, args: {} }, { op: "baseline", on: true, args: {} }], which: "mean", ref: "mean", refFile: null, running: false };
+const tbSave = () => storeSet(TB_STORE, { ops: TB.ops });
+const tbBefore = new LinesPlot($("#tb-before")), tbAfter = new LinesPlot($("#tb-after"));
+function tbFillWhich() {
+  const opts = [];
+  if (!S.cube) opts.push(["", "No spectra"]);
+  else if (P() === 1) opts.push(["0", S.names ? S.names[0] : "This spectrum"]);
+  else { opts.push(["mean", "Mean spectrum"]); if (S.names) S.names.forEach((n, i) => opts.push([String(i), n])); else { opts.push(["pin", "Pinned point (Carbon fit tab)"]); } }
+  const sel = $("#tb-which"); sel.replaceChildren(...opts.map(([v, t]) => el("option", { value: v }, t)));
+  sel.value = opts.some(o => o[0] === String(TB.which)) ? String(TB.which) : opts[0][0];
+  const ro = [["mean", "Mean spectrum"], ...(S.names ? S.names.map((n, i) => [String(i), n]) : []), ...(TB.refFile ? [["file", TB.refFile.name]] : [])];
+  const rs = $("#tb-ref"); rs.replaceChildren(...ro.map(([v, t]) => el("option", { value: v }, t)));
+  rs.value = ro.some(o => o[0] === TB.ref) ? TB.ref : "mean";
+}
+$("#tb-which").onchange = e => { TB.which = e.target.value; tbRender(); };
+$("#tb-ref").onchange = e => { TB.ref = e.target.value; tbRender(); };
+$("#tb-ref-load").onclick = () => $("#tb-ref-file").click();
+$("#tb-ref-file").onchange = async e => {
+  const f = e.target.files[0]; e.target.value = ""; if (!f) return;
+  try { const { readText } = await import("./engine/readers.js"), m = readText(await f.text(), f.name); TB.refFile = { name: f.name.replace(/\.[^.]+$/, ""), nu: Float64Array.from(m.wn), y: Float64Array.from(m.cube.subarray(0, m.wn.length)) }; TB.ref = "file"; tbFillWhich(); tbRender(); }
+  catch (err) { toast(err.message, "error", 8000); }
+};
+function tbSpectrum() {
+  if (!S.cube) return null;
+  if (P() === 1) return { y: pointSpectrum(0), label: S.names ? S.names[0] : S.ds.name };
+  const p = TB.which === "pin" ? S.pinned : TB.which === "mean" ? null : +TB.which;
+  if (p != null && p >= 0 && p < P()) return { y: pointSpectrum(p), label: S.names ? S.names[p] : `point ${p + 1}` };
+  return { y: meanSpectrum(), label: `the mean of ${fmt(S.meanSpec.n)} spectra` };
+}
+function tbCtx() {
+  if (TB.ref === "file" && TB.refFile) return { ref: { nu: TB.refFile.nu, y: TB.refFile.y } };
+  const y = TB.ref !== "mean" && S.names && +TB.ref < P() ? pointSpectrum(+TB.ref) : S.cube ? meanSpectrum() : null;
+  return y ? { ref: { nu: Float64Array.from(S.wn), y } } : {};
+}
+// the inputs of one operation's arguments
+const TB_ARGS = {
+  crop: [["lo", "From"], ["hi", "To"]], despike: [["thr", "× noise"], ["width", "Channels"]],
+  baseline: [["kind", "Method", Object.entries(PK_BASELINES).filter(([k]) => k !== "none")], ["order", "Order"], ["lambda", "λ"], ["p", "p"], ["width", "Half width"]],
+  smooth: [["kind", "Filter", [["savgol", "Savitzky-Golay"], ["mean", "Moving mean"], ["median", "Median"]]], ["window", "Window"], ["order", "Order"]],
+  deriv: [["order", "Derivative", [[1, "First"], [2, "Second"]]], ["window", "Window"], ["poly", "Order"]],
+  normalise: [["mode", "To", Object.entries(TB_NORMS)], ["at", "Band at"], ["half", "± cm⁻¹"]],
+  resample: [["step", "Step (cm⁻¹)"]], subtract: [["scale", "Scale", [["fit", "Least squares"], ["factor", "Factor"]]], ["factor", "Factor"]], divide: [], offset: [["add", "Add"], ["mul", "Multiply"]],
+};
+// which arguments apply (a method's own)
+const tbShown = (op, a) => (op.op === "baseline" ? { modpoly: ["order"], als: ["lambda", "p"], snip: ["width"], rubber: [] }[a.kind || "modpoly"].includes(op.k) || op.k === "kind"
+  : op.op === "smooth" ? op.k !== "order" || (a.kind || "savgol") === "savgol" : op.op === "normalise" ? op.k === "mode" || (a.mode || "max") === "band" : op.op === "subtract" ? op.k === "scale" || a.scale === "factor" : true);
+function tbOpsList() {
+  $("#tb-add-op").replaceChildren(...Object.entries(TB_OPS).map(([k, o]) => el("option", { value: k }, o.label)));
+  $("#tb-ops").replaceChildren(...TB.ops.map((op, i) => {
+    const a = { ...TB_OPS[op.op].args, ...op.args }, on = el("input", { type: "checkbox", title: "Use this step" }); on.checked = op.on !== false;
+    on.onchange = () => { op.on = on.checked; tbSave(); tbRender(); };
+    const fields = TB_ARGS[op.op].filter(([k]) => tbShown({ op: op.op, k }, a)).map(([k, label, choices]) => {
+      let inp;
+      if (choices) { inp = el("select", {}, ...choices.map(([v, t]) => el("option", { value: v }, t))); inp.value = String(a[k]); }
+      else { inp = el("input", { type: "number", step: "any" }); inp.value = a[k]; }
+      inp.onchange = () => { const v = choices ? (typeof choices[0][0] === "number" ? +inp.value : inp.value) : parseFloat(inp.value); if (choices || Number.isFinite(v)) { op.args = { ...op.args, [k]: v }; tbSave(); tbOpsList(); tbRender(); } };
+      return el("label", { class: "tb-arg" }, el("span", {}, label), inp);
+    });
+    const move = d => { const j = i + d; if (j < 0 || j >= TB.ops.length) return; [TB.ops[i], TB.ops[j]] = [TB.ops[j], TB.ops[i]]; tbSave(); tbOpsList(); tbRender(); };
+    return el("div", { class: `tb-op${op.on === false ? " off" : ""}` },
+      el("div", { class: "tb-op-h" }, on, el("b", {}, `${i + 1}. ${TB_OPS[op.op].label}`), el("span", { class: "grow" }),
+        el("button", { class: "icon", title: "Earlier", onclick: () => move(-1) }, "↑"), el("button", { class: "icon", title: "Later", onclick: () => move(1) }, "↓"),
+        el("button", { class: "icon", title: "Remove", onclick: () => { TB.ops.splice(i, 1); tbSave(); tbOpsList(); tbRender(); } }, "✕")),
+      fields.length ? el("div", { class: "tb-args" }, ...fields) : null);
+  }));
+  $("#tb-ops-note").textContent = TB.ops.length ? "" : "No steps: add one above.";
+}
+$("#tb-add").onclick = () => { TB.ops.push({ op: $("#tb-add-op").value, on: true, args: {} }); tbSave(); tbOpsList(); tbRender(); };
+// the pipeline on one spectrum, keeping the background a background step found (when nothing before it rescaled)
+function tbProcess(y) {
+  let cur = { nu: Float64Array.from(S.wn), y: Float64Array.from(y) }, base = null, scaled = false;
+  const ctx = tbCtx();
+  for (const op of TB.ops) {
+    if (op.on === false) continue;
+    const r = tbApplyOp(cur.nu, cur.y, op, ctx);
+    if (op.op === "baseline" && !scaled) base = { nu: r.nu || cur.nu, y: r.base };
+    if (["normalise", "deriv", "divide", "offset"].includes(op.op)) scaled = true;
+    cur = { ...cur, ...r };
+  }
+  return { ...cur, base };
+}
+function tbRender() {
+  const empty = $("#tb-empty"), why = !S.ds ? "Open a spectrum, a set or a map first." : !S.cube ? "This file holds fitted values, not spectra." : null;
+  empty.classList.toggle("hidden", !why); if (why) { $("#tb-empty-p").textContent = why; tbBefore.setData(null); tbAfter.setData(null); return; }
+  const W = tbSpectrum(); $("#tb-info").textContent = `· ${W.label}`;
+  tbBefore.setData({ series: [{ x: Float64Array.from(S.wn), y: W.y, colour: T.strong, label: "spectrum", width: 1.2 }], xl: "Raman shift (cm⁻¹)", xu: "cm⁻¹", yl: "Intensity", legend: true });
+  try {
+    const r = tbProcess(W.y);
+    if (r.base) tbBefore.setData({ ...tbBefore.d, series: [...tbBefore.d.series, { x: r.base.nu, y: r.base.y, colour: T.bad, label: "background", width: 1, dash: [5, 3] }] });
+    tbAfter.emptyText = null;
+    tbAfter.setData({ series: [{ x: r.nu, y: r.y, colour: T.accent, label: "processed", width: 1.4 }], xl: "Raman shift (cm⁻¹)", xu: "cm⁻¹", yl: "Processed", legend: true, hlines: [0] });
+    $("#tb-after-info").textContent = `· ${r.nu.length} channels, ${fmt(r.nu[0], 4)}–${fmt(r.nu[r.nu.length - 1], 4)} cm⁻¹`;
+  } catch (e) { tbAfter.emptyText = e.message; tbAfter.setData(null); $("#tb-after-info").textContent = ""; }
+}
+// every spectrum processed, as a text file: a grid map as a LabSpec matrix export, anything else as spectra in columns
+function tbAll(onProgress) {
+  const n = P(), out = []; let nu = null;
+  for (let p = 0; p < n; p++) {
+    const y = pointSpectrum(p);
+    if (!y.every(Number.isFinite) || y.every(v => v === 0)) { out.push(null); continue; }
+    const r = tbProcess(y); nu = nu || r.nu; out.push(r.y);
+    if (onProgress && p % 200 === 199) onProgress(p + 1, n);
+  }
+  if (!nu) throw new Error("no measured spectra");
+  const cell = v => (Number.isFinite(v) ? String(+v.toPrecision(7)) : "NaN");
+  const grid = !S.names && !S.points && n > 1 && (S.ny > 1 || S.nx > 1);
+  let text;
+  if (grid) {
+    const lines = ["\t\t" + Array.from(nu, cell).join("\t")];
+    for (let p = 0; p < n; p++) lines.push([S.y[Math.floor(p / S.nx)], S.x[p % S.nx], ...(out[p] ? Array.from(out[p], cell) : Array.from(nu, () => "NaN"))].join("\t"));
+    text = lines.join("\n") + "\n";
+  } else {
+    const keep = out.map((y, p) => [y, p]).filter(([y]) => y), names = keep.map(([, p]) => (S.names ? S.names[p] : S.points ? `particle ${p + 1}` : `point ${p + 1}`).replace(/[",;\t]+/g, " "));
+    text = [["Raman shift (cm-1)", ...names].join(","), ...Array.from(nu, (v, k) => [cell(v), ...keep.map(([y]) => cell(y[k]))].join(","))].join("\n") + "\n";
+  }
+  return { text, ext: grid ? "txt" : "csv", nu };
+}
+async function tbRun(open) {
+  if (TB.running || !S.cube) return;
+  TB.running = true; const prog = $("#tb-prog > div"), st = $("#tb-status"); prog.style.width = "0%";
+  try {
+    await xcTick();
+    const name = S.ds.name, r = tbAll((d, n) => { prog.style.width = `${(100 * d / n).toFixed(1)}%`; });
+    prog.style.width = "100%";
+    const fname = `${name} processed.${r.ext}`;
+    st.textContent = `${fmt(P())} spectra processed: ${r.nu.length} channels.`;
+    if (open) await uploadFiles([new File([r.text], fname, { type: "text/plain" })]);
+    else download(fname, r.text, "text/plain");
+  } catch (e) { st.textContent = `Could not process: ${e.message}`; toast(`Toolbox: ${e.message}`, "error", 8000); }
+  finally { TB.running = false; }
+}
+$("#tb-apply").onclick = () => tbRun(true);
+$("#tb-export").onclick = () => tbRun(false);
+$("#tb-mean").onclick = async () => {
+  if (!S.cube) return;
+  const y = meanSpectrum(), n = S.meanSpec.n, text = ["Raman shift (cm-1),Mean of " + n, ...Array.from(S.wn, (v, k) => `${v},${y[k]}`)].join("\n") + "\n";
+  await uploadFiles([new File([text], `${S.ds.name} mean.csv`, { type: "text/csv" })]);
+};
+$("#tb-one").onclick = () => {
+  const W = tbSpectrum(); if (!W) return;
+  try { const r = tbProcess(W.y); download(`${S.ds.name} ${W.label.replace(/[^\w.-]+/g, "_")} processed.csv`, ["Raman shift (cm-1),Processed", ...Array.from(r.nu, (v, k) => `${v},${r.y[k]}`)].join("\n") + "\n", "text/csv"); }
+  catch (e) { toast(e.message, "error"); }
+};
+function tbShow() { tbFillWhich(); tbOpsList(); tbRender(); setTimeout(() => { tbBefore.render(); tbAfter.render(); }, 0); }
+
+// =========================================================================
 // report
 // =========================================================================
 // Report figures are drawn off-screen at a fixed size, so they are current
@@ -5735,6 +7125,10 @@ async function makeReport() {
   if ($("#rp-kind").value === "dlc") { ++reportRun; makeDlcReport(); return; }
   if ($("#rp-kind").value === "layers") { ++reportRun; makeLayersReport(); return; }
   if ($("#rp-kind").value === "mva") { ++reportRun; makeMvaReport(); return; }
+  if ($("#rp-kind").value === "fit") { ++reportRun; makePeakFitReport(); return; }
+  if ($("#rp-kind").value === "graphene") { ++reportRun; makeGrapheneReport(); return; }
+  if ($("#rp-kind").value === "si") { ++reportRun; makeSiliconReport(); return; }
+  if ($("#rp-kind").value === "id") { ++reportRun; makeIdentifyReport(); return; }
   if (!S.fit) { $("#report-paper").replaceChildren(el("p", {}, "Open and fit a map first.")); return; }
   const run = ++reportRun;
   $("#report-paper").replaceChildren(el("p", { class: "note" }, "Gathering the analysis…"));
@@ -5779,6 +7173,11 @@ function repaintAll() {
   mvForm();
   for (const m of mvMaps) m._dirty = true;
   mvRender();
+  pkForm();                                       // band swatches
+  for (const m of pkMaps) m._dirty = true;
+  pkRender();
+  for (const m of [...grMaps, ...siMaps, ...idMaps]) m._dirty = true;
+  grRender(); siRender(); idLibList(); idRender(); tbRender();
 }
 themeButton();
 

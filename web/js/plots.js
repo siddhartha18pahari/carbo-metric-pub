@@ -45,9 +45,11 @@ class Base {
 
 // ---------------------------------------------------------------------------
 export class SpectrumPlot extends Base {
-  constructor(host) {
+  // onPick: a click without a drag, with the Raman shift under it (the Peak fit tab adds a band there)
+  constructor(host, { onPick = null } = {}) {
     super(host);
     this.view = null;
+    this.onPick = onPick;
     this.canvas.addEventListener("mousemove", e => { this.mouse = e.offsetX; this.render(); });
     this.canvas.addEventListener("mouseleave", () => { this.mouse = null; this.render(); });
     this.canvas.addEventListener("mousedown", e => { this.drag = [e.offsetX, e.offsetX]; });
@@ -56,7 +58,8 @@ export class SpectrumPlot extends Base {
         const inv = px => this.xr[0] + (px - this.F.x) / this.F.w * (this.xr[1] - this.xr[0]);
         const a = inv(Math.min(this.drag[0], e.offsetX)), b = inv(Math.max(this.drag[0], e.offsetX));
         this.view = [a, b];
-      }
+      } else if (this.drag && this.onPick && this.F && this.d && e.offsetX >= this.F.x && e.offsetX <= this.F.x + this.F.w)
+        this.onPick(this.xr[0] + (e.offsetX - this.F.x) / this.F.w * (this.xr[1] - this.xr[0]));
       this.drag = null; this.render();
     });
     this.canvas.addEventListener("dblclick", () => { this.view = null; this.render(); });
@@ -310,6 +313,14 @@ export class ScatterPlot extends Base {
       ctx.fillRect(X(d.x[i]) - r, Y(d.y[i]) - r, 2 * r, 2 * r);
     }
     ctx.globalAlpha = 1;
+    // lines in data coordinates, e.g. axes of a decomposition: { x: [..], y: [..], colour, dash, label }
+    ctx.font = font(11); ctx.textBaseline = "bottom"; ctx.textAlign = "left";
+    for (const L of d.lines || []) {
+      ctx.strokeStyle = L.colour; ctx.lineWidth = L.width || 1.2; ctx.setLineDash(L.dash || []); ctx.beginPath();
+      L.x.forEach((v, i) => (i ? ctx.lineTo(X(v), Y(L.y[i])) : ctx.moveTo(X(v), Y(L.y[i]))));
+      ctx.stroke(); ctx.setLineDash([]);
+      if (L.label) { const i = L.x.length - 1; ctx.fillStyle = L.colour; ctx.fillText(L.label, Math.min(X(L.x[i]) + 3, F.x + F.w - 60), Y(L.y[i]) - 2); }
+    }
     if (d.mark != null && Number.isFinite(d.x[d.mark])) {
       ctx.strokeStyle = T.pin; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(X(d.x[d.mark]), Y(d.y[d.mark]), 6, 0, 2 * Math.PI); ctx.stroke();
     }

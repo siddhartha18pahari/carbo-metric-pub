@@ -78,6 +78,8 @@ class Dataset:
             "settings": m.meta.get("settings"),
             # a LabSpec file says what it is: an X-Y map, a line, or along Z a depth profile
             "scan": m.meta.get("scan"), "axes": m.meta.get("axes"),
+            # spectra in columns, or several files opened as one set: each spectrum's name
+            "names": m.meta.get("names"),
         }
         if self.video is not None:
             v = self.video
@@ -307,6 +309,9 @@ async def export(ds_id: str, request: Request):
                  ("Std error", r.std_error), ("Red chi2", r.red_chi2)]
         arr = np.stack([c for _, c in cols], 1)
         lines = [",".join(n for n, _ in cols)] + [",".join(f"{x:.6g}" for x in row) for row in arr]
+        names = m.meta.get("names")
+        if names:
+            lines = ["Spectrum," + lines[0]] + [f"{nm},{ln}" for nm, ln in zip(names, lines[1:])]
         text, ext = "\n".join(lines) + "\n", "csv"
     else:
         text, ext = export_table(ds.fit, cfg), "txt"

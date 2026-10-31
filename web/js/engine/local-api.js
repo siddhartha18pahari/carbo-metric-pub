@@ -86,7 +86,8 @@ function info(ds) {
   const m = ds.map;
   const d = { id: ds.id, name: m.name, path: m.name, nx: m.nx, ny: m.ny, k: m.wn.length,
               wn: m.wn, x: m.x, y: m.y, format: m.format, counts: counts(m.cube), missing: m.missing || 0,
-              laser_nm: m.laser ?? null, settings: m.settings ?? null, scan: m.scan ?? null, axes: m.axes ?? null };
+              laser_nm: m.laser ?? null, settings: m.settings ?? null, scan: m.scan ?? null, axes: m.axes ?? null,
+              names: m.names ?? null };
   if (ds.video) {
     const v = ds.video;
     d.video = { w: v.w, h: v.h, x: [v.x[0], v.x[v.x.length - 1]], y: [v.y[0], v.y[v.y.length - 1]] };
@@ -219,8 +220,9 @@ export function exportText(ds, body) {
       for (const q of ["intensity", "position", "width", "area"]) cols.push([`${name} ${cap(q)}`, column(fit, name, q)]);
     for (const q of Q) cols.push([`Ratio ${cap(q)} ${cfg.ratio_num}/${cfg.ratio_den}`, r[q]]);
     cols.push(["Std error", fit.std_error], ["Red chi2", fit.red_chi2]);
-    const lines = [cols.map(c => c[0]).join(",")];
-    for (let p = 0; p < P; p++) lines.push(cols.map(c => g6(c[1][p])).join(","));
+    // spectra in columns, or several files opened as one set: each row named
+    const lines = [(m.names ? "Spectrum," : "") + cols.map(c => c[0]).join(",")];
+    for (let p = 0; p < P; p++) lines.push((m.names ? `${m.names[p]},` : "") + cols.map(c => g6(c[1][p])).join(","));
     return lines.join("\n") + "\n";
   }
   // vendor layout: numerator's three columns, denominator's, then the ratios

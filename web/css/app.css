@@ -185,11 +185,17 @@ code { font-family: var(--font); font-size: 0.95em; color: var(--code); }
 .tabs {
   position: relative; display: flex; gap: 2px; padding: 3px; margin-left: auto;
   border: 1px solid var(--line); border-radius: 999px; background: var(--input);
+  /* more tabs than room on a laptop: they scroll sideways (wheel or drag), the open one kept in view */
+  min-width: 0; overflow-x: auto; scrollbar-width: none;
 }
+.tabs::-webkit-scrollbar { display: none; }
+.file-pill { flex-shrink: 0; }
 .tabs button {
   position: relative; z-index: 1; border: 0; background: none; height: 30px; padding: 0 16px; border-radius: 999px;
-  color: var(--muted); cursor: pointer; transition: color 0.2s;
+  color: var(--muted); cursor: pointer; transition: color 0.2s; flex: none; white-space: nowrap;
 }
+@media (max-width: 1800px) { .tabs button { padding: 0 11px; } }
+@media (max-width: 1560px) { .tabs button { padding: 0 8px; font-size: 13px; } .topbar { gap: 10px; } }
 .tabs button:hover:not(.on) { color: var(--text); background: none; }
 .tabs button.on { color: var(--accent-ink); font-weight: 700; }
 .tab-ink {
@@ -677,6 +683,36 @@ table.stats .sw { display: inline-block; width: 9px; height: 9px; border-radius:
 #tab-mva { grid-template-columns: minmax(0, 1fr) 420px; gap: 12px; padding: 12px; }
 .panel-h select { height: 26px; font-size: 12.5px; padding: 0 6px; width: auto; margin-right: 6px; }
 #mva-status, #mva-comp-note, #mva-refs-note, #mva-cmp-note { margin-top: 6px; line-height: 1.45; }
+
+/* Peak fit: the spectrum with its fit, then four maps (a map) or every spectrum's row (a set) */
+#tab-fit { grid-template-columns: minmax(0, 1fr) 420px; gap: 12px; padding: 12px; }
+.pk-main { position: relative; display: grid; grid-template-rows: minmax(0, 1.1fr) minmax(0, 1fr); gap: 12px; min-height: 0; min-width: 0; }
+#tab-fit.pk-single .pk-main { grid-template-rows: minmax(0, 1fr); }
+.pk-scroll { overflow: auto; min-height: 0; flex: 1; }
+#pk-status, #pk-bands-note, #pk-result-note { margin-top: 6px; line-height: 1.45; }
+.pk-detail-h { margin: 10px 0 4px; font-size: 13px; }
+table.stats select { height: 26px; font-size: 12.5px; padding: 0 4px; width: auto; }
+table.stats td.warn { color: var(--warn); }
+
+/* Graphene and Silicon: four maps, then the fits and a plot (DLC's rows) */
+#tab-graphene, #tab-si, #tab-id, #tab-tools { grid-template-columns: minmax(0, 1fr) 420px; gap: 12px; padding: 12px; }
+.gr-lower { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 0.8fr) minmax(0, 0.9fr); gap: 12px; min-height: 0; }
+#gr-status, #gr-res-note, #si-status, #si-res-note, #id-status, #id-mix, #tb-status, #tb-ops-note { margin-top: 6px; line-height: 1.45; }
+.si-cal { margin: 6px 0 8px; padding: 7px 9px; border-radius: 8px; font-size: 12.5px; line-height: 1.45; background: var(--input); border-left: 3px solid var(--line); }
+.si-cal.good { border-left-color: var(--good); } .si-cal.bad { border-left-color: var(--bad); }
+.si-cal.good b { color: var(--good); } .si-cal.bad b { color: var(--bad); }
+/* Identify: the library as a list of names */
+.id-lib { display: grid; gap: 4px; margin: 6px 0; max-height: 260px; overflow: auto; }
+.id-lib .ly-ref { grid-template-columns: auto minmax(0, 1fr) auto; }
+#tab-id .dlc-main > .panel { min-height: 0; }
+/* Toolbox: before and after, the steps at the side */
+.tb-main { position: relative; display: grid; grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; min-height: 0; min-width: 0; }
+.tb-op { border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; margin: 6px 0; }
+.tb-op.off { opacity: 0.55; }
+.tb-op-h { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+.tb-args { display: grid; grid-template-columns: repeat(auto-fill, minmax(112px, 1fr)); gap: 6px; margin-top: 6px; }
+.tb-arg { display: grid; gap: 2px; font-size: 11.5px; color: var(--muted); }
+.tb-arg input, .tb-arg select { height: 26px; font-size: 12.5px; padding: 0 6px; }
 .report-scroll { overflow: auto; border-radius: var(--r); }
 .paper {
   width: 210mm; min-height: 297mm; margin: 0 auto 30px; padding: 16mm 15mm; background: #fff; color: #142033;
@@ -746,7 +782,13 @@ table.stats .sw { display: inline-block; width: 9px; height: 9px; border-radius:
   body { overflow: auto; }
   main { height: auto; }
   .tab.on { min-height: calc(100vh - 56px - 24px); }
-  #tab-qc, #tab-splat, #tab-particles, #tab-files, #tab-dlc, #tab-layers, #tab-mva { grid-template-columns: minmax(0, 1fr); }
+  #tab-qc, #tab-splat, #tab-particles, #tab-files, #tab-dlc, #tab-layers, #tab-mva, #tab-fit, #tab-graphene, #tab-si, #tab-id, #tab-tools { grid-template-columns: minmax(0, 1fr); }
+  .gr-lower { grid-template-columns: minmax(0, 1fr); }
+  .gr-lower .panel { height: 300px; }
+  .tb-main { grid-template-rows: auto auto; }
+  .tb-main > .panel, #tab-id .dlc-main > .panel { height: 320px; }
+  .pk-main, #tab-fit.pk-single .pk-main { grid-template-rows: auto auto; }
+  .pk-main > .panel { height: 360px; }
   .ly-main, #tab-layers.ly-line .ly-main { grid-template-rows: auto auto auto; }
   .ly-maps .panel { height: 320px; }
   .ly-main > .panel { height: 300px; }
