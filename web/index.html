@@ -39,6 +39,11 @@
     <button data-tab="dlc" title="Diamond-like carbon coatings: D and G fit, hydrogen content, quality test, homogeneity">DLC</button>
     <button data-tab="layers" title="Multilayer films: the materials, order and thickness of each layer, across a cut edge or in depth">Layers</button>
     <button data-tab="mva" title="Multivariate analysis: PCA, MCR, K-means and HCA, with images by CLS">MVA</button>
+    <button data-tab="fit" title="Peak fitting of any spectrum or file: your own bands (Gauss, Lorentz, Gauss-Lorentz, Voigt, BWF), fixed or linked parameters, errors on every value">Peak fit</button>
+    <button data-tab="graphene" title="Graphene: layers from the 2D band, defects from I(D)/I(G), strain and doping from the G and 2D positions">Graphene</button>
+    <button data-tab="si" title="Silicon: stress from the 520 cm⁻¹ shift, crystalline fraction of films, the daily calibration check">Silicon</button>
+    <button data-tab="id" title="Identify spectra against a library of reference spectra (HQI), one spectrum or every one of a map">Identify</button>
+    <button data-tab="tools" title="Spectrum processing: background, smoothing, derivative, normalisation, cosmic rays, crop, resample, spectrum arithmetic">Toolbox</button>
     <button data-tab="report">Report</button>
   </nav>
   <div class="status" id="status"><span class="dot"></span><span id="status-text">Ready</span></div>
@@ -757,10 +762,341 @@
     </aside>
   </section>
 
+  <section id="tab-fit" class="tab">
+    <div class="pk-main">
+      <div class="panel col">
+        <div class="panel-h"><select id="pk-which" title="The spectrum fitted and shown"></select><span class="muted" id="pk-info"></span>
+          <span class="grow"></span><span class="muted small hint">click to add a band there · drag to zoom</span></div>
+        <div class="plot" id="pk-plot"></div>
+        <div class="cursor-table" id="pk-cursor-table"></div>
+      </div>
+      <div class="dlc-maps" id="pk-maps">
+        <div class="panel map" id="pk-map-0"></div>
+        <div class="panel map" id="pk-map-1"></div>
+        <div class="panel map" id="pk-map-2"></div>
+        <div class="panel map" id="pk-map-3"></div>
+      </div>
+      <div class="panel col hidden" id="pk-list">
+        <div class="panel-h">Every spectrum <span class="muted small" id="pk-list-info"></span></div>
+        <div class="pk-scroll"><table class="stats" id="pk-list-table"></table></div>
+      </div>
+      <div class="dlc-empty hidden" id="pk-empty">
+        <div><h2>Peak fitting</h2><p id="pk-empty-p"></p></div>
+      </div>
+    </div>
+    <aside class="side">
+      <div class="sec" data-sec="pk-bg">
+        <div class="sec-h toggle">Range and background</div>
+        <div class="sec-b">
+          <div class="frow"><label>Range (cm⁻¹)</label><div class="row2"><input type="number" id="pk-lo" step="any"><input type="number" id="pk-hi" step="any"></div></div>
+          <div class="frow"><label>Background</label><select id="pk-base">
+            <option value="poly">Polynomial, fitted with the bands</option><option value="modpoly">Polynomial, taken off first</option>
+            <option value="als">Asymmetric least squares, first</option><option value="snip">SNIP, first</option><option value="rubber">Rubber band, first</option><option value="none">None</option></select></div>
+          <div class="frow" id="pk-order-row"><label>Order</label><select id="pk-order"><option value="0">0 (constant)</option><option value="1">1 (straight line)</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option></select></div>
+          <div class="frow hidden" id="pk-als-row"><label>λ, p</label><div class="row2"><input type="number" id="pk-lambda" step="any" title="Smoothness: larger is stiffer"><input type="number" id="pk-p" step="any" title="Weight of points above the background"></div></div>
+          <div class="frow hidden" id="pk-snip-row"><label>Half width</label><input type="number" id="pk-width" step="1" title="SNIP clipping window, channels"></div>
+          <div class="frow"><label></label><label class="chk"><input type="checkbox" id="pk-despike"> Remove cosmic rays first</label></div>
+        </div>
+      </div>
+      <div class="sec" data-sec="pk-bands">
+        <div class="sec-h toggle">Bands <span class="muted small">click a row for its limits and links</span></div>
+        <div class="sec-b">
+          <div class="btnrow"><button id="pk-find" title="Bands at the maxima of the spectrum in view that stand out by the prominence below">Find peaks</button><button id="pk-clear">Remove all</button></div>
+          <div class="frow"><label>Prominence</label><div class="row2"><input type="number" id="pk-prom" step="any" title="Times the noise"><select id="pk-new-shape" title="The line shape of bands found or added"></select></div></div>
+          <div class="pf-scroll"><table class="stats" id="pk-bands"></table></div>
+          <div id="pk-detail"></div>
+          <div class="muted small" id="pk-bands-note"></div>
+        </div>
+      </div>
+      <div class="sec" data-sec="pk-fit">
+        <div class="sec-h toggle">Fit</div>
+        <div class="sec-b">
+          <div class="btnrow"><button class="primary" id="pk-fit1">Fit this spectrum</button><button id="pk-fitall" title="Every spectrum of the file, each started from the fit of the one in view">Fit all spectra</button></div>
+          <div class="progress" id="pk-prog"><div></div></div>
+          <div class="muted small" id="pk-status"></div>
+          <div class="pf-scroll"><table class="stats" id="pk-result"></table></div>
+          <div class="muted small" id="pk-result-note"></div>
+        </div>
+      </div>
+      <div class="sec" data-sec="pk-model">
+        <div class="sec-h toggle">Model <span class="muted small">save, load, start from a preset</span></div>
+        <div class="sec-b">
+          <div class="frow"><label>Preset</label><select id="pk-preset"></select></div>
+          <div class="btnrow"><button id="pk-save">Save model…</button><button id="pk-load">Load model…</button></div>
+          <input type="file" id="pk-load-file" accept=".json,application/json" class="hidden">
+        </div>
+      </div>
+      <div class="sec" data-sec="pk-chk">
+        <div class="sec-h toggle">Checks</div>
+        <div class="sec-b"><ul class="ly-checks" id="pk-checks"></ul></div>
+      </div>
+      <div class="sec" data-sec="pk-exp">
+        <div class="sec-h toggle">Export and report</div>
+        <div class="sec-b btnrow">
+          <button id="pk-csv" title="Every spectrum: each band's height, position, FWHM, area and shape with their errors, and the fit's quality">Results (CSV)</button>
+          <button id="pk-csv-curve" title="The spectrum in view, its background, each band and the total">This fit (CSV)</button>
+          <button id="pk-png">Save maps</button>
+          <button class="primary" id="pk-report">Peak fit report</button>
+        </div>
+      </div>
+    </aside>
+  </section>
+
+  <section id="tab-graphene" class="tab">
+    <div class="dlc-main">
+      <div class="dlc-maps" id="gr-maps">
+        <div class="panel map" id="gr-map-0"></div>
+        <div class="panel map" id="gr-map-1"></div>
+        <div class="panel map" id="gr-map-2"></div>
+        <div class="panel map" id="gr-map-3"></div>
+      </div>
+      <div class="gr-lower">
+        <div class="panel col">
+          <div class="panel-h">D, G and D′ <span class="muted" id="gr-info"></span></div>
+          <div class="plot" id="gr-spec1"></div>
+          <div class="cursor-table" id="gr-cursor-table"></div>
+        </div>
+        <div class="panel col">
+          <div class="panel-h">2D</div>
+          <div class="plot" id="gr-spec2"></div>
+        </div>
+        <div class="panel col">
+          <div class="panel-h">Strain and doping <span class="muted small">Pos(G) against Pos(2D)</span></div>
+          <div class="plot" id="gr-scatter"></div>
+        </div>
+      </div>
+      <div class="dlc-empty hidden" id="gr-empty">
+        <div><h2>Graphene</h2><p id="gr-empty-p"></p><button class="primary" id="gr-run2">Analyse</button></div>
+      </div>
+    </div>
+    <aside class="side">
+      <div class="sec" data-sec="gr-set">
+        <div class="sec-h toggle">Fit <span class="muted small">D, G, D′ and 2D, Lorentzian</span></div>
+        <div class="sec-b">
+          <div class="frow"><label>Laser (nm)</label><input type="number" id="gr-laser" step="any" title="Read from the file when it says; the defect formulas and the band positions depend on it"></div>
+          <div class="frow"><label>D, G window</label><div class="row2"><input type="number" id="gr-w1lo" step="any"><input type="number" id="gr-w1hi" step="any"></div></div>
+          <div class="frow"><label>2D window</label><div class="row2"><input type="number" id="gr-w2lo" step="any"><input type="number" id="gr-w2hi" step="any"></div></div>
+          <div class="btnrow"><button class="primary" id="gr-run">Analyse</button><button id="gr-reset">Defaults</button></div>
+          <div class="progress" id="gr-prog"><div></div></div>
+          <div class="muted small" id="gr-status"></div>
+        </div>
+      </div>
+      <div class="sec" data-sec="gr-layers">
+        <div class="sec-h toggle">Layers <span class="muted small">from FWHM(2D)</span></div>
+        <div class="sec-b">
+          <div class="frow"><label>FWHM(2D) limits</label><div class="row2"><input type="number" id="gr-mono" step="any" title="Monolayer up to this (cm⁻¹)"><input type="number" id="gr-bi" step="any" title="Bilayer or few-layer up to this (cm⁻¹)"></div></div>
+          <div class="pf-scroll"><table class="stats" id="gr-layer-table"></table></div>
+        </div>
+      </div>
+      <div class="sec" data-sec="gr-res">
+        <div class="sec-h toggle">Results <span class="muted small">over the graphene spectra</span></div>
+        <div class="sec-b"><div class="pf-scroll"><table class="stats" id="gr-res-table"></table></div><div class="muted small" id="gr-res-note"></div></div>
+      </div>
+      <div class="sec" data-sec="gr-ref">
+        <div class="sec-h toggle">Strain and doping <span class="muted small">Lee et al. 2012</span></div>
+        <div class="sec-b">
+          <div class="frow"><label>Neutral point</label><div class="row2"><input type="number" id="gr-g0" step="any" title="Pos(G) of undoped, unstrained graphene (cm⁻¹)"><input type="number" id="gr-d0" step="any" title="Pos(2D) of undoped, unstrained graphene at your laser (cm⁻¹)"></div></div>
+          <div class="frow"><label>Slopes</label><div class="row2"><input type="number" id="gr-slt" step="any" title="Δω2D/ΔωG for strain"><input type="number" id="gr-slh" step="any" title="Δω2D/ΔωG for hole doping"></div></div>
+          <div class="frow"><label>G per % strain</label><input type="number" id="gr-sens" step="any" title="cm⁻¹ per % (biaxial)"></div>
+          <div class="muted small">The defaults are Lee et al.'s at 514.5 nm. The 2D band moves with the laser (about 100 cm⁻¹ per eV), so at another laser enter the neutral Pos(2D) for it.</div>
+        </div>
+      </div>
+      <div class="sec" data-sec="gr-chk">
+        <div class="sec-h toggle">Checks</div>
+        <div class="sec-b"><ul class="ly-checks" id="gr-checks"></ul></div>
+      </div>
+      <div class="sec" data-sec="gr-exp">
+        <div class="sec-h toggle">Export and report</div>
+        <div class="sec-b btnrow">
+          <button id="gr-csv">Results (CSV)</button>
+          <button id="gr-png">Save maps</button>
+          <button class="primary" id="gr-report">Graphene report</button>
+        </div>
+      </div>
+    </aside>
+  </section>
+
+  <section id="tab-si" class="tab">
+    <div class="dlc-main">
+      <div class="dlc-maps" id="si-maps">
+        <div class="panel map" id="si-map-0"></div>
+        <div class="panel map" id="si-map-1"></div>
+        <div class="panel map" id="si-map-2"></div>
+        <div class="panel map" id="si-map-3"></div>
+      </div>
+      <div class="dlc-lower">
+        <div class="panel col">
+          <div class="panel-h">Spectrum <span class="muted" id="si-info"></span><span class="grow"></span><span class="muted small hint">drag to zoom</span></div>
+          <div class="plot" id="si-spec"></div>
+          <div class="cursor-table" id="si-cursor-table"></div>
+        </div>
+        <div class="panel col">
+          <div class="panel-h">Calibration log <span class="muted small" id="si-log-info"></span></div>
+          <div class="plot" id="si-chart"></div>
+        </div>
+      </div>
+      <div class="dlc-empty hidden" id="si-empty">
+        <div><h2>Silicon</h2><p id="si-empty-p"></p><button class="primary" id="si-run2">Analyse</button></div>
+      </div>
+    </div>
+    <aside class="side">
+      <div class="sec" data-sec="si-set">
+        <div class="sec-h toggle">Fit</div>
+        <div class="sec-b">
+          <div class="frow"><label>Bands</label><select id="si-model"><option value="single">c-Si only (stress)</option><option value="film">c-Si, grain boundary, a-Si (films)</option></select></div>
+          <div class="frow"><label>c-Si shape</label><select id="si-shape"><option value="lorentz">Lorentz</option><option value="voigt">Voigt (instrument width)</option></select></div>
+          <div class="frow"><label>Range (cm⁻¹)</label><div class="row2"><input type="number" id="si-lo" step="any"><input type="number" id="si-hi" step="any"></div></div>
+          <div class="btnrow"><button class="primary" id="si-run">Analyse</button><button id="si-reset">Defaults</button></div>
+          <div class="progress" id="si-prog"><div></div></div>
+          <div class="muted small" id="si-status"></div>
+        </div>
+      </div>
+      <div class="sec" data-sec="si-stress">
+        <div class="sec-h toggle">Stress <span class="muted small">σ = k (ω − ω0)</span></div>
+        <div class="sec-b">
+          <div class="frow"><label>ω0 (cm⁻¹)</label><div class="row2"><input type="number" id="si-w0" step="any" title="The unstressed position"><button id="si-w0-pin" title="The pinned point as the unstressed reference">Pinned point</button></div></div>
+          <div class="frow"><label>k (MPa per cm⁻¹)</label><input type="number" id="si-k" step="any" title="−434 for uniaxial stress (De Wolf 1996); a biaxial or general stress state needs its own"></div>
+          <div class="frow"><label>y (cross sections)</label><input type="number" id="si-y" step="any" title="Amorphous to crystalline Raman cross-section ratio, for the crystalline fraction"></div>
+          <div class="pf-scroll"><table class="stats" id="si-res-table"></table></div>
+          <div class="muted small" id="si-res-note"></div>
+        </div>
+      </div>
+      <div class="sec" data-sec="si-cal">
+        <div class="sec-h toggle">Calibration check <span class="muted small">silicon wafer, daily</span></div>
+        <div class="sec-b">
+          <div class="frow"><label>Tolerance</label><div class="row2"><input type="number" id="si-tol" step="any" title="Largest |ω − ω0| accepted (cm⁻¹)"><input type="number" id="si-fwmax" step="any" title="Largest FWHM accepted (cm⁻¹)"></div></div>
+          <div id="si-cal-now"></div>
+          <div class="btnrow"><button id="si-log-add" title="Add the spectrum in view (the mean of a map) to the log">Add to the log</button><button id="si-log-csv">Log (CSV)</button></div>
+          <div class="pf-scroll"><table class="stats" id="si-log-table"></table></div>
+          <div class="btnrow"><button id="si-log-clear">Clear the log</button><span></span></div>
+          <div class="muted small">The log is kept in this browser. Its limits are the mean ± 3 SD of the entries.</div>
+        </div>
+      </div>
+      <div class="sec" data-sec="si-chk">
+        <div class="sec-h toggle">Checks</div>
+        <div class="sec-b"><ul class="ly-checks" id="si-checks"></ul></div>
+      </div>
+      <div class="sec" data-sec="si-exp">
+        <div class="sec-h toggle">Export and report</div>
+        <div class="sec-b btnrow">
+          <button id="si-csv">Results (CSV)</button>
+          <button id="si-png">Save maps</button>
+          <button class="primary" id="si-report">Silicon report</button>
+        </div>
+      </div>
+    </aside>
+  </section>
+
+  <section id="tab-id" class="tab">
+    <div class="dlc-main">
+      <div class="dlc-maps" id="id-maps">
+        <div class="panel map" id="id-map-0"></div>
+        <div class="panel map" id="id-map-1"></div>
+        <div class="panel map" id="id-map-2"></div>
+        <div class="panel map" id="id-map-3"></div>
+      </div>
+      <div class="panel col">
+        <div class="panel-h"><select id="id-which" title="The spectrum identified"></select><span class="muted" id="id-info"></span><span class="grow"></span><span class="muted small hint">as compared: background off, scaled</span></div>
+        <div class="plot" id="id-spec"></div>
+        <div class="cursor-table" id="id-cursor-table"></div>
+      </div>
+      <div class="dlc-empty hidden" id="id-empty">
+        <div><h2>Identify</h2><p id="id-empty-p"></p></div>
+      </div>
+    </div>
+    <aside class="side">
+      <div class="sec" data-sec="id-lib">
+        <div class="sec-h toggle">Library <span class="muted small" id="id-lib-count"></span></div>
+        <div class="sec-b">
+          <div class="btnrow"><button id="id-lib-load" title="Text files: one spectrum each, or spectra in columns">Add reference spectra…</button><button id="id-lib-add" title="The spectrum in view, under a name you give">Add the spectrum in view</button></div>
+          <div class="btnrow"><button id="id-lib-save">Save library…</button><button id="id-lib-open">Open library…</button></div>
+          <input type="file" id="id-lib-file" multiple accept=".txt,.csv,.tsv,.dat,.asc" class="hidden">
+          <input type="file" id="id-lib-json" accept=".json,application/json" class="hidden">
+          <div class="id-lib" id="id-lib"></div>
+        </div>
+      </div>
+      <div class="sec" data-sec="id-set">
+        <div class="sec-h toggle">Search</div>
+        <div class="sec-b">
+          <div class="frow"><label>Range (cm⁻¹)</label><div class="row2"><input type="number" id="id-lo" step="any"><input type="number" id="id-hi" step="any"></div></div>
+          <div class="frow"><label>Background</label><select id="id-base"><option value="0">None</option><option value="1">Straight line</option><option value="2">Polynomial, degree 2</option><option value="3">Polynomial, degree 3</option></select></div>
+          <div class="frow"><label>Compare</label><select id="id-deriv"><option value="0">Spectra</option><option value="1">First derivatives</option></select></div>
+          <div class="frow"><label>Match at HQI</label><input type="number" id="id-min" step="any" title="A spectrum is named after its best reference at this HQI or above (0 to 100)"></div>
+          <div class="btnrow"><button class="primary" id="id-run">Search</button><span></span></div>
+          <div class="progress" id="id-prog"><div></div></div>
+          <div class="muted small" id="id-status"></div>
+        </div>
+      </div>
+      <div class="sec" data-sec="id-hits">
+        <div class="sec-h toggle">Hits <span class="muted small">the spectrum in view</span></div>
+        <div class="sec-b"><div class="pf-scroll"><table class="stats" id="id-hits"></table></div><div class="muted small" id="id-mix"></div></div>
+      </div>
+      <div class="sec" data-sec="id-sum">
+        <div class="sec-h toggle">Over the file</div>
+        <div class="sec-b"><div class="pf-scroll"><table class="stats" id="id-sum"></table></div></div>
+      </div>
+      <div class="sec" data-sec="id-chk">
+        <div class="sec-h toggle">Checks</div>
+        <div class="sec-b"><ul class="ly-checks" id="id-checks"></ul></div>
+      </div>
+      <div class="sec" data-sec="id-exp">
+        <div class="sec-h toggle">Export and report</div>
+        <div class="sec-b btnrow">
+          <button id="id-csv">Matches (CSV)</button>
+          <button id="id-png">Save maps</button>
+          <button class="primary" id="id-report">Identification report</button>
+        </div>
+      </div>
+    </aside>
+  </section>
+
+  <section id="tab-tools" class="tab">
+    <div class="tb-main">
+      <div class="panel col">
+        <div class="panel-h"><select id="tb-which" title="The spectrum processed for the preview"></select><span class="muted" id="tb-info"></span><span class="grow"></span><span class="muted small">before</span></div>
+        <div class="plot" id="tb-before"></div>
+      </div>
+      <div class="panel col">
+        <div class="panel-h">After <span class="muted small" id="tb-after-info"></span></div>
+        <div class="plot" id="tb-after"></div>
+      </div>
+      <div class="dlc-empty hidden" id="tb-empty">
+        <div><h2>Toolbox</h2><p id="tb-empty-p"></p></div>
+      </div>
+    </div>
+    <aside class="side">
+      <div class="sec" data-sec="tb-ops">
+        <div class="sec-h toggle">Operations <span class="muted small">applied in this order</span></div>
+        <div class="sec-b">
+          <div class="frow"><label>Add</label><div class="row2"><select id="tb-add-op"></select><button id="tb-add">Add</button></div></div>
+          <div id="tb-ops"></div>
+          <div class="muted small" id="tb-ops-note"></div>
+        </div>
+      </div>
+      <div class="sec" data-sec="tb-ref">
+        <div class="sec-h toggle">Reference spectrum <span class="muted small">for subtract and divide</span></div>
+        <div class="sec-b">
+          <div class="frow"><label>Reference</label><select id="tb-ref"></select></div>
+          <div class="btnrow"><button id="tb-ref-load">Load a file…</button><span></span></div>
+          <input type="file" id="tb-ref-file" accept=".txt,.csv,.tsv,.dat,.asc" class="hidden">
+        </div>
+      </div>
+      <div class="sec" data-sec="tb-apply">
+        <div class="sec-h toggle">Apply</div>
+        <div class="sec-b">
+          <div class="btnrow"><button class="primary" id="tb-apply" title="Every spectrum of the file processed, opened as a new file that every tab can analyse">Process every spectrum</button><button id="tb-export" title="The processed spectra as a text file (LabSpec matrix layout for a map, spectra in columns for a set)">Export processed…</button></div>
+          <div class="btnrow"><button id="tb-mean" title="The mean of every measured spectrum, opened as a new file">Open the mean spectrum</button><button id="tb-one" title="The spectrum in view, processed, as a two-column CSV">This spectrum (CSV)</button></div>
+          <div class="progress" id="tb-prog"><div></div></div>
+          <div class="muted small" id="tb-status"></div>
+        </div>
+      </div>
+    </aside>
+  </section>
+
   <!-- ======================= Report ======================= -->
   <section id="tab-report" class="tab">
     <div class="report-bar">
-      <select id="rp-kind" title="Which analysis the report covers"><option value="carbon">Carbon fit report</option><option value="dlc">DLC coating report</option><option value="layers">Layers report</option><option value="mva">MVA report</option></select>
+      <select id="rp-kind" title="Which analysis the report covers"><option value="carbon">Carbon fit report</option><option value="dlc">DLC coating report</option><option value="layers">Layers report</option><option value="mva">MVA report</option><option value="fit">Peak fit report</option><option value="graphene">Graphene report</option><option value="si">Silicon report</option><option value="id">Identification report</option></select>
       <input id="rp-title" value="Raman carbon analysis">
       <button id="rp-refresh">Refresh</button>
       <button class="primary" id="rp-print">Print / Save as PDF</button>

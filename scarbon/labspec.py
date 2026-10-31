@@ -27,6 +27,7 @@ from __future__ import annotations
 import bisect
 import math
 import os
+import re
 import struct
 from dataclasses import dataclass, field
 
@@ -638,7 +639,39 @@ def pf_for_spectra_list(l6m_path: str, n_spectra: int) -> str | None:
 
 TEXT_EXT = (".txt", ".csv", ".tsv", ".dat")
 TEXT_LAYOUTS = ("a LabSpec matrix export (first row = Raman shift, then one row per point), "
-                "an x / y / shift / intensity table, or a two-column spectrum (shift, intensity)")
+                "an x / y / shift / intensity table, a two-column spectrum (shift, intensity), "
+                "or spectra in columns (shift, then one column per spectrum)")
+_DECIMAL_COMMA = re.compile(r"^[+-]?\d*,\d+(?:[eE][+-]?\d+)?$")
+
+
+def _cells(ln: str, sep: str | None) -> list[str]:
+    """One line into cells: a quoted cell may hold the separator."""
+    if '"' not in ln:
+        return ln.split(sep) if sep else ln.split()
+    if not sep:
+        return [t[1:-1] if len(t) > 1 and t[0] == t[-1] == '"' else t for t in ln.split()]
+    out, cur, quoted = [], "", False
+    for ch in ln:
+        if ch == '"':
+            quoted = not quoted
+        elif ch == sep and not quoted:
+            out.append(cur)
+            cur = ""
+        else:
+            cur += ch
+    out.append(cur)
+    return out
+
+
+def _monotonic(a) -> bool:
+    d = np.diff(a)
+    return bool(np.all(d > 0) or np.all(d < 0))
+
+
+def _unevenness(a) -> float:
+    """How uneven an axis's steps are (SD over mean): a spectral axis is near even, intensities are not."""
+    d = np.abs(np.diff(a))
+    return float(d.std() / (d.mean() or 1))
 
 
 def _grid(xs, ys, I, name):
@@ -677,18 +710,25 @@ def read_text(path: str) -> RamanMap:
     rows, labels = [], []
     with open(path, "r", encoding="utf-8-sig", errors="replace") as fh:
         lines = [ln.strip() for ln in fh if ln.strip()]
-    sep = next(("\t" if "\t" in ln else ";" if ";" in ln else "," if "," in ln else None
-                for ln in lines if not ln.startswith("#")), None)
+    first = next((ln for ln in lines if not ln.startswith("#")), "")
+    # spaces between numbers with decimal commas ("1000,5 234,6") are not comma-separated cells
+    spaced = first.split()
+    sep = ("\t" if "\t" in first else ";" if ";" in first
+           else "," if "," in first and not (len(spaced) > 1 and all(_DECIMAL_COMMA.match(t) for t in spaced)) else None)
+    heads = []
     for ln in lines:
-        toks = [t.strip() for t in (ln.split(sep) if sep else ln.split())]
+        toks = [t.strip() for t in _cells(ln, sep)]
         if sep == ";":
             toks = [t.replace(",", ".") for t in toks]      # decimal commas
+        elif sep != ",":
+            toks = [t.replace(",", ".") if _DECIMAL_COMMA.match(t) else t for t in toks]
         try:
             rows.append(np.array([float(t) for t in toks if t != ""]))
         except ValueError:
             if rows:
                 raise ValueError(f"{name}: non-numeric row after the data starts: {ln[:60]!r}") from None
-            labels = [t.lstrip("#").strip().lower() for t in toks]
+            heads = [t.lstrip("#").strip() for t in toks]
+            labels = [t.lower() for t in heads]
     if len(rows) < 1:
         raise ValueError(f"{name}: no numeric data")
 
@@ -706,8 +746,24 @@ def read_text(path: str) -> RamanMap:
                         meta={"format": "txt", "layout": layout, "missing": missing})
 
     head, body_widths = rows[0], {r.size for r in rows[1:]}
-    if (head.size >= 10 and len(body_widths) == 1 and min(body_widths) - head.size in (0, 1, 2)
-            and (np.all(np.diff(head) > 0) or np.all(np.diff(head) < 0))):
+    widths = {r.size for r in rows}
+    W = rows[0].size if len(widths) == 1 else 0
+    as_matrix = (head.size >= 10 and len(body_widths) == 1 and min(body_widths) - head.size in (0, 1, 2)
+                 and _monotonic(head))
+    # spectra in columns: the first column is the shift. A matrix of spectra in rows (no
+    # coordinates) can look the same when its first channel happens to rise down the file:
+    # the axis is the one with the evener steps
+    if W >= 3 and len(rows) >= 10:
+        body = np.vstack(rows)
+        col0 = body[:, 0]
+        if _monotonic(col0) and (not as_matrix or _unevenness(col0) < _unevenness(head)):
+            n = W - 1
+            given = heads[1:] if len(heads) == W else heads if len(heads) == n else []
+            names = [given[s] if s < len(given) and given[s] else f"Spectrum {s + 1}" for s in range(n)]
+            m = done(body[:, 1:].T[None], col0, np.arange(1, n + 1, dtype=float), [0.0], "columns")
+            m.meta["names"] = names
+            return m
+    if as_matrix:
         body = np.vstack(rows[1:])
         nc = body.shape[1] - head.size
         coords, I = body[:, :nc], body[:, nc:]
@@ -719,7 +775,6 @@ def read_text(path: str) -> RamanMap:
         x = coords[:, 0] if nc == 1 else np.arange(I.shape[0], dtype=float)
         return done(I[None], head, x, [0.0], "matrix line" if nc == 1 else "matrix spectra")
 
-    widths = {r.size for r in rows}
     if widths == {4}:
         body = np.vstack(rows)
         col = {"x": 0, "y": 1, "w": 2, "i": 3}

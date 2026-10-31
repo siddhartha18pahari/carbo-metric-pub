@@ -13,7 +13,8 @@ const RECORD = 24;
 const SHIFT_MIN = -4000, SHIFT_MAX = 4500;
 export const TEXT_EXT = [".txt", ".csv", ".tsv", ".dat"];
 const TEXT_LAYOUTS = "a LabSpec matrix export (first row = Raman shift, then one row per point), " +
-  "an x / y / shift / intensity table, or a two-column spectrum (shift, intensity)";
+  "an x / y / shift / intensity table, a two-column spectrum (shift, intensity), " +
+  "or spectra in columns (shift, then one column per spectrum)";
 
 const stem = name => name.replace(/\.[^.]+$/, "");
 
@@ -599,6 +600,27 @@ function monotonic(a) {
   for (let i = 1; i < a.length; i++) { if (!(a[i] > a[i - 1])) up = false; if (!(a[i] < a[i - 1])) down = false; }
   return up || down;
 }
+// how uneven the steps of an axis are (SD over mean): a spectral axis is near even, intensities are not
+function unevenness(a) {
+  const d = Array.from({ length: a.length - 1 }, (_, i) => Math.abs(a[i + 1] - a[i])), m = d.reduce((s, v) => s + v, 0) / d.length;
+  return Math.sqrt(d.reduce((s, v) => s + (v - m) ** 2, 0) / d.length) / (m || 1);
+}
+
+// one line into cells: a quoted cell may hold the separator
+function cells(ln, sep) {
+  if (!ln.includes('"')) return sep ? ln.split(sep) : ln.split(/\s+/);
+  if (!sep) return ln.split(/\s+/).map(t => t.replace(/^"(.*)"$/, "$1"));
+  const out = [];
+  let cur = "", quoted = false;
+  for (const ch of ln) {
+    if (ch === '"') quoted = !quoted;
+    else if (ch === sep && !quoted) { out.push(cur); cur = ""; }
+    else cur += ch;
+  }
+  out.push(cur);
+  return out;
+}
+const DECIMAL_COMMA = /^[+-]?\d*,\d+(?:[eE][+-]?\d+)?$/;
 
 function countMissing(cube, K) {
   let n = 0;
@@ -609,12 +631,16 @@ function countMissing(cube, K) {
 export function readText(text, name) {
   const lines = text.replace(/^﻿/, "").split(/\r?\n/).map(s => s.trim()).filter(Boolean);
   const first = lines.find(l => !l.startsWith("#")) || "";
-  const sep = first.includes("\t") ? "\t" : first.includes(";") ? ";" : first.includes(",") ? "," : null;
+  // spaces between numbers with decimal commas ("1000,5 234,6") are not comma-separated cells
+  const spaced = first.split(/\s+/);
+  const sep = first.includes("\t") ? "\t" : first.includes(";") ? ";"
+    : first.includes(",") && !(spaced.length > 1 && spaced.every(t => DECIMAL_COMMA.test(t))) ? "," : null;
   const rows = [];
-  let labels = [];
+  let labels = [], heads = [];
   for (const ln of lines) {
-    let toks = (sep ? ln.split(sep) : ln.split(/\s+/)).map(t => t.trim());
+    let toks = cells(ln, sep).map(t => t.trim());
     if (sep === ";") toks = toks.map(t => t.replace(",", "."));
+    else if (sep !== ",") toks = toks.map(t => (DECIMAL_COMMA.test(t) ? t.replace(",", ".") : t));
     const vals = [];
     let ok = true;
     for (const t of toks) {
@@ -626,7 +652,8 @@ export function readText(text, name) {
     if (ok && vals.length) rows.push(Float64Array.from(vals));
     else if (!ok) {
       if (rows.length) throw new Error(`${name}: non-numeric row after the data starts: '${ln.slice(0, 60)}'`);
-      labels = toks.map(t => t.replace(/^#/, "").trim().toLowerCase());
+      heads = toks.map(t => t.replace(/^#/, "").trim());
+      labels = heads.map(t => t.toLowerCase());
     }
   }
   if (!rows.length) throw new Error(`${name}: no numeric data`);
@@ -646,7 +673,20 @@ export function readText(text, name) {
   };
 
   const head = rows[0], widths = new Set(rows.slice(1).map(r => r.length));
-  if (head.length >= 10 && widths.size === 1 && [0, 1, 2].includes([...widths][0] - head.length) && monotonic(head)) {
+  const all = new Set(rows.map(r => r.length)), W = all.size === 1 ? rows[0].length : 0;
+  const col0 = W >= 3 && rows.length >= 10 ? Float64Array.from(rows, r => r[0]) : null;
+  const asMatrix = head.length >= 10 && widths.size === 1 && [0, 1, 2].includes([...widths][0] - head.length) && monotonic(head);
+  // spectra in columns: the first column is the shift. A matrix of spectra in rows (no
+  // coordinates) can look the same when its first channel happens to rise down the file:
+  // the axis is the one with the evener steps
+  if (col0 && monotonic(col0) && (!asMatrix || unevenness(col0) < unevenness(head))) {
+    const K = rows.length, n = W - 1, cube = new Float32Array(n * K);
+    for (let k = 0; k < K; k++) for (let s = 0; s < n; s++) cube[s * K + k] = rows[k][s + 1];
+    const given = heads.length === W ? heads.slice(1) : heads.length === n ? heads : [];
+    const names = Array.from({ length: n }, (_, s) => given[s] || `Spectrum ${s + 1}`);
+    return Object.assign(done(cube, col0, Float64Array.from({ length: n }, (_, s) => s + 1), [0], n, 1, "columns"), { names });
+  }
+  if (asMatrix) {
     const L = [...widths][0], nc = L - head.length, K = head.length, P = rows.length - 1;
     const I = new Float32Array(P * K), c0 = new Float64Array(P), c1 = new Float64Array(P);
     rows.slice(1).forEach((r, p) => { if (nc > 0) c0[p] = r[0]; if (nc > 1) c1[p] = r[1]; I.set(r.subarray(nc), p * K); });
@@ -662,7 +702,6 @@ export function readText(text, name) {
     return done(I, head, x, [0], P, 1, nc === 1 ? "matrix line" : "matrix spectra");
   }
 
-  const all = new Set(rows.map(r => r.length));
   if (all.size === 1 && all.has(4)) {
     let col = { x: 0, y: 1, w: 2, i: 3 };
     if (labels.length === 4) {
@@ -689,6 +728,41 @@ export function readText(text, name) {
     return done(Float32Array.from(rows, r => r[1]), Float64Array.from(rows, r => r[0]), [0], [0], 1, 1, "spectrum");
   }
   throw new Error(`${name}: not a layout this reader knows. Expected ${TEXT_LAYOUTS}.`);
+}
+
+// Several text files of single spectra (or spectra in columns) as one set: every spectrum on the
+// first file's channels inside the range all files share, linearly interpolated where an axis
+// differs. items: [{ name, map }] with map from readText. Returns the set as a columns CSV.
+export function combineSpectra(items) {
+  const lo = Math.max(...items.map(({ map }) => map.wn[0])), hi = Math.min(...items.map(({ map }) => map.wn[map.wn.length - 1]));
+  const wn = Array.from(items[0].map.wn).filter(v => v >= lo && v <= hi);
+  if (wn.length < 10) throw new Error(`these spectra share only ${wn.length} channels (${lo.toFixed(0)}–${hi.toFixed(0)} cm⁻¹): they cannot form one set`);
+  // a file whose channels include the shared ones as they are needs no interpolation: where they start
+  const startOf = m => {
+    const j0 = m.wn.findIndex(v => v >= wn[0] - 1e-6 * Math.max(1, Math.abs(wn[0])));
+    return j0 >= 0 && m.wn.length >= j0 + wn.length && wn.every((v, k) => Math.abs(m.wn[j0 + k] - v) <= 1e-6 * Math.max(1, Math.abs(v))) ? j0 : -1;
+  };
+  const names = [], Y = [];
+  let resampled = 0;
+  for (const { name, map } of items) {
+    const K = map.wn.length, n = map.nx * map.ny, j0 = startOf(map);
+    if (j0 < 0) resampled++;
+    for (let s = 0; s < n; s++) {
+      const y = map.cube.subarray(s * K, (s + 1) * K);
+      let j = 1;                                   // both axes ascend: the bracket only moves up
+      Y.push(j0 >= 0 ? Array.from(y.subarray(j0, j0 + wn.length)) : wn.map(v => {
+        while (j < K - 1 && map.wn[j] < v) j++;
+        const t = (v - map.wn[j - 1]) / (map.wn[j] - map.wn[j - 1]);
+        return y[j - 1] + t * (y[j] - y[j - 1]);
+      }));
+      const base = stem(name);
+      names.push(n === 1 ? base : `${base} ${map.names ? map.names[s] : s + 1}`);
+    }
+  }
+  const clean = s => s.replace(/[",;\t\r\n]+/g, " ").trim();
+  const lines = [["Raman shift (cm-1)", ...names.map(clean)].join(",")];
+  for (let k = 0; k < wn.length; k++) lines.push([wn[k], ...Y.map(y => y[k])].join(","));
+  return { csv: lines.join("\n") + "\n", n: names.length, K: wn.length, range: [wn[0], wn[wn.length - 1]], resampled };
 }
 
 // --------------------------------------------------------------------------

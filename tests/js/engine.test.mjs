@@ -182,3 +182,40 @@ test("ParticleFinder seams: objects on the dark border between mosaic tiles, and
   assert.deepEqual(Array.from(pfSeams(pts, { raw, off: 0, W, H, x, y })), [1, 1, 0, 0, 0]);
   assert.deepEqual(Array.from(pfSeams(pts, null)), [0, 0, 0, 0, 0]);
 });
+
+test("spectra in columns: names from the header, quoted cells, decimal commas", () => {
+  const wn = Array.from({ length: 60 }, (_, k) => 1800 - 10 * k);                 // descending, as some programs write
+  const s = (a, k) => 100 * a + k;
+  const csv = ['"Raman shift","Sample A, spot 1","B"', ...wn.map((v, k) => `${v},${s(1, k)},${s(2, k)}`)].join("\n");
+  const m = readText(csv, "set.csv");
+  assert.equal(m.layout, "columns"); assert.equal(m.nx, 2); assert.equal(m.ny, 1);
+  assert.deepEqual(m.names, ["Sample A, spot 1", "B"]);
+  assert.ok(m.wn[0] < m.wn[59]);
+  close(m.cube[0], s(1, 59), 1e-4); close(m.cube[60 + 59], s(2, 0), 1e-4);    // channels reversed with the axis
+  const t = readText(["shift\tx\ty\tz", ...wn.map((v, k) => [v, 1, 2, 3].map(x => `${x + 0.5 * k}`.replace(".", ",")).join("\t"))].join("\n"), "t.txt");
+  assert.equal(t.layout, "columns"); assert.equal(t.nx, 3); assert.deepEqual(t.names, ["x", "y", "z"]);
+  close(t.wn[59], 1800, 1e-9); close(t.cube[58], 1.5, 1e-6); close(t.cube[3 * 60 - 2], 3.5, 1e-6);
+  const sp = readText(wn.map((v, k) => `${(v + 0.25).toFixed(2).replace(".", ",")} ${(3.5 * k).toFixed(1).replace(".", ",")}`).join("\n"), "w.txt");
+  assert.equal(sp.layout, "spectrum"); close(sp.wn[0], 1210.25, 1e-9);
+});
+
+test("spectra in columns vs a matrix of spectra in rows: the evener axis wins", () => {
+  // 12 spectra in rows (no coordinates), first channel rising down the file by chance
+  const wn = Array.from({ length: 30 }, (_, k) => 400 + 7 * k), rows = [wn.join("\t")];
+  for (let p = 0; p < 12; p++) rows.push(wn.map((_, k) => (p + 1) ** 2 + k).join("\t"));
+  const m = readText(rows.join("\n"), "rows.txt");
+  assert.equal(m.layout, "matrix spectra"); assert.equal(m.nx, 12); assert.equal(m.k ?? m.wn.length, 30);
+});
+
+test("several single-spectrum files as one set, on the first file's channels", async () => {
+  const { combineSpectra } = await import("../../web/js/engine/readers.js");
+  const a = Array.from({ length: 50 }, (_, k) => 1000 + 10 * k), b = Array.from({ length: 80 }, (_, k) => 995 + 6.5 * k);
+  const line = v => 3 + 0.01 * v;
+  const A = readText(a.map(v => `${v},${line(v)}`).join("\n"), "first.csv"), B = readText(b.map(v => `${v}\t${line(v)}`).join("\n"), "second.txt");
+  const C = combineSpectra([{ name: "first.csv", map: A }, { name: "second.txt", map: B }]);
+  assert.equal(C.n, 2); assert.equal(C.resampled, 1);
+  const set = readText(C.csv, "set.csv");
+  assert.deepEqual(set.names, ["first", "second"]);
+  assert.ok(set.wn[0] >= 1000 && set.wn[set.wn.length - 1] <= 995 + 6.5 * 79);
+  for (let k = 0; k < set.wn.length; k++) close(set.cube[set.wn.length + k], line(set.wn[k]), 1e-4);  // a straight line interpolates exactly
+});
