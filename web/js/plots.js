@@ -268,6 +268,100 @@ export class LinesPlot extends Base {
 }
 
 // ---------------------------------------------------------------------------
+// Points in two dimensions (the MVA tab's scores), coloured by class:
+// d = { x, y, cls, colours, xl, yl, mark }. onPick gets the nearest point.
+export class ScatterPlot extends Base {
+  constructor(host, { onPick = null } = {}) {
+    super(host);
+    this.onPick = onPick;
+    this.canvas.addEventListener("click", e => {
+      if (!this.onPick || !this.S) return;
+      const { X, Y } = this.S, d = this.d;
+      let best = -1, bd = 100;
+      for (let i = 0; i < d.x.length; i++) {
+        if (!Number.isFinite(d.x[i]) || !Number.isFinite(d.y[i])) continue;
+        const q = (X(d.x[i]) - e.offsetX) ** 2 + (Y(d.y[i]) - e.offsetY) ** 2;
+        if (q < bd) { bd = q; best = i; }
+      }
+      if (best >= 0) this.onPick(best);
+    });
+  }
+  setData(d) { this.d = d; this.render(); }
+  render() {
+    const F = this.frame({ l: 54, r: 12, t: 12, b: 34 }); if (!F) return;
+    const d = this.d, { ctx } = F;
+    this.S = null;
+    if (!d || !d.x.length) return;
+    let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+    for (let i = 0; i < d.x.length; i++) {
+      if (!Number.isFinite(d.x[i]) || !Number.isFinite(d.y[i])) continue;
+      x0 = Math.min(x0, d.x[i]); x1 = Math.max(x1, d.x[i]); y0 = Math.min(y0, d.y[i]); y1 = Math.max(y1, d.y[i]);
+    }
+    if (!(x1 > x0)) x1 = x0 + 1;
+    if (!(y1 > y0)) y1 = y0 + 1;
+    const px = (x1 - x0) * 0.04, py = (y1 - y0) * 0.04;
+    this.S = this.axes(F, [x0 - px, x1 + px], [y0 - py, y1 + py], { yl: d.yl || "" });
+    const { X, Y } = this.S, r = d.x.length > 4000 ? 1.5 : 2.5;
+    ctx.save(); ctx.beginPath(); ctx.rect(F.x, F.y, F.w, F.h); ctx.clip();
+    ctx.globalAlpha = 0.75;
+    for (let i = 0; i < d.x.length; i++) {
+      if (!Number.isFinite(d.x[i]) || !Number.isFinite(d.y[i])) continue;
+      ctx.fillStyle = d.cls ? d.colours[d.cls[i] % d.colours.length] : T.accent;
+      ctx.fillRect(X(d.x[i]) - r, Y(d.y[i]) - r, 2 * r, 2 * r);
+    }
+    ctx.globalAlpha = 1;
+    if (d.mark != null && Number.isFinite(d.x[d.mark])) {
+      ctx.strokeStyle = T.pin; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(X(d.x[d.mark]), Y(d.y[d.mark]), 6, 0, 2 * Math.PI); ctx.stroke();
+    }
+    ctx.restore();
+    ctx.fillStyle = T.label; ctx.font = font(11); ctx.textAlign = "center"; ctx.textBaseline = "bottom";
+    ctx.fillText(d.xl || "", F.x + F.w / 2, F.y + F.h + 33);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The top of a hierarchical clustering tree (the MVA tab's HCA): its last
+// merges, the subtrees below them as leaves labelled with their size, and the
+// height where it is cut into classes. d = { tree: { nodes: [{ id, a, b, h,
+// sa, sb }] }, cut, k }.
+export class DendrogramPlot extends Base {
+  setData(d) { this.d = d; this.render(); }
+  render() {
+    const F = this.frame({ l: 54, r: 12, t: 12, b: 34 }); if (!F) return;
+    const d = this.d, { ctx } = F;
+    if (!d || !d.tree || !d.tree.nodes.length) return;
+    const nodes = d.tree.nodes, byId = new Map(nodes.map(n => [n.id, n])), root = nodes[nodes.length - 1], size = new Map(), leaves = [];
+    for (const n of nodes) { if (!byId.has(n.a)) size.set(n.a, n.sa); if (!byId.has(n.b)) size.set(n.b, n.sb); }
+    const walk = id => { const n = byId.get(id); if (!n) { leaves.push(id); return; } walk(n.a); walk(n.b); };
+    walk(root.id);
+    const xOf = new Map(leaves.map((id, i) => [id, i])), hOf = id => (byId.has(id) ? byId.get(id).h : 0);
+    const pos = id => { if (!xOf.has(id)) { const n = byId.get(id); xOf.set(id, (pos(n.a) + pos(n.b)) / 2); } return xOf.get(id); };
+    const top = root.h * 1.06, X = v => F.x + (v + 0.5) / leaves.length * F.w, Y = v => F.y + F.h - v / top * F.h;
+    ctx.font = font(11); ctx.fillStyle = T.ink; ctx.textAlign = "right"; ctx.textBaseline = "middle";
+    for (const t of niceTicks(0, top, Math.max(2, Math.floor(F.h / 34)))) {
+      ctx.fillStyle = T.grid; ctx.fillRect(F.x, Y(t), F.w, 1); ctx.fillStyle = T.ink; ctx.fillText(fmt(t, 3), F.x - 5, Y(t));
+    }
+    ctx.strokeStyle = T.frame; ctx.strokeRect(F.x - .5, F.y - .5, F.w + 1, F.h + 1);
+    ctx.strokeStyle = T.strong; ctx.lineWidth = 1.2;
+    for (const n of nodes) {
+      const xa = X(pos(n.a)), xb = X(pos(n.b));
+      ctx.beginPath(); ctx.moveTo(xa, Y(hOf(n.a))); ctx.lineTo(xa, Y(n.h)); ctx.lineTo(xb, Y(n.h)); ctx.lineTo(xb, Y(hOf(n.b))); ctx.stroke();
+    }
+    // each leaf's size below it, where there is room
+    ctx.fillStyle = T.label; ctx.font = font(10); ctx.textAlign = "center"; ctx.textBaseline = "top";
+    if (F.w / leaves.length > 16) leaves.forEach(id => ctx.fillText(String(size.get(id) ?? 1), X(xOf.get(id)), F.y + F.h + 3));
+    if (Number.isFinite(d.cut)) {
+      ctx.strokeStyle = T.bad; ctx.setLineDash([5, 4]); ctx.beginPath(); ctx.moveTo(F.x, Y(d.cut)); ctx.lineTo(F.x + F.w, Y(d.cut)); ctx.stroke(); ctx.setLineDash([]);
+      ctx.fillStyle = T.bad; ctx.textAlign = "right"; ctx.textBaseline = "bottom"; ctx.font = font(11);
+      ctx.fillText(`cut: ${d.k} classes`, F.x + F.w - 4, Y(d.cut) - 2);
+    }
+    ctx.fillStyle = T.label; ctx.font = font(11); ctx.textAlign = "center"; ctx.textBaseline = "bottom";
+    ctx.fillText("Spectra in each branch", F.x + F.w / 2, F.y + F.h + 33);
+    ctx.save(); ctx.translate(10, F.y + F.h / 2); ctx.rotate(-Math.PI / 2); ctx.textBaseline = "middle"; ctx.fillText("Ward distance", 0, 0); ctx.restore();
+  }
+}
+
+// ---------------------------------------------------------------------------
 export class DensityPlot extends Base {
   setData(d) { this.d = d; this._img = null; this.render(); }
   _build() {

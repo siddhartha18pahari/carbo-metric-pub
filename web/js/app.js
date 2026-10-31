@@ -6,10 +6,10 @@
 import { smoothSpectra } from "./engine/core.js";
 import { $, $$, el, api, apiUpload, videoSrc, setLocalBackend, isBrowserOnly, f32, download, debounce, fmt, summary, otsu, toast, hidpi, quantile, niceTicks } from "./util.js";
 import { MapView } from "./mapview.js";
-import { SpectrumPlot, HistogramPlot, DensityPlot, LinesPlot, PEAK_COLOURS } from "./plots.js";
+import { SpectrumPlot, HistogramPlot, DensityPlot, LinesPlot, ScatterPlot, DendrogramPlot, PEAK_COLOURS } from "./plots.js";
 import { SplatView, sliceField } from "./splat3d.js";
 import { segment, outlineOverlay, distance, PARTICLE_COLOURS } from "./particles.js";
-import { buildReport, buildDlcReport, buildLayersReport } from "./report.js";
+import { buildReport, buildDlcReport, buildLayersReport, buildMvaReport } from "./report.js";
 import { rng, wilson, weightedQuantile, laCancado, robustScale, bestGmm, bootstrapShares, median, quantileSorted,
          heightCovariances, ratioVariance, heterogeneity, moranI, spearmanCI, coverage, pairRatio,
          binomLower, certifyCount, detectionPower, signalFloor, gini, noiseGini, logCV, lognormalPreferred,
@@ -22,9 +22,10 @@ import { PRESET_21OCT, SC_SETTINGS, BANDS as D3G_BANDS, prepare as d3gPrepare, u
          refineOnMedian, standardRatio, scaleIndex } from "./d3g-calibration.js";
 import { DLC_DEFAULTS, DLC_PARAMS, SE_KEYS as DLC_SE_KEYS, STATUS as DLC_STATUS, FLAG as DLC_FLAG, prepare as dlcPrepare, fitMean as dlcFitMean,
          fitSpectra as dlcFitSpectra, makeFitter as dlcFitter, components as dlcComponents, bwfFwhm, qcTest, paramStats, homogeneity, homogeneityLevel } from "./dlc.js";
+import { MVA_DEFAULTS, METHODS, runMva, identify, compareLoadings } from "./mva.js";
 import { LAYER_DEFAULTS, prepare as lyPrepare, decompose as lyDecomp, prepRef, matchRefs, findLayers as lyFind, thicknessTest, amountMap, layerSpectra } from "./layers.js";
 import { T, font, setTheme, currentTheme } from "./theme.js";
-import { lut } from "./colormaps.js";
+import { lut, rgbAt } from "./colormaps.js";
 
 const QUANT = { intensity: "Intensity", width: "Width", area: "Area", position: "Position" };
 const UNIT = { intensity: "counts", width: "cm⁻¹", area: "cm⁻¹ × counts", position: "cm⁻¹" };
@@ -737,7 +738,7 @@ async function loadDataset(info) {
   }
   // particles are drawn over their camera image (a grid map covers its own)
   const back = S.points && S.video && info.video ? { img: S.video, ...info.video } : null;
-  for (const m of [...maps, pmap, ...dlcMaps, ...lyMaps]) { m.setGeometry({ nx: S.nx, ny: S.ny, x: S.x, y: S.y, points: S.points }); m.values = null; m.backdrop = back; }
+  for (const m of [...maps, pmap, ...dlcMaps, ...lyMaps, ...mvMaps]) { m.setGeometry({ nx: S.nx, ny: S.ny, x: S.x, y: S.y, points: S.points }); m.values = null; m.backdrop = back; }
   fitMapRow();
   S.vidFull = false;
   setActive(S.active);
@@ -748,6 +749,8 @@ async function loadDataset(info) {
   LY.hover = LY.pinned = LY.sel = null;
   lyFromFile(info);
   if ($("#tab-layers").classList.contains("on")) lyShow();
+  MV.hover = MV.pinned = null;
+  if ($("#tab-mva").classList.contains("on")) mvShow();
   // reopening a map the server already fitted with these settings: reuse it
   const prev = await api(`/api/ds/${info.id}/fit?result=1`).catch(() => null);
   if (prev && prev.state === "done" && prev.result && JSON.stringify(prev.result.config) === JSON.stringify(S.cfg)) {
@@ -994,6 +997,7 @@ function switchTab(name) {
   if (name === "particles") particlesInit();
   if (name === "dlc") dlcShow();
   if (name === "layers") lyShow();
+  if (name === "mva") mvShow();
   if (name === "report") makeReport();
   if (name === "files") setTimeout(() => renderFiles(), 0);
   if (name === "qc") setTimeout(() => { fitMapRow(); maps.forEach(m => m.render()); renderVideo(); cursorPlot.render(); hist.render(); density.render(); }, 0);
@@ -4689,7 +4693,7 @@ function makeDlcReport() {
     status: DLC_STATUS, pf: !!S.points, pinned: DLC.pinned, figs: dlcFigures(R), qcKeys: DLC_QC_KEYS, homKeys: DLC_HOM_KEYS });
 }
 // the report's title follows its kind while it is one of the defaults
-const RP_TITLES = { carbon: "Raman carbon analysis", dlc: "DLC coating analysis", layers: "Multilayer analysis" };
+const RP_TITLES = { carbon: "Raman carbon analysis", dlc: "DLC coating analysis", layers: "Multilayer analysis", mva: "Multivariate analysis" };
 function rpTitle() { const t = $("#rp-title"); if (Object.values(RP_TITLES).includes(t.value)) t.value = RP_TITLES[$("#rp-kind").value]; }
 $("#rp-kind").onchange = () => { rpTitle(); makeReport(); };
 
@@ -4962,8 +4966,9 @@ function lyRefList() {
 }
 function lyRefsChanged(rebuild) {
   for (const R of LY.res.values()) lyMatch(R);
-  if (rebuild) lyRefList();
+  if (rebuild) { lyRefList(); mvRefList(); }
   lyMatTable(); lyLimitsTable(); lyRender();
+  mvRefsChanged();                                // the MVA tab shares the references
 }
 // a reference: one spectrum, two columns (Raman shift, intensity); lines of words before the numbers skipped
 function lyParseRef(text, name) {
@@ -5209,6 +5214,432 @@ function makeLayersReport() {
 }
 
 // =========================================================================
+// MVA (mva.js): loadings by PCA, MCR, K-means or HCA (or reference spectra),
+// images by CLS, a comparison between methods, loadings named by reference
+// =========================================================================
+const MV_STORE = "carbo-mva";
+const MV = { settings: structuredClone(MVA_DEFAULTS), files: new Map(), running: false, specs: ["comp:0", "comp:1", "comp:2", "resid"], hover: null, pinned: null, diag: null, worker: null, local: null };
+// the settings are kept per browser
+try {
+  const saved = JSON.parse(localStorage.getItem(MV_STORE) || "null");
+  if (saved && saved.settings) Object.assign(MV.settings, saved.settings);
+} catch { /* storage blocked or unreadable: the defaults */ }
+function mvSave() { try { localStorage.setItem(MV_STORE, JSON.stringify({ settings: MV.settings })); } catch { /* not remembered */ } }
+// per open file: its prepared spectra and the last run of each method on them
+const mvFile = () => (S.ds ? MV.files.get(S.ds.id) || null : null);
+const mvCur = () => { const D = mvFile(); return D && D.cur ? D.runs[D.cur] || null : null; };
+const mvPrepKey = s => stableJSON({ range: s.range, baseline: s.baseline });
+const mvRunKey = s => stableJSON({ range: s.range, baseline: s.baseline, norm: s.norm, k: s.k, method: s.method, refs: s.method === "refs" ? LY.refs.map(r => r.id) : null });
+const mvCanRun = () => !!(S.ds && S.cube && P() >= 3);
+const mvStatusText = t => { $("#mva-status").textContent = t; };
+const mvHex = c => `#${c.map(v => v.toString(16).padStart(2, "0")).join("")}`;
+const mvColour = a => (a < PEAK_COLOURS.length ? PEAK_COLOURS[a] : mvHex(rgbAt("Turbo", (0.07 + 0.29 * (a - PEAK_COLOURS.length)) % 1)));
+const mvClusters = R => R.method === "kmeans" || R.method === "hca";
+const mvUnit = R => (R.method === "pca" ? "component" : mvClusters(R) ? "class" : "component");
+function mvName(R, a) {
+  if (R.names[a]) return R.names[a];
+  if (R.refNames) return R.refNames[a];
+  const m = R.match && R.match[a];
+  if (m && m.best >= 0 && LY.refs[m.best]) return LY.refs[m.best].name;
+  return R.method === "pca" ? `PC ${a + 1}` : mvClusters(R) ? `Class ${a + 1}` : `Component ${a + 1}`;
+}
+const mvLabelOf = (spec, R) => (spec === "class" ? "Class" : spec === "resid" ? "Residual" : `${mvName(R, +spec.split(":")[1])}: ${spec.startsWith("amt") ? "amount" : R.kind === "signed" ? "score" : "share"}`);
+
+async function mvRun() {
+  if (MV.running || !S.ds) return;
+  if (!mvCanRun()) { toast(!S.cube ? "MVA needs the spectra: this file holds fitted values only." : "MVA needs at least three spectra.", "error"); return; }
+  const s0 = MV.settings;
+  if (!(s0.range[0] < s0.range[1])) { toast("The range: the minimum must be below the maximum.", "error"); return; }
+  if (s0.method === "refs" && LY.refs.length < 2) { toast("Load at least two reference spectra for CLS against references.", "error"); return; }
+  const ds = S.ds, settings = structuredClone(s0), refs = LY.refs.map(r => ({ name: r.name, wn: r.wn, y: r.y })), t0 = performance.now();
+  const pkey = `${ds.id}|${mvPrepKey(settings)}`;
+  let D = MV.files.get(ds.id);
+  if (!D) MV.files.set(ds.id, D = { runs: {}, cur: null, prep: null, pkey: null });
+  MV.running = true; $("#mva-run").disabled = $("#mva-run2").disabled = true;
+  const prog = $("#mva-prog > div");
+  prog.style.width = "3%";
+  mvStatusText(`${METHODS[settings.method]} on ${ds.name}…`);
+  mvRender();
+  try {
+    const out = await mvCompute({ key: pkey, cube: S.cube, K: S.k, wn: S.wn, geom: { nx: S.nx, ny: S.ny }, settings, refs, havePrep: D.pkey === pkey && !!D.prep }, t => {
+      const m = /^Preparing (\d+) of (\d+)/.exec(t);
+      if (m) prog.style.width = `${(3 + 50 * m[1] / m[2]).toFixed(1)}%`; else prog.style.width = "70%";
+      mvStatusText(`${t}…`);
+    });
+    if (out.prep) {
+      D.prep = out.prep; D.pkey = pkey;
+      for (const k of Object.keys(D.runs)) if (D.runs[k].pkey !== pkey) delete D.runs[k];    // made from other spectra
+    }
+    const R = Object.assign(out.R, { pkey, key: mvRunKey(settings), settings, refNames: settings.method === "refs" ? refs.map(r => r.name) : null,
+      names: [], seconds: (performance.now() - t0) / 1000 });
+    mvMatch(R, D);
+    D.runs[settings.method] = R; D.cur = settings.method;
+    MV.specs = mvDefaultSpecs(R); MV.diag = null;
+    prog.style.width = "100%";
+  } catch (e) { mvStatusText(`Could not run: ${e.message}`); toast(`MVA: ${e.message}`, "error", 8000); }
+  finally { MV.running = false; $("#mva-run").disabled = $("#mva-run2").disabled = false; }
+  if (S.ds === ds) { MV.hover = MV.pinned = null; mvForm(); mvRender(); }
+}
+// in a worker that keeps the prepared spectra between runs (in the page when workers cannot start)
+function mvCompute(msg, onStage) {
+  if (MV.worker === null) { try { MV.worker = new Worker(new URL("./mva-worker.js", import.meta.url), { type: "module" }); } catch { MV.worker = false; } }
+  if (!MV.worker) {
+    return xcTick().then(() => {
+      if (!MV.local || MV.local.key !== msg.key) MV.local = { key: msg.key, prep: lyPrepare(msg.cube, msg.K, msg.wn, msg.geom, msg.settings) };
+      return { R: runMva(MV.local.prep, msg.settings, msg.refs), prep: MV.local.prep };
+    });
+  }
+  return new Promise((res, rej) => {
+    const w = MV.worker;
+    w.onmessage = e => { const d = e.data; if (d.stage) { onStage(d.stage); return; } if (d.error) rej(new Error(d.error)); else res(d); };
+    w.onerror = e => { w.terminate(); MV.worker = null; rej(new Error(e.message || "the MVA worker failed")); };
+    w.postMessage(msg);
+  });
+}
+// each loading's best reference: only for loadings that are spectra (not PCA's) and not the references themselves
+function mvMatch(R, D) { R.match = !R.refNames && R.kind === "nonneg" && LY.refs.length && D.prep ? identify(R, D.prep, LY.refs, MV.settings.minHQI) : null; R.refPrep = new Map(); }
+function mvRefsChanged() {
+  for (const D of MV.files.values()) for (const R of Object.values(D.runs)) mvMatch(R, D);
+  mvCompTable(); mvRender();
+}
+function mvDefaultSpecs(R) {
+  const comp = Array.from({ length: Math.min(R.k, 3) }, (_, a) => `comp:${a}`), out = R.labels ? ["class", ...comp.slice(0, 2)] : comp;
+  while (out.length < 3) out.push("resid");
+  return [...out.slice(0, 3), "resid"];
+}
+
+// --------------------------------------------------------------------------
+// maps, loadings, diagnostics, spectrum
+// --------------------------------------------------------------------------
+const mvMaps = [0, 1, 2, 3].map(i => new MapView($(`#mva-map-${i}`), {
+  onTitle: (mv, e) => mvMenu(e, i),
+  onHover: p => mvHover(p),
+  onPick: p => mvPin(p),
+  onView: (v, src) => { for (const m of mvMaps) if (m !== src) m.setView(v ? { ...v } : null); },
+  onProfile: on => { for (const m of mvMaps) m.setProfile(on); },
+  onBackdrop: on => { for (const m of mvMaps) { m.backdropOn = on; m._ptsCache = null; m.render(); } },
+}));
+const mvLoad = new LinesPlot($("#mva-load")), mvLines = new LinesPlot($("#mva-diag-lines")), mvPlot = new SpectrumPlot($("#mva-cursor"));
+const mvScatter = new ScatterPlot($("#mva-diag-scatter"), { onPick: i => { const D = mvFile(); if (D) mvPin(D.prep.list[i]); } });
+const mvTree = new DendrogramPlot($("#mva-diag-tree"));
+
+function mvMenu(e, i) {
+  e.stopPropagation();
+  const R = mvCur(); if (!R) return;
+  $$(".popover").forEach(p => p.remove());
+  const pop = el("div", { class: "popover", style: "max-height:70vh;overflow:auto", onclick: ev => ev.stopPropagation() });
+  const pick = k => { MV.specs[i] = k; pop.remove(); mvRenderMap(i); };
+  const opts = [...(R.labels ? ["class"] : []), ...Array.from({ length: R.k }, (_, a) => `comp:${a}`), ...(R.kind === "nonneg" ? Array.from({ length: R.k }, (_, a) => `amt:${a}`) : []), "resid"];
+  pop.append(el("div", { class: "pop-h" }, "Show"), el("div", { class: "menu-list" }, ...opts.map(k => el("button", { class: k === MV.specs[i] ? "on" : "", onclick: () => pick(k) }, mvLabelOf(k, R)))));
+  document.body.append(pop);
+  const r = e.currentTarget.getBoundingClientRect();
+  pop.style.left = Math.max(8, Math.min(window.innerWidth - 250, r.left)) + "px";
+  pop.style.top = Math.max(8, Math.min(window.innerHeight - pop.offsetHeight - 8, r.bottom + 6)) + "px";
+  setTimeout(() => document.addEventListener("click", () => pop.remove(), { once: true }));
+}
+// what a map shows: the class of each spectrum, a component's score, share or amount, or the residual
+function mvMapData(spec, R, D) {
+  const { P: np, rowOf } = D.prep, k = R.k, val = f => { const v = new Float32Array(np).fill(NaN); for (let p = 0; p < np; p++) { const i = rowOf[p]; if (i >= 0) v[p] = f(i); } return v; };
+  if (spec === "class" && R.labels) {
+    const index = Int8Array.from({ length: np }, (_, p) => (rowOf[p] >= 0 ? R.labels[rowOf[p]] : -1));
+    return { values: Float32Array.from(index), label: "Class", unit: "", categories: { index, colours: Array.from({ length: k }, (_, a) => mvColour(a)), names: Array.from({ length: k }, (_, a) => mvName(R, a)) } };
+  }
+  if (spec === "resid") return { values: val(i => R.resid[i]), label: "Residual", unit: "× noise" };
+  const [kind, s] = spec.split(":"), a = Math.min(+s || 0, k - 1);
+  if (kind === "amt" && R.kind === "nonneg") return { values: val(i => R.W[i * k + a]), label: mvLabelOf(spec, R), unit: "" };
+  if (R.kind === "signed") return { values: val(i => R.W[i * k + a]), label: mvLabelOf(`comp:${a}`, R), unit: "" };
+  return { values: val(i => 100 * R.share[i * k + a]), label: mvLabelOf(`comp:${a}`, R), unit: "%" };
+}
+function mvRenderMap(i) {
+  const mv = mvMaps[i], R = mvCur(), D = mvFile();
+  if (!R || !D || !D.prep) { mv.setTitle("MVA"); Object.assign(mv, { categories: null, values: null, emptyText: null, _dirty: true }); mv.render(); return; }
+  const M = mvMapData(MV.specs[i] || "resid", R, D);
+  mv.setTitle(`MVA : <u>${escHTML(M.label)}</u>`);
+  Object.assign(mv, { categories: M.categories || null, emptyText: null, _ptsCache: null });
+  mv.setData(M.values, { valid: null, label: M.label, unit: M.unit });
+}
+function mvHover(p) { MV.hover = p; mvMaps.forEach(m => m.setCursor(p, MV.pinned)); mvRenderCursor(); }
+function mvPin(p) { MV.pinned = p; MV.hover = null; mvMaps.forEach(m => m.setCursor(null, p)); mvRenderCursor(); mvRenderDiag(); }
+
+// the loadings, each scaled to 1 and offset; a matched reference dashed
+function mvRenderLoad() {
+  const R = mvCur(), D = mvFile(), info = $("#mva-load-info");
+  if (!R || !D || !D.prep) { mvLoad.setData(null); info.textContent = ""; return; }
+  const nb = R.nb, step = R.kind === "signed" ? 2.2 : 1.1, series = [];
+  const norm = (y, off) => { let hi = 0; for (const v of y) if (Number.isFinite(v)) hi = Math.max(hi, Math.abs(v)); return Float64Array.from(y, v => v / (hi || 1) + off); };
+  for (let a = 0; a < R.k; a++) {
+    const off = step * (R.k - 1 - a);
+    series.push({ x: D.prep.nu, y: norm(R.L.subarray(a * nb, (a + 1) * nb), off), colour: mvColour(a), label: mvName(R, a), width: 1.4 });
+    const m = R.match && R.match[a];
+    if (m && m.best >= 0) {
+      const ref = LY.refs[m.best];
+      if (!R.refPrep.has(ref.id)) R.refPrep.set(ref.id, prepRef(ref, D.prep));
+      series.push({ x: D.prep.nu, y: norm(R.refPrep.get(ref.id).y, off), colour: mvColour(a), width: 1, dash: [4, 3] });
+    }
+  }
+  mvLoad.setData({ series, xl: "Raman shift (cm⁻¹)", xu: "cm⁻¹", yl: R.kind === "signed" ? "Loading (scaled, offset)" : "Spectrum (scaled, offset)", legend: true, hlines: R.kind === "signed" ? Array.from({ length: R.k }, (_, a) => step * a) : [] });
+  info.textContent = { pca: "· eigenvectors about the mean spectrum", mcr: "· non-negative components", kmeans: "· each class's mean spectrum", hca: "· each class's mean spectrum", refs: "· the references" }[R.method] + (R.match ? ", matched references dashed" : "");
+}
+// one diagnostic at a time, by method
+const MV_DIAG = { scree: "Variance explained", sil: "Silhouette by k", scatter: "Score scatter", tree: "Dendrogram", resid: "Residual spectrum" };
+const mvDiagOptions = R => ({ pca: ["scree", "scatter", "resid"], mcr: ["scatter", "resid"], refs: ["scatter", "resid"], kmeans: ["sil", "scatter", "resid"], hca: ["tree", "sil", "scatter", "resid"] })[R.method];
+function mvRenderDiag() {
+  const R = mvCur(), D = mvFile(), sel = $("#mva-diag"), info = $("#mva-diag-info");
+  const show = id => ["lines", "scatter", "tree"].forEach(h => $(`#mva-diag-${h}`).classList.toggle("hidden", h !== id));
+  if (!R || !D || !D.prep) { sel.replaceChildren(); info.textContent = ""; mvLines.setData(null); show("lines"); return; }
+  const opts = mvDiagOptions(R);
+  if (!opts.includes(MV.diag)) MV.diag = opts[0];
+  if (sel.dataset.for !== `${R.method}|${R.seconds}`) {
+    sel.replaceChildren(...opts.map(o => el("option", { value: o }, MV_DIAG[o])));
+    sel.dataset.for = `${R.method}|${R.seconds}`;
+  }
+  sel.value = MV.diag;
+  if (MV.diag === "scree") {
+    show("lines");
+    const q = R.pca.eig.length, xs = Float64Array.from({ length: q }, (_, i) => i + 1), pc = Float64Array.from(R.pca.eig, v => 100 * v / R.pca.total);
+    let c = 0; const cum = Float64Array.from(pc, v => (c += v));
+    mvLines.setData({ series: [{ x: xs, y: pc, colour: T.accent, label: "each component", width: 1.8 }, { x: xs, y: cum, colour: T.strong, label: "cumulative", width: 1.2, dash: [4, 3] }],
+      vlines: [R.k], xl: "Component", yl: "Variance explained (%)", yr: [0, 105], legend: true });
+    info.textContent = ` · ${R.k} kept: ${fmt(cum[R.k - 1], 3)} % of the variance`;
+  } else if (MV.diag === "sil") {
+    show("lines");
+    const pts = R.sil.filter(s => Number.isFinite(s.s));
+    mvLines.setData({ series: [{ x: Float64Array.from(pts, s => s.k), y: Float64Array.from(pts, s => s.s), colour: T.accent, width: 1.8 }], vlines: [R.k], hlines: [0.25, 0.5], xl: "Classes k", yl: "Mean silhouette", yr: [Math.min(0, ...pts.map(s => s.s)), 1] });
+    info.textContent = pts.length > 1 ? " · the highest chooses k" : " · k was set";
+  } else if (MV.diag === "scatter") {
+    show("scatter");
+    const row = MV.pinned != null ? D.prep.rowOf[MV.pinned] : -1;
+    mvScatter.setData({ x: R.scatter.x, y: R.scatter.y, cls: R.labels || null, colours: Array.from({ length: R.k }, (_, a) => mvColour(a)), xl: R.scatter.xl, yl: R.scatter.yl, mark: row >= 0 ? row : null });
+    info.textContent = " · click a point to pin its spectrum";
+  } else if (MV.diag === "tree") {
+    show("tree");
+    mvTree.setData({ tree: R.tree, cut: R.tree.cut, k: R.k });
+    info.textContent = R.tree.sampled ? ` · Ward on ${fmt(R.tree.sampled)} of ${fmt(R.n)} spectra, the rest to the nearest class` : "";
+  } else {
+    show("lines");
+    const m = R.residSpec.mean, s = R.residSpec.rms;
+    mvLines.setData({ series: [{ x: D.prep.nu, y: m, colour: T.accent, label: "mean", width: 1.4 }, { x: D.prep.nu, y: s, colour: T.bad, label: "RMS", width: 1, dash: [4, 3] }],
+      hlines: [0], xl: "Raman shift (cm⁻¹)", xu: "cm⁻¹", yl: "Residual (scaled counts)", legend: true });
+    info.textContent = " · a band the components miss shows here";
+  }
+}
+$("#mva-diag").onchange = e => { MV.diag = e.target.value; mvRenderDiag(); };
+
+// one spectrum as analysed, with its fit
+function mvRenderCursor() {
+  const R = mvCur(), D = mvFile(), tb = $("#mva-cursor-table"), info = $("#mva-cursor-info");
+  tb.textContent = ""; info.textContent = "";
+  if (!R || !D || !D.prep) { mvPlot.setData(null); return; }
+  const p = MV.hover ?? MV.pinned;
+  if (p == null) { mvPlot.emptyText = "Hover or click a map, or a point of the score scatter"; mvPlot.setData(null); return; }
+  const where = S.points ? `· particle ${p + 1}` : `· point ${p + 1} · X ${fmt(S.x[p % S.nx], 4)} µm, Y ${fmt(S.y[Math.floor(p / S.nx)], 4)} µm`;
+  info.textContent = `${where}${MV.hover != null && MV.hover !== MV.pinned ? "" : " · pinned"}`;
+  const i = D.prep.rowOf[p];
+  if (i < 0) { mvPlot.emptyText = "Not measured"; mvPlot.setData(null); return; }
+  const { nb, V, nu } = D.prep, k = R.k, sc = R.scale[i], x = Float64Array.from(V.subarray(i * nb, (i + 1) * nb), v => v * sc);
+  const zero = new Float64Array(nb), total = R.kind === "signed" ? Float64Array.from(R.mean) : new Float64Array(nb), comps = [];
+  for (let a = 0; a < k; a++) {
+    const w = R.W[i * k + a], y = new Float64Array(nb);
+    let hi = 0, at = 0;
+    for (let j = 0; j < nb; j++) { y[j] = w * R.L[a * nb + j]; total[j] += y[j]; if (R.L[a * nb + j] > hi) { hi = R.L[a * nb + j]; at = j; } }
+    if (R.kind === "nonneg") comps.push({ name: mvName(R, a), y, A: y[at] > 3 * D.prep.noise[i] * sc ? 1 : 0, pos: nu[at] });
+  }
+  mvPlot.emptyText = null;
+  mvPlot.setData({ wn: nu, raw: x, range: D.prep.range, fit: { baseline: zero, total, comps } });
+  const item = (name, text, colour) => tb.append(el("span", {}, el("b", colour ? { style: `color:${colour}` } : {}, name), ` ${text}`));
+  if (R.labels) item("Class", mvName(R, R.labels[i]), mvColour(R.labels[i]));
+  for (let a = 0; a < k; a++) item(mvName(R, a), R.kind === "signed" ? fmt(R.W[i * k + a], 3) : `${(100 * R.share[i * k + a]).toFixed(1)} %`, mvColour(a));
+  item("Residual", `${fmt(R.resid[i], 3)} × noise`);
+}
+
+// --------------------------------------------------------------------------
+// the side panel
+// --------------------------------------------------------------------------
+function mvFormFields() {
+  const s = MV.settings;
+  $("#mva-method").value = s.method; $("#mva-k").value = String(s.k); $("#mva-lo").value = s.range[0]; $("#mva-hi").value = s.range[1];
+  $("#mva-base").value = String(s.baseline); $("#mva-norm").value = s.norm;
+  $("#mva-k-label").textContent = s.method === "kmeans" || s.method === "hca" ? "Classes" : "Components";
+  $("#mva-k").disabled = s.method === "refs";
+}
+// the tables are rebuilt only here (on showing the tab, a run, a reset, a theme change), never on an edit in them
+function mvForm() { mvFormFields(); mvCompTable(); }
+// what a component stands for (its variance, its class's size or its mean share) and its best reference
+function mvDetail(R, a) {
+  if (R.method === "pca") return `${(100 * R.pca.eig[a] / R.pca.total).toFixed(1)} % of the variance`;
+  if (R.labels) return `${fmt(R.sizes[a])} spectra (${dlcPct(R.sizes[a] / R.n)})`;
+  let s = 0, c = 0; for (let i = 0; i < R.n; i++) { const v = R.share[i * R.k + a]; if (Number.isFinite(v)) { s += v; c++; } }
+  return `mean share ${dlcPct(c ? s / c : NaN)}`;
+}
+function mvMatched(R, a) {
+  if (R.method === "pca") return "not a spectrum";
+  const m = R.match && R.match[a];
+  if (!m) return R.refNames ? "a reference" : "–";
+  const top = m.hqi.reduce((b, h, r) => (Number.isFinite(h) && (b < 0 || h > m.hqi[b]) ? r : b), -1);
+  return top < 0 ? "–" : `${LY.refs[top].name} (${fmt(m.hqi[top], 3)})${m.best < 0 ? ", below the match" : ""}`;
+}
+function mvCompTable() {
+  const R = mvCur(), t = $("#mva-comp-table"), note = $("#mva-comp-note");
+  if (!R) { t.replaceChildren(); note.textContent = ""; return; }
+  const k = R.k, detail = a => mvDetail(R, a), matched = a => mvMatched(R, a);
+  t.replaceChildren(el("tr", {}, ...["", "Name", R.method === "pca" ? "Explains" : R.labels ? "Size" : "Share", "Best reference (HQI)"].map((h, i) => el("th", { class: i === 1 ? "l" : "" }, h))),
+    ...Array.from({ length: k }, (_, a) => {
+      const inp = el("input", { class: "ly-in", title: "Type a name; clear it for the default" });
+      inp.value = mvName(R, a);
+      inp.onchange = () => { R.names[a] = inp.value.trim(); inp.value = mvName(R, a); mvRender(); };
+      return el("tr", {}, el("td", {}, el("span", { class: "sw", style: `background:${mvColour(a)}` })), el("td", { class: "l" }, inp), el("td", {}, detail(a)), el("td", {}, matched(a)));
+    }));
+  const last = R.steps && R.steps[R.steps.length - 1];
+  note.textContent = {
+    pca: () => `Principal components of the mean-centred spectra: each loading is a direction of change about the mean spectrum, not a spectrum, so it is not matched to references. ${R.settings.k ? `${k} as set` : `${k} kept: with them, ${fmt(R.pca.over[k])} of ${fmt(R.n)} spectra have more than ${R.settings.stop} × their noise left (${fmt(R.pca.over[k - 1])} with ${k - 1})`}.`,
+    mcr: () => `Non-negative components by successive projections, refined by non-negative matrix factorisation${last ? `: with ${k}, ${fmt(last.over)} of ${fmt(R.n)} spectra have more than ${R.settings.stop} × their noise left` : ""}. Each image is a component's share of the fitted spectrum.`,
+    kmeans: () => `K-means on the first ${R.dims} principal components, the best of three starts; ${R.settings.k ? `${k} classes as set` : `${k} classes, the highest mean silhouette of 2 to 8`}. The loadings are the classes' mean spectra; CLS fits every spectrum to them.`,
+    hca: () => `Ward's hierarchical clustering on the first ${R.dims} principal components${R.tree.sampled ? ` of ${fmt(R.tree.sampled)} evenly spread spectra, the others going to the nearest class` : ""}; ${R.settings.k ? `${k} classes as set` : `${k} classes, the highest mean silhouette of 2 to 8`}. The loadings are the classes' mean spectra.`,
+    refs: () => `Every spectrum fitted by non-negative least squares to the ${k} references, treated like the spectra (background off, binned). Each image is a reference's share of the fitted spectrum.`,
+  }[R.method]();
+}
+function mvRefList() {
+  $("#mva-refs").replaceChildren(...LY.refs.map((r, ix) => {
+    const inp = el("input", { class: "ly-in", title: "The reference's name" });
+    inp.value = r.name;
+    inp.onchange = () => { r.name = inp.value.trim() || r.name; inp.value = r.name; lyRefsChanged(true); };
+    return el("div", { class: "ly-ref" }, inp, el("button", { class: "icon", title: "Remove this reference", onclick: () => { LY.refs.splice(ix, 1); lyRefsChanged(true); } }, "✕"));
+  }));
+}
+$("#mva-ref-load").onclick = () => $("#ly-ref-file").click();
+$("#mva-ref-pin").onclick = () => {
+  const p = MV.pinned, D = mvFile();
+  if (p == null || !S.cube || !D || !D.prep || D.prep.rowOf[p] < 0) { toast("Pin a measured point first: click it on a map or the score scatter.", "error"); return; }
+  LY.refs.push({ id: ++lyRefSeq, name: `${S.ds.name} point ${p + 1}`, wn: Float64Array.from(S.wn), y: Float64Array.from(S.cube.subarray(p * S.k, (p + 1) * S.k)) });
+  lyRefsChanged(true);
+};
+// the methods run on this file, their loadings matched to the current one's
+function mvRenderCmp() {
+  const R = mvCur(), D = mvFile(), t = $("#mva-cmp-table"), note = $("#mva-cmp-note");
+  const others = R && D ? Object.values(D.runs).filter(O => O !== R && O.pkey === R.pkey) : [];
+  if (!R || !others.length) { t.replaceChildren(); note.textContent = R ? "Run another method on this file (same range and background) to compare its loadings with these." : ""; return; }
+  t.replaceChildren(el("tr", {}, ...["Method", "Agreement", "Pairs (|r|)"].map((h, i) => el("th", { class: i === 1 ? "" : "l" }, h))),
+    ...others.map(O => {
+      const c = compareLoadings(R.L, R.k, O.L, O.k, R.nb);
+      return el("tr", {}, el("td", { class: "l" }, METHODS[O.method]), el("td", {}, `mean |r| ${fmt(c.mean, 3)}`),
+        el("td", { class: "l" }, c.pairs.map(p => `${mvName(R, p.a)} ↔ ${mvName(O, p.b)} ${fmt(Math.abs(p.r), 2)}`).join(" · ")));
+    }));
+  note.textContent = `Each loading of ${METHODS[R.method]} paired with the most alike of the other method's (correlation over the channels, its sign ignored), the closest pairs first. Near 1 the two methods found the same components; PCA's loadings are directions about the mean, not spectra, so they agree with the others only loosely.`;
+}
+// what to know before trusting the result, as data (the report takes them too)
+function mvChecks(R) {
+  const out = [], add = (text, warn = false) => out.push({ text, warn }), rs = Float64Array.from(R.resid).sort(), med = quantile(rs, 0.5), hi = rs.filter(v => v > 3).length / rs.length;
+  if (R.method === "pca") add(`${R.k} principal component${R.k > 1 ? "s" : ""} keep${R.k > 1 ? "" : "s"} ${fmt(100 * R.pca.eig.slice(0, R.k).reduce((t, v) => t + v, 0) / R.pca.total, 3)} % of the variance; the data suggest ${R.pca.suggested}.`, !!R.settings.k && R.settings.k < R.pca.suggested);
+  if (mvClusters(R)) {
+    const s = (R.sil.find(x => x.k === R.k) || {}).s;
+    add(`${R.k} classes, mean silhouette ${fmt(s, 2)}: ${!(s >= 0.25) ? "no real structure, the classes cut a continuum" : s < 0.5 ? "weak structure, the classes overlap" : s < 0.7 ? "reasonable structure" : "strong structure, well separated classes"} (Rousseeuw 1987).`, !(s >= 0.5));
+  }
+  add(hi > 0.02 ? `${dlcPct(hi)} of the spectra have more than 3 × their noise left (median ${fmt(med, 3)} ×): something the ${mvUnit(R)}s miss. The Residual map and the residual spectrum show where and what.`
+    : `The fit leaves the spectra at their noise: median residual ${fmt(med, 3)} × the noise.`, hi > 0.02);
+  if (R.settings.norm !== "none") add(`Each spectrum was scaled to unit ${R.settings.norm === "area" ? "area" : "length"} first, so the images compare composition, not quantity: a weak and a strong spectrum of the same material look alike. Spectra with no more signal than 4 × their noise are scaled less.`);
+  else add("The spectra were not scaled: a spectrum's intensity (focus, thickness) counts as much as its shape.", R.method !== "mcr" && R.method !== "refs");
+  if (R.match) { const n = R.match.filter(m => m.best >= 0).length; add(`${n} of ${R.k} loadings match a reference at HQI ${MV.settings.minHQI} or above.`); }
+  if (S.points) add("ParticleFinder data: one spectrum per particle, so a class map is a classification of the particles.");
+  return out;
+}
+function mvRenderChecks() {
+  const R = mvCur();
+  $("#mva-checks").replaceChildren(...(R ? mvChecks(R) : []).map(c => el("li", { class: c.warn ? "warn" : "" }, c.text)));
+}
+// the decomposition waits for Run MVA; the method changes what Run MVA does
+const mvOn = (id, set) => $(id).addEventListener("change", e => { set(e.target); mvFormFields(); mvSave(); mvRender(); });
+mvOn("#mva-method", t => { MV.settings.method = t.value; });
+mvOn("#mva-k", t => { MV.settings.k = +t.value; });
+mvOn("#mva-lo", t => { const v = parseFloat(t.value); if (Number.isFinite(v)) MV.settings.range = [v, MV.settings.range[1]]; });
+mvOn("#mva-hi", t => { const v = parseFloat(t.value); if (Number.isFinite(v)) MV.settings.range = [MV.settings.range[0], v]; });
+mvOn("#mva-base", t => { MV.settings.baseline = +t.value; });
+mvOn("#mva-norm", t => { MV.settings.norm = t.value; });
+$("#mva-run").onclick = $("#mva-run2").onclick = () => mvRun();
+$("#mva-reset").onclick = () => { MV.settings = structuredClone(MVA_DEFAULTS); mvSave(); mvForm(); mvRender(); };
+
+function mvShow() {
+  mvForm(); mvRefList();
+  mvRender();
+  if (mvCanRun() && !mvCur() && !MV.running) mvRun();          // one click: opening the tab analyses the open file
+  setTimeout(() => { mvMaps.forEach(m => m.render()); mvLoad.render(); mvLines.render(); mvScatter.render(); mvTree.render(); mvPlot.render(); }, 0);
+}
+function mvRender() {
+  const R = mvCur(), empty = $("#mva-empty");
+  const why = !S.ds ? "Open a map, a line scan or a ParticleFinder project first."
+    : !S.cube ? "This file holds fitted values, not spectra: open the map itself (.l6m) or a text export of the spectra."
+    : P() < 3 ? "Multivariate analysis needs at least three spectra."
+    : !R ? (MV.running ? "Analysing the spectra…"
+      : "The spectra are broken down into a few loadings by PCA, MCR, K-means or HCA (or your reference spectra), and every spectrum is fitted to them by least squares: an image per component, an error map, the residual spectrum and a score scatter, the loadings named after the references they match, and the methods compared.")
+    : null;
+  empty.classList.toggle("hidden", !why);
+  empty.classList.toggle("can-fit", mvCanRun() && !R && !MV.running);
+  if (why) $("#mva-empty-p").textContent = why;
+  if (R && !MV.running) {
+    mvStatusText(`${METHODS[R.method]}: ${R.k} ${mvUnit(R)}${R.k > 1 ? (mvClusters(R) ? "es" : "s") : ""} from ${fmt(R.n)} spectra in ${R.seconds.toFixed(1)} s over ${mvFile().prep.range[0].toFixed(0)}–${mvFile().prep.range[1].toFixed(0)} cm⁻¹.` +
+      (R.key !== mvRunKey(MV.settings) ? " The settings have changed since: Run MVA to apply them." : ""));
+  } else if (!R && !MV.running) { mvStatusText(""); $("#mva-prog > div").style.width = "0%"; }
+  mvMaps.forEach((_, i) => mvRenderMap(i));
+  mvRenderLoad(); mvRenderDiag(); mvRenderCursor(); mvRenderCmp(); mvRenderChecks();
+}
+
+// --------------------------------------------------------------------------
+// export and report
+// --------------------------------------------------------------------------
+$("#mva-csv-load").onclick = () => {
+  const R = mvCur(), D = mvFile(); if (!R) { toast("Run MVA first.", "error"); return; }
+  const nb = R.nb, head = ["Raman shift (cm-1)", ...(R.mean ? ["Mean spectrum"] : []), ...Array.from({ length: R.k }, (_, a) => mvName(R, a))];
+  const rows = [head, ...Array.from(D.prep.nu, (v, j) => [v, ...(R.mean ? [R.mean[j]] : []), ...Array.from({ length: R.k }, (_, a) => R.L[a * nb + j])])];
+  download(`${S.ds.name}_mva_${R.method}_loadings.csv`, rows.map(r => r.map(lyCell).join(",")).join("\n") + "\n", "text/csv");
+};
+$("#mva-csv-scores").onclick = () => {
+  const R = mvCur(), D = mvFile(); if (!R) { toast("Run MVA first.", "error"); return; }
+  const k = R.k, head = [S.points ? "Particle" : "Point", "X (µm)", "Y (µm)", ...(R.labels ? ["Class"] : []),
+    ...Array.from({ length: k }, (_, a) => `${mvName(R, a)} ${R.kind === "signed" ? "score" : "amount"}`), ...(R.share ? Array.from({ length: k }, (_, a) => `${mvName(R, a)} share`) : []), "Residual (x noise)"];
+  const rows = [head];
+  for (let p = 0; p < D.prep.P; p++) {
+    const i = D.prep.rowOf[p]; if (i < 0) continue;
+    const x = S.points ? S.points.x[p] : S.x[p % S.nx], y = S.points ? S.points.y[p] : S.y[Math.floor(p / S.nx)];
+    rows.push([p + 1, x, y, ...(R.labels ? [mvName(R, R.labels[i])] : []), ...Array.from({ length: k }, (_, a) => R.W[i * k + a]),
+      ...(R.share ? Array.from({ length: k }, (_, a) => R.share[i * k + a]) : []), R.resid[i]]);
+  }
+  download(`${S.ds.name}_mva_${R.method}_scores.csv`, rows.map(r => r.map(lyCell).join(",")).join("\n") + "\n", "text/csv");
+};
+$("#mva-png").onclick = () => mvMaps.forEach((m, i) => setTimeout(() => m.save(), i * 250));
+$("#mva-report").onclick = () => { $("#rp-kind").value = "mva"; rpTitle(); switchTab("report"); };
+
+// the tab's maps and plots drawn off-screen for the report
+function mvFigures(R, D) {
+  const figs = { maps: [] };
+  mvMaps.forEach((src, i) => {
+    const host = offscreen(520, 440), mv = new MapView(host, {}), M = mvMapData(MV.specs[i] || "resid", R, D);
+    Object.assign(mv, { cmap: src.cmap, scale: src.scale, manual: src.manual, smooth: src.smooth, filter: src.filter });
+    mv.setGeometry({ nx: S.nx, ny: S.ny, x: S.x, y: S.y, points: S.points });
+    mv.backdrop = src.backdrop;
+    mv.setTitle(`MVA : <u>${escHTML(M.label)}</u>`);
+    mv.categories = M.categories || null;
+    mv.setData(M.values, { valid: null, label: M.label, unit: M.unit });
+    mv.setCursor(null, MV.pinned);
+    figs.maps.push({ url: onDark(mv.canvas), title: M.label });
+    host.remove();
+  });
+  let host = offscreen(760, 360);
+  const lp = new LinesPlot(host); lp.setData(mvLoad.d); figs.load = mvLoad.d ? onDark(lp.canvas) : null; host.remove();
+  host = offscreen(620, 360);
+  const diag = MV.diag === "scatter" ? new ScatterPlot(host) : MV.diag === "tree" ? new DendrogramPlot(host) : new LinesPlot(host);
+  const src = MV.diag === "scatter" ? mvScatter : MV.diag === "tree" ? mvTree : mvLines;
+  diag.setData(src.d); figs.diag = src.d ? onDark(diag.canvas) : null; figs.diagName = MV_DIAG[MV.diag]; host.remove();
+  return figs;
+}
+function makeMvaReport() {
+  const R = mvCur(), D = mvFile();
+  if (!R) { $("#report-paper").replaceChildren(el("p", {}, S.ds ? "Run MVA first: open MVA, then Run MVA." : "Open a map and run MVA on it first.")); return; }
+  mvRenderLoad(); mvRenderDiag();
+  const others = Object.values(D.runs).filter(O => O !== R && O.pkey === R.pkey).map(O => ({ method: METHODS[O.method], ...compareLoadings(R.L, R.k, O.L, O.k, R.nb), name: b => mvName(O, b) }));
+  buildMvaReport($("#report-paper"), { title: $("#rp-title").value, ds: S.ds, R, prep: D.prep, name: a => mvName(R, a), detail: a => mvDetail(R, a), ref: a => mvMatched(R, a), method: METHODS[R.method],
+    pf: !!S.points, checks: mvChecks(R), figs: mvFigures(R, D), compare: others, refs: LY.refs.map(r => r.name), minHQI: MV.settings.minHQI });
+}
+
+// =========================================================================
 // report
 // =========================================================================
 // Report figures are drawn off-screen at a fixed size, so they are current
@@ -5303,6 +5734,7 @@ let reportRun = 0;
 async function makeReport() {
   if ($("#rp-kind").value === "dlc") { ++reportRun; makeDlcReport(); return; }
   if ($("#rp-kind").value === "layers") { ++reportRun; makeLayersReport(); return; }
+  if ($("#rp-kind").value === "mva") { ++reportRun; makeMvaReport(); return; }
   if (!S.fit) { $("#report-paper").replaceChildren(el("p", {}, "Open and fit a map first.")); return; }
   const run = ++reportRun;
   $("#report-paper").replaceChildren(el("p", { class: "note" }, "Gathering the analysis…"));
@@ -5344,6 +5776,9 @@ function repaintAll() {
   lyForm();                                       // material swatches
   for (const m of lyMaps) m._dirty = true;
   lyRender();
+  mvForm();
+  for (const m of mvMaps) m._dirty = true;
+  mvRender();
 }
 themeButton();
 
