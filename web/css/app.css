@@ -666,12 +666,17 @@ table.ly-table tr[data-i] { cursor: pointer; }
 table.ly-table tr.sel td { background: var(--input); }
 table.stats input.ly-in { width: 100%; min-width: 84px; height: 26px; padding: 0 6px; font-size: 12.5px; }
 table.stats .sw { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; vertical-align: 0; }
-#ly-refs { display: grid; gap: 4px; margin: 6px 0; }
-#ly-refs .ly-ref { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; align-items: center; }
-#ly-refs .ly-ref input { height: 26px; font-size: 12.5px; }
+#ly-refs, #mva-refs { display: grid; gap: 4px; margin: 6px 0; }
+.ly-ref { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; align-items: center; }
+.ly-ref input { height: 26px; font-size: 12.5px; }
 .ly-checks { margin: 0; padding-left: 18px; font-size: 12.5px; color: var(--text-2); line-height: 1.45; }
 .ly-checks li { margin: 0 0 6px; }
 .ly-checks li.warn::marker { color: var(--warn); }
+
+/* MVA: four maps, loadings and a diagnostic plot, the spectrum (rows as on the Layers tab) */
+#tab-mva { grid-template-columns: minmax(0, 1fr) 420px; gap: 12px; padding: 12px; }
+.panel-h select { height: 26px; font-size: 12.5px; padding: 0 6px; width: auto; margin-right: 6px; }
+#mva-status, #mva-comp-note, #mva-refs-note, #mva-cmp-note { margin-top: 6px; line-height: 1.45; }
 .report-scroll { overflow: auto; border-radius: var(--r); }
 .paper {
   width: 210mm; min-height: 297mm; margin: 0 auto 30px; padding: 16mm 15mm; background: #fff; color: #142033;
@@ -741,7 +746,7 @@ table.stats .sw { display: inline-block; width: 9px; height: 9px; border-radius:
   body { overflow: auto; }
   main { height: auto; }
   .tab.on { min-height: calc(100vh - 56px - 24px); }
-  #tab-qc, #tab-splat, #tab-particles, #tab-files, #tab-dlc, #tab-layers { grid-template-columns: minmax(0, 1fr); }
+  #tab-qc, #tab-splat, #tab-particles, #tab-files, #tab-dlc, #tab-layers, #tab-mva { grid-template-columns: minmax(0, 1fr); }
   .ly-main, #tab-layers.ly-line .ly-main { grid-template-rows: auto auto auto; }
   .ly-maps .panel { height: 320px; }
   .ly-main > .panel { height: 300px; }

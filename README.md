@@ -156,6 +156,12 @@ The default configuration is a typical five-band carbon model: poly order 2 base
   - *Checks*: the 16–84 % width of the steps (the resolution); a layer thinner than about 1.65 × that is flagged ⚠ (it never reaches its pure level and reads too thick); a layer running past the scan's edge is a lower bound (≥); the residual over the noise (a material missing, or a background the polynomial does not follow); how many lines share the stack; for depth profiles, a depth scale (the stage's travel × a factor) and why it is needed.
   - *Thickness limits* per layer number (pass when every line is inside, check at 95 % or more, fail below; a layer past the scan's edge can pass a minimum only). *Export*: the layer table and every line's thicknesses as CSV, the maps as PNG, and a *Layers report* (Report tab).
   - Checked on synthetic multilayers of three polymer-like materials of different brightness, blurred by a 0.4 µm spot (`tests/js/layers.test.mjs`): a line scan's boundaries and thicknesses come back within 0.12 µm at a 0.25 µm step and the step width at 0.82 µm (2σ = 0.8); on a 64 × 24 map tilted 5.71°, the tilt is found and the thicknesses (5.954, 2.411, 4.566, 6.966 µm) match the true 5.970, 2.388, 4.577 and 6.965; cosmic rays are removed without touching a thin layer's sharp bands; a 0.5 µm layer is flagged. No multilayer sample was on the test machine.
+- **MVA tab** (multivariate analysis, both builds, any file with spectra: a map, a line or a ParticleFinder project). Opening the tab analyses the open file. The spectra are prepared as on the Layers tab (range, cosmic rays against the neighbours, binning, polynomial background) and scaled to unit length by default (unit area or none on request).
+  - *Loadings*: **PCA** (eigenvectors of the covariance of the mean-centred spectra, from up to 3 000 of them; the number kept is the smallest that leaves no more than a handful of spectra with over twice their noise unexplained), **MCR** (non-negative components by successive projections, refined by NMF), **K-means** (on the first principal components, k-means++ starts, the best of three) and **HCA** (Ward's linkage by the nearest-neighbour chain on up to 1 000 spectra, the rest to the nearest class); for both clusterings k is the one of 2 to 8 with the highest mean silhouette unless set, and the loadings are the classes' mean spectra. Or **References (CLS)**: the reference spectra loaded (shared with the Layers tab).
+  - *Images by CLS*: every spectrum fitted by non-negative least squares to the loadings (PCA's images are its scores): a map per component (share of the fitted spectrum, or amount), a class map, an error map (residual over the noise), the residual spectrum (mean and RMS per channel), a score scatter, the explained variance (PCA), the silhouette by k and the dendrogram with its cut (HCA).
+  - *Identification and comparison*: each loading that is a spectrum is named after the reference it matches best (HQI = 100 r², 80 or above), or a name typed in; the comparator pairs the loadings of every method run on the same spectra (correlation, sign ignored) and gives their mean |r|.
+  - *Export*: loadings and per-spectrum scores, shares, class and residual as CSV, the maps as PNG, and an *MVA report* (Report tab).
+  - Checked on synthetic maps of three materials (`tests/js/mva.test.mjs`): Ward's linkage matches a brute-force Ward merge for merge, the eigen-solver gives A v = w v and orthonormal vectors to 1e-10, PCA keeps 3 components for three independently varying materials and 2 for three pure regions, MCR names the three materials at HQI above 95, CLS against the true spectra gives each point's shares within 0.04, K-means and HCA find the three regions with purity above 0.99, and the comparator pairs MCR and K-means at mean |r| above 0.97. On a real 96 × 76 LabSpec carbon map, K-means finds two classes (silhouette 0.88) with the residual at the noise; the run takes about 1 s in Node.
 
 ## Checked against S Carbon
 
@@ -205,6 +211,7 @@ node --test tests/js/pf-analysis.test.mjs # particle statistics: band errors, un
 node --test tests/js/d3g-calibration.test.mjs # D3/G calibration: despiking, carbon test, held-shape heights, calibration steps, block intervals
 node --test tests/js/dlc.test.mjs         # DLC: BWF line shape, Jacobian, recovery and errors on synthetic a-C:H, quality test, homogeneity
 node --test tests/js/layers.test.mjs      # Layers: background, materials, boundaries, tilt, depth scale, limits, cosmic rays on synthetic multilayers
+node --test tests/js/mva.test.mjs         # MVA: Ward against brute force, eigen-solver, PCA rank, MCR, CLS shares, K-means and HCA, comparator, scaling
 ```
 
 The vendor-agreement tests compare against S Carbon's own outputs. They need your files: copy `tests/vendor_data.example.json` to `tests/vendor_data.json` and fill in the paths; without it they skip. `python tools/serve_web.py` serves the web build the way Vercel does (static files, no Python engine).
@@ -227,6 +234,7 @@ web/js/engine/          the same readers and fitter in JavaScript, for the brows
 web/js/d3g-calibration.js  the D3/G calibration (both builds); d3g-worker.js runs its free fits
 web/js/dlc.js           the DLC analysis (both builds); dlc-worker.js runs its fits
 web/js/layers.js        the Layers analysis (both builds); layers-worker.js prepares and decomposes the spectra
+web/js/mva.js           the MVA analysis (both builds); mva-worker.js keeps the prepared spectra between runs
 tools/serve_web.py      serve web/ as Vercel does, to test the browser build locally
 tests/                  pytest suite; tests/js: Node tests of the browser engine
 vercel.json             static deployment of web/

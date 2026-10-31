@@ -38,6 +38,7 @@
     <button data-tab="particles">Particles</button>
     <button data-tab="dlc" title="Diamond-like carbon coatings: D and G fit, hydrogen content, quality test, homogeneity">DLC</button>
     <button data-tab="layers" title="Multilayer films: the materials, order and thickness of each layer, across a cut edge or in depth">Layers</button>
+    <button data-tab="mva" title="Multivariate analysis: PCA, MCR, K-means and HCA, with images by CLS">MVA</button>
     <button data-tab="report">Report</button>
   </nav>
   <div class="status" id="status"><span class="dot"></span><span id="status-text">Ready</span></div>
@@ -673,10 +674,93 @@
     </aside>
   </section>
 
+  <!-- ======================= MVA ======================= -->
+  <section id="tab-mva" class="tab">
+    <div class="ly-main">
+      <div class="dlc-maps">
+        <div class="panel map" id="mva-map-0"></div>
+        <div class="panel map" id="mva-map-1"></div>
+        <div class="panel map" id="mva-map-2"></div>
+        <div class="panel map" id="mva-map-3"></div>
+      </div>
+      <div class="ly-lower">
+        <div class="panel col">
+          <div class="panel-h">Loadings <span class="muted small" id="mva-load-info"></span></div>
+          <div class="plot" id="mva-load"></div>
+        </div>
+        <div class="panel col">
+          <div class="panel-h"><select id="mva-diag" title="What to show"></select><span class="muted small" id="mva-diag-info"></span></div>
+          <div class="plot" id="mva-diag-lines"></div>
+          <div class="plot hidden" id="mva-diag-scatter"></div>
+          <div class="plot hidden" id="mva-diag-tree"></div>
+        </div>
+      </div>
+      <div class="panel col">
+        <div class="panel-h">Spectrum <span class="muted" id="mva-cursor-info"></span>
+          <span class="grow"></span><span class="muted small hint">as analysed: background off, scaled · drag to zoom</span></div>
+        <div class="plot" id="mva-cursor"></div>
+        <div class="cursor-table" id="mva-cursor-table"></div>
+      </div>
+      <div class="dlc-empty hidden" id="mva-empty">
+        <div><h2>Multivariate analysis</h2><p id="mva-empty-p"></p><button class="primary" id="mva-run2">Run MVA</button></div>
+      </div>
+    </div>
+    <aside class="side">
+      <div class="sec" data-sec="mva-set">
+        <div class="sec-h toggle">Method <span class="muted small">loadings, then images by CLS</span></div>
+        <div class="sec-b">
+          <div class="frow"><label>Method</label><select id="mva-method"><option value="pca">PCA</option><option value="mcr">MCR</option><option value="kmeans">K-means</option><option value="hca">HCA</option><option value="refs">References (CLS)</option></select></div>
+          <div class="frow"><label id="mva-k-label">Components</label><select id="mva-k"><option value="0">Chosen from the data</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option><option value="6">6</option><option value="7">7</option><option value="8">8</option><option value="9">9</option><option value="10">10</option><option value="11">11</option><option value="12">12</option></select></div>
+          <div class="frow"><label>Range (cm⁻¹)</label><div class="row2"><input type="number" id="mva-lo" step="any"><input type="number" id="mva-hi" step="any"></div></div>
+          <div class="frow"><label>Background</label><select id="mva-base"><option value="0">None</option><option value="1">Straight line</option><option value="2">Polynomial, degree 2</option><option value="3">Polynomial, degree 3</option></select></div>
+          <div class="frow"><label>Scaling</label><select id="mva-norm" title="Unit area or length compares the spectra's shapes (relative composition); none keeps their size (amounts in counts)"><option value="none">None (amounts in counts)</option><option value="area">Unit area</option><option value="vector">Unit length</option></select></div>
+          <div class="btnrow"><button class="primary" id="mva-run">Run MVA</button><button id="mva-reset" title="The default settings (the references stay)">Defaults</button></div>
+          <div class="progress" id="mva-prog"><div></div></div>
+          <div class="muted small" id="mva-status"></div>
+        </div>
+      </div>
+      <div class="sec" data-sec="mva-comp">
+        <div class="sec-h toggle">Components <span class="muted small">name them, or match references</span></div>
+        <div class="sec-b">
+          <div class="pf-scroll"><table class="stats" id="mva-comp-table"></table></div>
+          <div class="muted small" id="mva-comp-note"></div>
+        </div>
+      </div>
+      <div class="sec" data-sec="mva-refs">
+        <div class="sec-h toggle">Reference spectra <span class="muted small">shared with the Layers tab</span></div>
+        <div class="sec-b">
+          <div class="btnrow"><button id="mva-ref-load">Load reference spectra…</button><button id="mva-ref-pin" title="The pinned point's spectrum as a reference">Pinned point as reference</button></div>
+          <div id="mva-refs"></div>
+          <div class="muted small" id="mva-refs-note">One spectrum per file, two columns (Raman shift, intensity). They name the loadings they match (HQI = 100 r²) and are the components of References (CLS). Kept until the page is closed.</div>
+        </div>
+      </div>
+      <div class="sec" data-sec="mva-cmp">
+        <div class="sec-h toggle">Comparator <span class="muted small">methods run on this file</span></div>
+        <div class="sec-b">
+          <div class="pf-scroll"><table class="stats" id="mva-cmp-table"></table></div>
+          <div class="muted small" id="mva-cmp-note"></div>
+        </div>
+      </div>
+      <div class="sec" data-sec="mva-chk">
+        <div class="sec-h toggle">Checks</div>
+        <div class="sec-b"><ul class="ly-checks" id="mva-checks"></ul></div>
+      </div>
+      <div class="sec" data-sec="mva-exp">
+        <div class="sec-h toggle">Export and report</div>
+        <div class="sec-b btnrow">
+          <button id="mva-csv-load">Loadings (CSV)</button>
+          <button id="mva-csv-scores">Scores (CSV)</button>
+          <button id="mva-png">Save maps</button>
+          <button class="primary" id="mva-report">MVA report</button>
+        </div>
+      </div>
+    </aside>
+  </section>
+
   <!-- ======================= Report ======================= -->
   <section id="tab-report" class="tab">
     <div class="report-bar">
-      <select id="rp-kind" title="Which analysis the report covers"><option value="carbon">Carbon fit report</option><option value="dlc">DLC coating report</option><option value="layers">Layers report</option></select>
+      <select id="rp-kind" title="Which analysis the report covers"><option value="carbon">Carbon fit report</option><option value="dlc">DLC coating report</option><option value="layers">Layers report</option><option value="mva">MVA report</option></select>
       <input id="rp-title" value="Raman carbon analysis">
       <button id="rp-refresh">Refresh</button>
       <button class="primary" id="rp-print">Print / Save as PDF</button>
