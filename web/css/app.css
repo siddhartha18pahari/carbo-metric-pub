@@ -688,6 +688,9 @@ table.stats .sw { display: inline-block; width: 9px; height: 9px; border-radius:
 #tab-fit { grid-template-columns: minmax(0, 1fr) 420px; gap: 12px; padding: 12px; }
 .pk-main { position: relative; display: grid; grid-template-rows: minmax(0, 1.1fr) minmax(0, 1fr); gap: 12px; min-height: 0; min-width: 0; }
 #tab-fit.pk-single .pk-main { grid-template-rows: minmax(0, 1fr); }
+.pk-trend { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.pk-trend-h { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 2px 0 6px; font-size: 13px; }
+.pk-trend-h select, .pk-trend-h button { width: auto; flex: none; }
 .pk-scroll { overflow: auto; min-height: 0; flex: 1; }
 #pk-status, #pk-bands-note, #pk-result-note { margin-top: 6px; line-height: 1.45; }
 .pk-detail-h { margin: 10px 0 4px; font-size: 13px; }
@@ -695,9 +698,9 @@ table.stats select { height: 26px; font-size: 12.5px; padding: 0 4px; width: aut
 table.stats td.warn { color: var(--warn); }
 
 /* Graphene and Silicon: four maps, then the fits and a plot (DLC's rows) */
-#tab-graphene, #tab-si, #tab-id, #tab-tools { grid-template-columns: minmax(0, 1fr) 420px; gap: 12px; padding: 12px; }
+#tab-graphene, #tab-cnt, #tab-si, #tab-id, #tab-tools { grid-template-columns: minmax(0, 1fr) 420px; gap: 12px; padding: 12px; }
 .gr-lower { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 0.8fr) minmax(0, 0.9fr); gap: 12px; min-height: 0; }
-#gr-status, #gr-res-note, #si-status, #si-res-note, #id-status, #id-mix, #tb-status, #tb-ops-note { margin-top: 6px; line-height: 1.45; }
+#gr-status, #gr-res-note, #cn-status, #tb-cal-note, #si-status, #si-res-note, #id-status, #id-mix, #tb-status, #tb-ops-note { margin-top: 6px; line-height: 1.45; }
 .si-cal { margin: 6px 0 8px; padding: 7px 9px; border-radius: 8px; font-size: 12.5px; line-height: 1.45; background: var(--input); border-left: 3px solid var(--line); }
 .si-cal.good { border-left-color: var(--good); } .si-cal.bad { border-left-color: var(--bad); }
 .si-cal.good b { color: var(--good); } .si-cal.bad b { color: var(--bad); }
@@ -782,7 +785,7 @@ table.stats td.warn { color: var(--warn); }
   body { overflow: auto; }
   main { height: auto; }
   .tab.on { min-height: calc(100vh - 56px - 24px); }
-  #tab-qc, #tab-splat, #tab-particles, #tab-files, #tab-dlc, #tab-layers, #tab-mva, #tab-fit, #tab-graphene, #tab-si, #tab-id, #tab-tools { grid-template-columns: minmax(0, 1fr); }
+  #tab-qc, #tab-splat, #tab-particles, #tab-files, #tab-dlc, #tab-layers, #tab-mva, #tab-fit, #tab-graphene, #tab-cnt, #tab-si, #tab-id, #tab-tools { grid-template-columns: minmax(0, 1fr); }
   .gr-lower { grid-template-columns: minmax(0, 1fr); }
   .gr-lower .panel { height: 300px; }
   .tb-main { grid-template-rows: auto auto; }

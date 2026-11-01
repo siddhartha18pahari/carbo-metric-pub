@@ -41,6 +41,7 @@
     <button data-tab="mva" title="Multivariate analysis: PCA, MCR, K-means and HCA, with images by CLS">MVA</button>
     <button data-tab="fit" title="Peak fitting of any spectrum or file: your own bands (Gauss, Lorentz, Gauss-Lorentz, Voigt, BWF), fixed or linked parameters, errors on every value">Peak fit</button>
     <button data-tab="graphene" title="Graphene: layers from the 2D band, defects from I(D)/I(G), strain and doping from the G and 2D positions">Graphene</button>
+    <button data-tab="cnt" title="Carbon nanotubes: diameters from the radial breathing modes, metallic or semiconducting from G⁻, purity from I(G)/I(D)">Nanotubes</button>
     <button data-tab="si" title="Silicon: stress from the 520 cm⁻¹ shift, crystalline fraction of films, the daily calibration check">Silicon</button>
     <button data-tab="id" title="Identify spectra against a library of reference spectra (HQI), one spectrum or every one of a map">Identify</button>
     <button data-tab="tools" title="Spectrum processing: background, smoothing, derivative, normalisation, cosmic rays, crop, resample, spectrum arithmetic">Toolbox</button>
@@ -777,8 +778,15 @@
         <div class="panel map" id="pk-map-3"></div>
       </div>
       <div class="panel col hidden" id="pk-list">
-        <div class="panel-h">Every spectrum <span class="muted small" id="pk-list-info"></span></div>
-        <div class="pk-scroll"><table class="stats" id="pk-list-table"></table></div>
+        <div class="panel-h">Every spectrum <span class="muted small" id="pk-list-info"></span><span class="grow"></span>
+          <select id="pk-list-view" title="The results as a table, or one of them against the spectra (a series in time, temperature or position)"><option value="table">Table</option><option value="trend">Trend</option></select></div>
+        <div class="pk-scroll" id="pk-list-scroll"><table class="stats" id="pk-list-table"></table></div>
+        <div class="pk-trend hidden" id="pk-trend">
+          <div class="pk-trend-h"><button id="pk-trend-y" title="What to plot"></button><span class="muted">against</span>
+            <select id="pk-trend-x" title="The x axis: the spectra in order, or a number in each spectrum's name (a time, a temperature, a position)"><option value="order">their order</option><option value="first">the first number in each name</option><option value="last">the last number in each name</option></select>
+            <span class="muted small" id="pk-trend-info"></span></div>
+          <div class="plot" id="pk-trend-plot"></div>
+        </div>
       </div>
       <div class="dlc-empty hidden" id="pk-empty">
         <div><h2>Peak fitting</h2><p id="pk-empty-p"></p></div>
@@ -916,6 +924,82 @@
     </aside>
   </section>
 
+  <section id="tab-cnt" class="tab">
+    <div class="dlc-main">
+      <div class="dlc-maps" id="cn-maps">
+        <div class="panel map" id="cn-map-0"></div>
+        <div class="panel map" id="cn-map-1"></div>
+        <div class="panel map" id="cn-map-2"></div>
+        <div class="panel map" id="cn-map-3"></div>
+      </div>
+      <div class="gr-lower">
+        <div class="panel col">
+          <div class="panel-h">RBM <span class="muted" id="cn-info"></span></div>
+          <div class="plot" id="cn-spec1"></div>
+          <div class="cursor-table" id="cn-cursor-table"></div>
+        </div>
+        <div class="panel col">
+          <div class="panel-h"><span id="cn-g-h">D, G⁻ and G⁺</span> <span class="muted small">the model the BIC keeps</span></div>
+          <div class="plot" id="cn-spec2"></div>
+        </div>
+        <div class="panel col">
+          <div class="panel-h">2D</div>
+          <div class="plot" id="cn-spec3"></div>
+        </div>
+      </div>
+      <div class="dlc-empty hidden" id="cn-empty">
+        <div><h2>Carbon nanotubes</h2><p id="cn-empty-p"></p><button class="primary" id="cn-run2">Analyse</button></div>
+      </div>
+    </div>
+    <aside class="side">
+      <div class="sec" data-sec="cn-set">
+        <div class="sec-h toggle">Fit <span class="muted small">RBM, D and G, 2D</span></div>
+        <div class="sec-b">
+          <div class="frow"><label>Laser (nm)</label><input type="number" id="cn-laser" step="any" title="Read from the file when it says; the D and 2D start positions follow it"></div>
+          <div class="frow"><label>RBM window</label><div class="row2"><input type="number" id="cn-rlo" step="any"><input type="number" id="cn-rhi" step="any"></div></div>
+          <div class="frow"><label>D, G window</label><div class="row2"><input type="number" id="cn-glo" step="any"><input type="number" id="cn-ghi" step="any"></div></div>
+          <div class="frow"><label>2D window</label><div class="row2"><input type="number" id="cn-2lo" step="any"><input type="number" id="cn-2hi" step="any"></div></div>
+          <div class="frow"><label>RBM search</label><input type="number" id="cn-prom" step="any" min="1" title="An RBM band of the mean spectrum must stand this many times the noise above its surroundings"></div>
+          <div class="btnrow"><button class="primary" id="cn-run">Analyse</button><button id="cn-reset">Defaults</button></div>
+          <div class="progress" id="cn-prog"><div></div></div>
+          <div class="muted small" id="cn-status"></div>
+        </div>
+      </div>
+      <div class="sec" data-sec="cn-type">
+        <div class="sec-h toggle">Metallic or semiconducting <span class="muted small">from G⁻</span></div>
+        <div class="sec-b">
+          <div class="pf-scroll"><table class="stats" id="cn-type-table"></table></div>
+          <div class="frow"><label>Metallic below 1/Q</label><input type="number" id="cn-qmin" step="any" title="G⁻ counts as a Breit-Wigner-Fano line (metallic) when its coupling 1/Q is below minus this, and 3 errors below zero"></div>
+          <div class="frow"><label>Splitting C (S, M)</label><div class="row2"><input type="number" id="cn-cs" step="any" title="Semiconducting, cm⁻¹ nm²"><input type="number" id="cn-cm" step="any" title="Metallic, cm⁻¹ nm²"></div></div>
+        </div>
+      </div>
+      <div class="sec" data-sec="cn-rbm">
+        <div class="sec-h toggle">Diameters <span class="muted small">from the RBMs</span></div>
+        <div class="sec-b">
+          <div class="frow"><label>Relation</label><select id="cn-rel"></select></div>
+          <div class="frow"><label>ω = A / d + B</label><div class="row2"><input type="number" id="cn-a" step="any" title="A (cm⁻¹ nm)"><input type="number" id="cn-b" step="any" title="B (cm⁻¹)"></div></div>
+          <div class="pf-scroll"><table class="stats" id="cn-rbm-table"></table></div>
+        </div>
+      </div>
+      <div class="sec" data-sec="cn-res">
+        <div class="sec-h toggle">Results <span class="muted small">over the spectra with a G band</span></div>
+        <div class="sec-b"><div class="pf-scroll"><table class="stats" id="cn-res-table"></table></div></div>
+      </div>
+      <div class="sec" data-sec="cn-chk">
+        <div class="sec-h toggle">Checks</div>
+        <div class="sec-b"><ul class="ly-checks" id="cn-checks"></ul></div>
+      </div>
+      <div class="sec" data-sec="cn-exp">
+        <div class="sec-h toggle">Export and report</div>
+        <div class="sec-b btnrow">
+          <button id="cn-csv">Results (CSV)</button>
+          <button id="cn-png">Save maps</button>
+          <button class="primary" id="cn-report">Nanotube report</button>
+        </div>
+      </div>
+    </aside>
+  </section>
+
   <section id="tab-si" class="tab">
     <div class="dlc-main">
       <div class="dlc-maps" id="si-maps">
@@ -967,6 +1051,7 @@
           <div class="frow"><label>Tolerance</label><div class="row2"><input type="number" id="si-tol" step="any" title="Largest |ω − ω0| accepted (cm⁻¹)"><input type="number" id="si-fwmax" step="any" title="Largest FWHM accepted (cm⁻¹)"></div></div>
           <div id="si-cal-now"></div>
           <div class="btnrow"><button id="si-log-add" title="Add the spectrum in view (the mean of a map) to the log">Add to the log</button><button id="si-log-csv">Log (CSV)</button></div>
+          <div class="btnrow"><button id="si-axis" title="Move the axis of the open file by this check's offset from ω0 (a Toolbox step; Process every spectrum applies it)">Correct the axis…</button><span></span></div>
           <div class="pf-scroll"><table class="stats" id="si-log-table"></table></div>
           <div class="btnrow"><button id="si-log-clear">Clear the log</button><span></span></div>
           <div class="muted small">The log is kept in this browser. Its limits are the mean ± 3 SD of the entries.</div>
@@ -1081,6 +1166,20 @@
           <input type="file" id="tb-ref-file" accept=".txt,.csv,.tsv,.dat,.asc" class="hidden">
         </div>
       </div>
+      <div class="sec" data-sec="tb-cal">
+        <div class="sec-h toggle">Axis calibration <span class="muted small">from a reference material</span></div>
+        <div class="sec-b">
+          <div class="frow"><label>Standard</label><select id="tb-cal-std"></select></div>
+          <div class="frow hidden" id="tb-cal-custom-row"><label>Bands (cm⁻¹)</label><input type="text" id="tb-cal-custom" placeholder="520.7, 1001.4, 1602.3" title="The true shifts of the reference's bands, separated by commas, semicolons or spaces"></div>
+          <div class="frow"><label>Measured on</label><div class="row2"><select id="tb-cal-src"></select><button id="tb-cal-load" title="A spectrum of the reference (text or LabSpec .l6s; a file of several spectra gives their mean)">Load…</button></div></div>
+          <input type="file" id="tb-cal-file" accept=".txt,.csv,.tsv,.dat,.asc,.l6s" class="hidden">
+          <div class="frow"><label>Correction</label><select id="tb-cal-order" title="Automatic: an offset for one or two bands, a line for three or more"></select></div>
+          <div class="frow"><label>Search ± (cm⁻¹)</label><input type="number" id="tb-cal-search" step="any" min="1" title="How far each band may sit from its true shift"></div>
+          <div class="btnrow"><button class="primary" id="tb-cal-run">Calibrate</button><button id="tb-cal-use" disabled title="Put the correction first in the operations; Process every spectrum then applies it">Use as step 1</button></div>
+          <div class="pf-scroll"><table class="stats" id="tb-cal-table"></table></div>
+          <div class="muted small" id="tb-cal-note"></div>
+        </div>
+      </div>
       <div class="sec" data-sec="tb-apply">
         <div class="sec-h toggle">Apply</div>
         <div class="sec-b">
@@ -1096,7 +1195,7 @@
   <!-- ======================= Report ======================= -->
   <section id="tab-report" class="tab">
     <div class="report-bar">
-      <select id="rp-kind" title="Which analysis the report covers"><option value="carbon">Carbon fit report</option><option value="dlc">DLC coating report</option><option value="layers">Layers report</option><option value="mva">MVA report</option><option value="fit">Peak fit report</option><option value="graphene">Graphene report</option><option value="si">Silicon report</option><option value="id">Identification report</option></select>
+      <select id="rp-kind" title="Which analysis the report covers"><option value="carbon">Carbon fit report</option><option value="dlc">DLC coating report</option><option value="layers">Layers report</option><option value="mva">MVA report</option><option value="fit">Peak fit report</option><option value="graphene">Graphene report</option><option value="cnt">Nanotube report</option><option value="si">Silicon report</option><option value="id">Identification report</option></select>
       <input id="rp-title" value="Raman carbon analysis">
       <button id="rp-refresh">Refresh</button>
       <button class="primary" id="rp-print">Print / Save as PDF</button>

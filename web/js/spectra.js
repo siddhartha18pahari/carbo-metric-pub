@@ -175,7 +175,10 @@ function runningMedian(y, size) {
 // and carries most of its height above that median (over 60 % of its height above the 31-channel
 // one). The top of a real band a few channels wide stands above the 7-channel median too, but by a
 // fraction of its height, so it is kept: a spike test on the excess alone clips sharp bands such
-// as silicon's 520. Flagged channels take the median of their unflagged neighbours.
+// as silicon's 520. A band only two or three channels wide (a coarse axis) passes that test too, but
+// it has wings: a run counts as a spike only where the channels on both sides of it stand less than
+// 0.3 of its height above the 31-channel median (a Lorentzian's neighbours stand at half its height
+// or more down to a FWHM of 2 channels). Flagged channels take the median of their unflagged neighbours.
 export function despikeSpectrum(y0, thr = 8, maxw = 2) {
   const n = y0.length, y = Float64Array.from(y0);
   if (n < 9) return { y, spikes: 0 };
@@ -185,7 +188,9 @@ export function despikeSpectrum(y0, thr = 8, maxw = 2) {
   for (let i = 0; i < n;) {
     if (!flag[i]) { i++; continue; }
     let j = i; while (j < n && flag[j]) j++;
-    if (j - i <= maxw) {
+    let top = 0; for (let k = i; k < j; k++) top = Math.max(top, y0[k] - m31[k]);
+    const wing = Math.max(i > 0 ? y0[i - 1] - m31[i - 1] : 0, j < n ? y0[j] - m31[j] : 0);
+    if (j - i <= maxw && wing < 0.3 * top) {
       const nb = [];
       for (let k = Math.max(0, i - 3); k < Math.min(n, j + 3); k++) if (!flag[k]) nb.push(y0[k]);
       if (nb.length) { nb.sort((a, b) => a - b); const v = nb[nb.length >> 1]; for (let k = i; k < j; k++) y[k] = v; spikes++; }
@@ -238,6 +243,10 @@ export function evenAxis(nu, step) {
   const a = Math.ceil(nu[0] / step) * step, n = Math.floor((nu[nu.length - 1] - a) / step + 1e-9) + 1;
   return Float64Array.from({ length: Math.max(0, n) }, (_, i) => a + i * step);
 }
+// an axis corrected by Δ(ω) = shift + stretch t + curve t², t = (ω − mid) / 1000 (calibrate.js fits it)
+export function correctAxis(nu, { shift = 0, stretch = 0, curve = 0, mid = 1000 }) {
+  return Float64Array.from(nu, w => { const t = (w - mid) / 1000; return w + shift + stretch * t + curve * t * t; });
+}
 // Raman shift (cm⁻¹) and absolute wavelength (nm) for a laser line at laserNm
 export const shiftToNm = (s, laserNm) => 1 / (1 / laserNm - s * 1e-7);
 export const nmToShift = (nm, laserNm) => 1e7 / laserNm - 1e7 / nm;
@@ -247,6 +256,7 @@ export const nmToShift = (nm, laserNm) => 1e7 / laserNm - 1e7 / nm;
 // and to every spectrum of the file (to open the result as a new file)
 // --------------------------------------------------------------------------
 export const OPS = {
+  axis: { label: "Correct the axis", args: { shift: 0, stretch: 0, curve: 0, mid: 1000 } },
   crop: { label: "Crop range", args: { lo: 100, hi: 3500 } },
   despike: { label: "Cosmic rays", args: { thr: 8, width: 2 } },
   baseline: { label: "Background", args: { kind: "modpoly", order: 3, lambda: 1e5, p: 0.01, width: 40 } },
@@ -263,6 +273,7 @@ export const OPS = {
 export function applyOp(nu, y, op, ctx = {}) {
   const a = { ...OPS[op.op].args, ...op.args };
   switch (op.op) {
+    case "axis": return { nu: correctAxis(nu, a), y };
     case "crop": { const lo = Math.min(a.lo, a.hi), hi = Math.max(a.lo, a.hi); return crop(nu, y, lo, hi); }
     case "despike": return { nu, y: despikeSpectrum(y, a.thr, a.width).y };
     case "baseline": { const b = background(nu, y, a); return { nu, y: Float64Array.from(y, (v, n) => v - b[n]), base: b }; }

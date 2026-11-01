@@ -512,6 +512,7 @@ export function buildPeakFitReport(host, A) {
       ...A.stats.map((s, j) => el("tr", {}, el("td", {}, sw(j), s.name), ...s.q.map(q => el("td", {}, q.n ? `${fmt(q.median, 4)} (${fmt(q.q1, 4)} – ${fmt(q.q3, 4)})` : "–"))))),
     el("p", { class: "note" }, "Median (first – third quartile) over the spectra fitted without a position or width on its limit.")));
   if (A.maps.length) host.append(sec(n++, "Maps", el("div", { class: "figs four" }, ...A.maps.map(m => img(m.url, m.title)))));
+  if (A.trend) host.append(sec(n++, "Trend", img(A.trend.url, A.trend.cap)));
 
   host.append(sec(n++, "The model",
     el("table", {}, el("tr", {}, ...["Band", "Shape", "Parameter", "Start", "Free between / held / linked"].map(h => el("th", {}, h))),
@@ -559,6 +560,33 @@ export function buildGrapheneReport(host, A) {
   host.append(sec(n++, "Method",
     el("p", { class: "note" }, "Each spectrum is fitted twice, by bounded Levenberg-Marquardt with a straight background: Lorentzian D, G and D′ over the first window, one Lorentzian 2D over the second; a band counts when its height is 5 × its own error. Layers from FWHM(2D). Defects: L_D² = 1.8 × 10⁻⁹ λ⁴ / (I(D)/I(G)) nm² and n_D = 1.8 × 10²² / λ⁴ × I(D)/I(G) cm⁻² (λ in nm), only where L_D ≥ 10 nm; their nature from I(D)/I(D′). Strain and doping: the shift from the neutral point split along the strain and hole-doping directions; strain from G's share at the sensitivity set; the doping is given as G's shift."),
     el("p", { class: "note" }, "References: A. C. Ferrari et al., Raman spectrum of graphene and graphene layers, Phys. Rev. Lett. 97, 187401 (2006). L. G. Cançado et al., Quantifying defects in graphene via Raman spectroscopy at different excitation energies, Nano Lett. 11, 3190 (2011). A. Eckmann et al., Probing the nature of defects in graphene by Raman spectroscopy, Nano Lett. 12, 3925 (2012). J. E. Lee, G. Ahn, J. Shim, Y. S. Lee and S. Ryu, Optical separation of mechanical strain from charge doping in graphene, Nat. Commun. 3, 1024 (2012).")));
+  foot(host);
+}
+
+export function buildCntReport(host, A) {
+  const { R, s } = A, T4 = A.types, nAll = T4.reduce((t, r) => t + r.n, 0), nC = T4[0].n + T4[1].n + T4[2].n, nSplit = T4[0].n + T4[1].n, row = k => A.rows.find(r => r.key === k).m;
+  const win = w => `${w[0]}–${w[1]}`;
+  head(host, "Carbon nanotube report", { ...A, title: A.title || "Carbon nanotube analysis" }, `${A.ds.name} · ${R.n} spectr${R.n === 1 ? "um" : "a"}`,
+    `Laser ${fmt(s.laser, 4)} nm · ${R.BR ? `RBM over ${win(s.winR)}, ` : ""}D and G over ${win(s.winG)}${R.B2 ? `, 2D over ${win(s.win2)}` : ""} cm⁻¹`);
+  let n = 1;
+  host.append(sec(n++, "At a glance", el("div", { class: "tiles" },
+    tile("With a G band", `${fmt(nC)} of ${fmt(nAll)}`, "spectra", nC ? null : "bad"),
+    tile("RBM bands", R.BR ? fmt(A.rbm.length) : "–", R.BR ? (A.rbm.length ? `d ${A.rbm.map(r => fmt(r.d, 3)).join(", ")} nm` : "none in the mean spectrum") : "the spectra miss the RBM window"),
+    tile("Metallic G⁻", nSplit ? pct(T4[0].n / nSplit, 0) : "–", nSplit ? `of ${fmt(nSplit)} spectra with G⁻ and G⁺ apart` : "no G⁻/G⁺ splitting"),
+    tile("I(G)/I(D)", fmt(row("igd").median, 3), "median"))));
+  host.append(sec(n++, "Metallic or semiconducting", el("table", {}, el("tr", {}, ...["", "Spectra", "Share (95 % interval)"].map(h => el("th", {}, h))),
+    ...T4.map(r => el("tr", {}, el("td", {}, swatch(A.colours[r.k]), r.name), el("td", {}, fmt(r.n)), el("td", {}, `${pct(r.share, 1)} (${pct(r.ci[0], 1)} – ${pct(r.ci[1], 1)})`)))),
+    el("p", { class: "note" }, `From G⁻'s line shape: metallic where its BWF coupling 1/Q is below −${s.qMin} and 3 errors below zero, semiconducting where it is Lorentzian; "one G band" where one Lorentzian G fits as well (by the BIC) or G⁻ and G⁺ are not apart by half the narrower width.`)));
+  if (A.rbm.length) host.append(sec(n++, "Diameters from the radial breathing modes", el("table", {}, el("tr", {}, ...["RBM (cm⁻¹)", "Diameter (nm)", "Present in (95 % interval)", "Median height"].map(h => el("th", {}, h))),
+    ...A.rbm.map(r => el("tr", {}, el("td", {}, fmt(r.pos, 4)), el("td", {}, fmt(r.d, 3)), el("td", {}, `${pct(r.share, 1)} (${pct(r.ci[0], 1)} – ${pct(r.ci[1], 1)})`), el("td", {}, fmt(r.h, 3))))),
+    el("p", { class: "note" }, `ω = ${s.A} / d${s.B ? ` + ${s.B}` : ""} (ω in cm⁻¹, d in nm). Only tubes in resonance with the ${fmt(s.laser, 4)} nm laser show.`)));
+  host.append(sec(n++, "Results", el("table", {}, el("tr", {}, ...["", "Median (quartiles)", "n"].map(h => el("th", {}, h))),
+    ...A.rows.map(r => el("tr", {}, el("td", {}, `${r.label}${r.unit ? ` (${r.unit})` : ""}`), el("td", {}, medTxt(r.m, ["pgp", "pgm", "prbm", "p2d"].includes(r.key) ? 5 : 3)), el("td", {}, fmt(r.m.n)))))));
+  if (A.maps.length) host.append(sec(n++, "Maps", el("div", { class: "figs four" }, ...A.maps.map(m => img(m.url, m.title)))));
+  host.append(checksSec(n++, A.checks));
+  host.append(sec(n++, "Method",
+    el("p", { class: "note" }, "The radial breathing modes are found in the mean spectrum with a SNIP background taken off (maxima standing out from the noise by the search factor), and every spectrum is fitted with one Lorentzian for each over a degree-5 polynomial background (the laser filter's edge), without the cosmic-ray step (an RBM on a coarse axis can be as narrow as a cosmic ray). D, G⁺ and D′ are Lorentzians and G⁻ a Breit-Wigner-Fano line over a straight background, and the same window again with one Lorentzian G; each spectrum keeps the split model only where it lowers the BIC by 10 or more. Where the spectra cover the RBM window and the mean spectrum shows no RBM, no G is split into G⁻ and G⁺ (two carbon phases also give two G components). 2D is one Lorentzian. Fits by bounded Levenberg-Marquardt; a band counts when its height is 5 × its own error. I(G) is the maximum of G⁻ and G⁺ together. The diameter from the splitting uses C for metallic or semiconducting tubes by G⁻'s line shape."),
+    el("p", { class: "note" }, "References: A. Jorio et al., Structural (n, m) determination of isolated single-wall carbon nanotubes by resonant Raman scattering, Phys. Rev. Lett. 86, 1118 (2001). M. Milnera, J. Kürti, M. Hulman and H. Kuzmany, Periodic resonance excitation and intertube interaction from quasicontinuous distributed helicities in single-wall carbon nanotubes, Phys. Rev. Lett. 84, 1324 (2000). S. M. Bachilo et al., Structure-assigned optical spectra of single-walled carbon nanotubes, Science 298, 2361 (2002). S. D. M. Brown et al., Origin of the Breit-Wigner-Fano lineshape of the tangential G-band feature of metallic carbon nanotubes, Phys. Rev. B 63, 155414 (2001). A. Jorio et al., G-band resonant Raman study of 62 isolated single-wall carbon nanotubes, Phys. Rev. B 65, 155412 (2002).")));
   foot(host);
 }
 

@@ -9,7 +9,7 @@ import { MapView } from "./mapview.js";
 import { SpectrumPlot, HistogramPlot, DensityPlot, LinesPlot, ScatterPlot, DendrogramPlot, PEAK_COLOURS } from "./plots.js";
 import { SplatView, sliceField } from "./splat3d.js";
 import { segment, outlineOverlay, distance, PARTICLE_COLOURS } from "./particles.js";
-import { buildReport, buildDlcReport, buildLayersReport, buildMvaReport, buildPeakFitReport, buildGrapheneReport, buildSiliconReport, buildIdentifyReport } from "./report.js";
+import { buildReport, buildDlcReport, buildLayersReport, buildMvaReport, buildPeakFitReport, buildGrapheneReport, buildCntReport, buildSiliconReport, buildIdentifyReport } from "./report.js";
 import { rng, wilson, weightedQuantile, laCancado, robustScale, bestGmm, bootstrapShares, median, quantileSorted,
          heightCovariances, ratioVariance, heterogeneity, moranI, spearmanCI, coverage, pairRatio,
          binomLower, certifyCount, detectionPower, signalFloor, gini, noiseGini, logCV, lognormalPreferred,
@@ -28,6 +28,8 @@ import { SHAPES as PK_SHAPES, PARAMS as PK_PARAMS, paramLabel as PK_PARAM_LABEL_
          solveLinear as pkSolveLinear, fitOne as pkFitOne, fitMany as pkFitMany, curves as pkCurves, fwhmOf as pkFwhmOf, findPeaks as pkFindPeaks } from "./peakfit.js";
 import { BASELINES as PK_BASELINES, background as pkBackground, despikeSpectrum as pkDespike, OPS as TB_OPS, NORMS as TB_NORMS, applyOp as tbApplyOp } from "./spectra.js";
 import { GRAPHENE_DEFAULTS, models as grModels, readOne as grReadOne, QUANT as GR_QUANT, LAYERS as GR_LAYERS, defectType as grDefectType } from "./graphene.js";
+import { CNT_DEFAULTS, RBM_RELATIONS as CNT_RELATIONS, TYPES as CN_TYPES, QUANT as CN_QUANT, rbmPeaks as cnRbmPeaks, models as cnModels, readOne as cnReadOne, diameterOf as cnDiameter, preferOne as cnPreferOne } from "./cnt.js";
+import { STANDARDS as CAL_STANDARDS, CAL_DEFAULTS, ORDERS as CAL_ORDERS, fitBands as calFitBands, fitCorrection as calFitCorrection, referenceBands as calRefs } from "./calibrate.js";
 import { SI_DEFAULTS, model as siModel, readOne as siReadOne, QUANT as SI_QUANT, calCheck as siCalCheck, controlLimits as siControl } from "./silicon.js";
 import { ID_DEFAULTS, refVectors as idRefVectors, hqi as idHqi, hits as idHitList, searchAll as idSearchAll, mixture as idMixture } from "./identify.js";
 import { LAYER_DEFAULTS, prepare as lyPrepare, decompose as lyDecomp, prepRef, matchRefs, findLayers as lyFind, thicknessTest, amountMap, layerSpectra } from "./layers.js";
@@ -752,7 +754,7 @@ async function loadDataset(info) {
   }
   // particles are drawn over their camera image (a grid map covers its own)
   const back = S.points && S.video && info.video ? { img: S.video, ...info.video } : null;
-  for (const m of [...maps, pmap, ...dlcMaps, ...lyMaps, ...mvMaps, ...pkMaps, ...grMaps, ...siMaps, ...idMaps]) { m.setGeometry({ nx: S.nx, ny: S.ny, x: S.x, y: S.y, points: S.points }); m.values = null; m.backdrop = back; }
+  for (const m of [...maps, pmap, ...dlcMaps, ...lyMaps, ...mvMaps, ...pkMaps, ...grMaps, ...cnMaps, ...siMaps, ...idMaps]) { m.setGeometry({ nx: S.nx, ny: S.ny, x: S.x, y: S.y, points: S.points }); m.values = null; m.backdrop = back; }
   fitMapRow();
   S.vidFull = false;
   setActive(S.active);
@@ -769,6 +771,8 @@ async function loadDataset(info) {
   if ($("#tab-fit").classList.contains("on")) pkShow();
   GR.hover = GR.pinned = null; SI.hover = SI.pinned = null; SI.calNow = null; ID.hover = ID.pinned = null; ID.which = "mean"; ID.show = null; TB.which = "mean";
   if ($("#tab-graphene").classList.contains("on")) grShow();
+  CN.hover = CN.pinned = null;
+  if ($("#tab-cnt").classList.contains("on")) cnShow();
   if ($("#tab-si").classList.contains("on")) siShow();
   if ($("#tab-id").classList.contains("on")) idShow();
   if ($("#tab-tools").classList.contains("on")) tbShow();
@@ -1024,6 +1028,7 @@ function switchTab(name) {
   if (name === "mva") mvShow();
   if (name === "fit") pkShow();
   if (name === "graphene") grShow();
+  if (name === "cnt") cnShow();
   if (name === "si") siShow();
   if (name === "id") idShow();
   if (name === "tools") tbShow();
@@ -4739,7 +4744,7 @@ function makeDlcReport() {
     status: DLC_STATUS, pf: !!S.points, pinned: DLC.pinned, figs: dlcFigures(R), qcKeys: DLC_QC_KEYS, homKeys: DLC_HOM_KEYS });
 }
 // the report's title follows its kind while it is one of the defaults
-const RP_TITLES = { carbon: "Raman carbon analysis", dlc: "DLC coating analysis", layers: "Multilayer analysis", mva: "Multivariate analysis", fit: "Peak fit analysis", graphene: "Graphene analysis", si: "Silicon analysis", id: "Identification" };
+const RP_TITLES = { carbon: "Raman carbon analysis", dlc: "DLC coating analysis", layers: "Multilayer analysis", mva: "Multivariate analysis", fit: "Peak fit analysis", graphene: "Graphene analysis", cnt: "Carbon nanotube analysis", si: "Silicon analysis", id: "Identification" };
 function rpTitle() { const t = $("#rp-title"); if (Object.values(RP_TITLES).includes(t.value)) t.value = RP_TITLES[$("#rp-kind").value]; }
 $("#rp-kind").onchange = () => { rpTitle(); makeReport(); };
 
@@ -6134,8 +6139,62 @@ function pkRenderResult() {
   note.textContent = `${V.from === "all" ? "From Fit all. " : ""}Residual ${fmt(V.D.rn, 3)} × the noise, R² ${fmt(V.D.r2, 4)}, reduced χ² ${fmt(V.D.chi2, 3)} (at the noise of the spectrum). ` +
     "Errors are one standard error from the fit's covariance; a parameter on its limit or held has none. Areas are over all shifts (BWF: over the fit range).";
 }
+// one result against the spectra of a set: their order, or a number in their names
+PK.trend = { y: null, x: "order", view: "table" };
+const pkTrendPlot = new ScatterPlot($("#pk-trend-plot"), { onPick: p => { PK.which = String(p); pkFillWhich(); pkRender(); } });
+function pkTrendX(n) {
+  if (PK.trend.x === "order" || !S.names) return { x: Float64Array.from({ length: n }, (_, p) => p + 1), label: "Spectrum" };
+  const x = Float64Array.from(S.names, nm => { const m = String(nm).match(/\d+(?:\.\d+)?/g); return m ? parseFloat(PK.trend.x === "first" ? m[0] : m[m.length - 1]) : NaN; });
+  return { x, label: PK.trend.x === "first" ? "First number in the name" : "Last number in the name" };
+}
+// least squares line y = a + b x: { a, b, se (of b), r, n }
+function lineFit(x, y) {
+  let n = 0, sx = 0, sy = 0;
+  for (let i = 0; i < x.length; i++) if (Number.isFinite(x[i]) && Number.isFinite(y[i])) { n++; sx += x[i]; sy += y[i]; }
+  if (n < 3) return null;
+  const mx = sx / n, my = sy / n; let sxx = 0, sxy = 0, syy = 0;
+  for (let i = 0; i < x.length; i++) if (Number.isFinite(x[i]) && Number.isFinite(y[i])) { sxx += (x[i] - mx) ** 2; sxy += (x[i] - mx) * (y[i] - my); syy += (y[i] - my) ** 2; }
+  if (!(sxx > 0)) return null;
+  const b = sxy / sxx, a = my - b * mx, ssr = Math.max(0, syy - b * sxy);
+  return { a, b, se: Math.sqrt(ssr / (n - 2) / sxx), r: syy > 0 ? sxy / Math.sqrt(sxx * syy) : NaN, n };
+}
+function pkRenderTrend() {
+  const R = pkCur(), fresh = R && R.key === pkKey(PK.model), info = $("#pk-trend-info");
+  $("#pk-trend-x").disabled = !S.names;
+  if (!fresh) { $("#pk-trend-y").textContent = "Fit all spectra first"; info.textContent = ""; pkTrendPlot.setData(null); return; }
+  if (!PK.trend.y || !pkSpecOk(PK.trend.y, R)) PK.trend.y = (PK.specs && PK.specs[0]) || "0:c";
+  const spec = PK.trend.y, M = pkMapData(spec, R), a = spec.split(":"), X = pkTrendX(R.n);
+  $("#pk-trend-y").textContent = `${M.label}${M.unit ? ` (${M.unit})` : ""} ▾`;
+  // a band's own value carries its fit error; ratios and fit statistics are drawn without
+  const ey = a.length === 2 ? Float64Array.from({ length: R.n }, (_, p) => (Number.isFinite(M.values[p]) ? pkSe(R, p, +a[0], a[1]) : NaN)) : null;
+  const y = Float64Array.from(M.values), L = lineFit(X.x, y), mark = PK.which !== "mean" && PK.which !== "pin" && Number.isFinite(+PK.which) ? +PK.which : null;
+  let lines = [];
+  if (L) {
+    let x0 = Infinity, x1 = -Infinity; for (let p = 0; p < R.n; p++) if (Number.isFinite(X.x[p]) && Number.isFinite(y[p])) { x0 = Math.min(x0, X.x[p]); x1 = Math.max(x1, X.x[p]); }
+    lines = [{ x: [x0, x1], y: [L.a + L.b * x0, L.a + L.b * x1], colour: T.bad, dash: [5, 4] }];
+  }
+  pkTrendPlot.setData({ x: X.x, y, ey, xl: X.label, yl: `${M.label}${M.unit ? ` (${M.unit})` : ""}`, mark, lines });
+  info.textContent = L ? `· slope ${fmt(L.b, 3)} ± ${fmt(L.se, 2)} per unit of x (r = ${fmt(L.r, 3)}, ${L.n} spectra)${ey ? " · bars: ± 1 fit error" : ""} · click a point to see it` : "· too few spectra for a line";
+}
+$("#pk-trend-y").onclick = e => {
+  const R = pkCur(); if (!R || R.key !== pkKey(PK.model)) return;
+  const names = pkBandOpts(R), groups = R.C.peaks.map((pk, j) => ({ title: names[j],
+    items: [...["c", "fwhm", "h", "area"].map(q => [`${j}:${q}`, `${names[j]} ${PK_WORD[q]}`]), ...(pk.keys.length > 3 ? [[`${j}:x`, pkLabel(`${j}:x`, R)]] : [])] }));
+  if (names.length >= 2) {
+    const ratios = [];
+    for (let a = 0; a < names.length; a++) for (let b = 0; b < names.length; b++) if (a !== b) ratios.push([`r:${a}:${b}:h`, `I(${names[a]})/I(${names[b]})`], [`r:${a}:${b}:area`, `A(${names[a]})/A(${names[b]})`]);
+    groups.push({ title: "Ratios", items: ratios });
+  }
+  groups.push({ title: "Fit", items: [["rn", "Residual / noise"], ["r2", "R²"]] });
+  pickMenu(e, groups, PK.trend.y, k => { PK.trend.y = k; pkRenderTrend(); });
+};
+$("#pk-trend-x").onchange = e => { PK.trend.x = e.target.value; pkRenderTrend(); };
+$("#pk-list-view").onchange = e => { PK.trend.view = e.target.value; pkRenderList(); setTimeout(() => pkTrendPlot.render(), 0); };
 // every spectrum of a set as a row
 function pkRenderList() {
+  const trend = PK.trend.view === "trend";
+  $("#pk-list-scroll").classList.toggle("hidden", trend); $("#pk-trend").classList.toggle("hidden", !trend);
+  if (trend) pkRenderTrend();
   const R = pkCur(), fresh = R && R.key === pkKey(PK.model), t = $("#pk-list-table");
   $("#pk-list-info").textContent = fresh ? `· ${fmt(R.list.length)} fitted in ${R.seconds.toFixed(1)} s · click a row to see it` : "· Fit all spectra to fill this table";
   if (!fresh) { t.replaceChildren(); return; }
@@ -6197,7 +6256,7 @@ function pkShow() {
     PK.model.range = [Math.floor(lo), Math.ceil(hi)];
   }
   pkForm(); pkFillWhich(); pkRender();
-  setTimeout(() => { pkMaps.forEach(m => m.render()); pkPlot.render(); }, 0);
+  setTimeout(() => { pkMaps.forEach(m => m.render()); pkPlot.render(); pkTrendPlot.render(); }, 0);
 }
 function pkRender() {
   const empty = $("#pk-empty"), why = !S.ds ? "Open a spectrum, a set of spectra or a map first: a CSV of one spectrum, several CSVs at once, spectra in columns, or a LabSpec map."
@@ -6265,7 +6324,12 @@ function makePeakFitReport() {
     return { q, n: a.length, median: quantile(a, 0.5), q1: quantile(a, 0.25), q3: quantile(a, 0.75) };
   }) })) : null;
   const counts = fresh ? [0, 0, 0, 0] : null; if (fresh) for (const s of R.status) counts[s]++;
-  buildPeakFitReport($("#report-paper"), { title: $("#rp-title").value, ds: S.ds, model: PK.model, C, V, spec, stats, counts, R: fresh ? R : null,
+  let trend = null;
+  if (fresh && pkSet()) {
+    pkRenderTrend();
+    const th = offscreen(620, 340), tp = new ScatterPlot(th); tp.setData(pkTrendPlot.d); trend = pkTrendPlot.d ? { url: onDark(tp.canvas), cap: `${pkTrendPlot.d.yl} against ${pkTrendPlot.d.xl.toLowerCase()}; ${$("#pk-trend-info").textContent.replace(/^· /, "").replace(/ · click a point to see it/, "")}.` } : null; th.remove();
+  }
+  buildPeakFitReport($("#report-paper"), { title: $("#rp-title").value, ds: S.ds, model: PK.model, C, V, spec, stats, counts, R: fresh ? R : null, trend,
     maps: fresh && pkMany() && !pkSet() ? PK.specs.map((s, i) => mapFigure(pkMaps[i], "Peak fit", pkMapData(s, R), PK.pinned)) : [],
     checks: pkChecks(), shapes: PK_SHAPES, label: PK_PARAM_LABEL_OF, baselines: PK_BASELINES });
 }
@@ -6450,6 +6514,190 @@ function makeGrapheneReport() {
 }
 
 // --------------------------------------------------------------------------
+// Carbon nanotubes
+// --------------------------------------------------------------------------
+const CN_STORE = "carbo-cnt";
+const CN = { settings: { ...structuredClone(CNT_DEFAULTS), ...((storeGet(CN_STORE) || {}).settings || {}) }, res: new Map(), running: false, specs: ["type", "drbm", "igd", "pgp"], hover: null, pinned: null };
+const cnSave = () => storeSet(CN_STORE, { settings: CN.settings });
+const CN_Q = Object.fromEntries(CN_QUANT.map(q => [q.key, q]));
+const cnFitKey = s => stableJSON({ winR: s.winR, winG: s.winG, win2: s.win2, laser: Math.round(s.laser), prom: s.prom });
+const cnCur = () => { const R = S.ds ? CN.res.get(S.ds.id) : null; return R && R.ds === S.ds ? R : null; };
+const CN_COLOURS = () => [T.warn, T.accent, T.viz3, T.muted];
+// the channels of S.wn inside a window
+const cnChannels = w => { let n = 0; for (const v of S.wn) if (v >= w[0] && v <= w[1]) n++; return n; };
+// a batch's bands at p with the BWF coupling
+const cnBands = (B, p) => bandsAt(B, p).map((b, j) => ({ ...b, q: pkVal(B, p, j, "x"), sq: pkSe(B, p, j, "x") }));
+function cnRead(R) {
+  const key = stableJSON(CN.settings);
+  if (R.read && R.read.key === key) return R.read;
+  const s = CN.settings, n = R.n, q = Object.fromEntries(CN_QUANT.map(x => [x.key, new Float64Array(n).fill(NaN)]));
+  const one = new Uint8Array(n), split = !(R.rbm && !R.rbm.length);   // no G⁻ where the RBM window shows no tube
+  for (let p = 0; p < n; p++) {
+    const f2 = fitted(R.BG, p), f1 = fitted(R.BG1, p);
+    if (!f2 && !f1) continue;
+    // the one-G model where the split does not lower the BIC by 10
+    one[p] = f1 && (!f2 || cnPreferOne(pkStat(R.BG, p, "rn"), pkStat(R.BG1, p, "rn"), R.BG.C.N)) ? 1 : 0;
+    const G = one[p] ? R.BG1 : R.BG, rb = R.BR && fitted(R.BR, p) ? cnBands(R.BR, p) : null, t = R.B2 && fitted(R.B2, p) ? cnBands(R.B2, p)[0] : null;
+    const rn = Math.max(...[G, R.BR, R.B2].filter(B => B && fitted(B, p)).map(B => pkStat(B, p, "rn")));
+    const o = cnReadOne(rb, f2 ? cnBands(R.BG, p) : null, t, rn, s, one[p] ? cnBands(R.BG1, p) : null, split);
+    for (const k in q) q[k][p] = o[k];
+  }
+  return (R.read = { key, q, one });
+}
+const cnIsCnt = (Q, p) => Q.type[p] >= 0 && Q.type[p] <= 2;
+async function cnRun() {
+  if (CN.running || !S.ds || !S.cube) return;
+  const s = structuredClone(CN.settings), ds = S.ds, t0 = performance.now(), prog = $("#cn-prog > div");
+  CN.running = true; $("#cn-run").disabled = $("#cn-run2").disabled = true; prog.style.width = "0%";
+  try {
+    const st = t => { $("#cn-status").textContent = t; };
+    if (cnChannels(s.winG) < 20) throw new Error(`the spectra do not cover the D and G window (${s.winG[0]}–${s.winG[1]} cm⁻¹)`);
+    const rbm = cnChannels(s.winR) >= 15 ? cnRbmPeaks(S.wn, meanSpectrum(), s) : null, M = cnModels(s, rbm || []);
+    const stages = [["mG", "D, G⁻ and G⁺"], ["mG1", "D and one G"], ...(M.mR ? [["mR", "RBM"]] : []), ...(cnChannels(s.win2) >= 20 ? [["m2", "2D"]] : [])], out = {};
+    for (let k = 0; k < stages.length; k++) {
+      const [m, label] = stages[k];
+      out[m] = await pkBatch(M[m], S.wn, pkCompile(M[m], S.wn).x0, (d, n) => { prog.style.width = `${(100 * (k + d / n) / stages.length).toFixed(1)}%`; st(`${label}: ${fmt(d)} of ${fmt(n)} spectra…`); });
+    }
+    CN.res.set(ds.id, { ds, BG: out.mG, BG1: out.mG1, BR: out.mR || null, B2: out.m2 || null, rbm, n: P(), key: cnFitKey(s), seconds: (performance.now() - t0) / 1000 });
+    prog.style.width = "100%";
+  } catch (e) { $("#cn-status").textContent = `Could not fit: ${e.message}`; toast(`Nanotubes: ${e.message}`, "error", 8000); }
+  finally { CN.running = false; $("#cn-run").disabled = $("#cn-run2").disabled = false; }
+  if (S.ds === ds) { CN.hover = CN.pinned = null; cnRender(); }
+}
+$("#cn-run").onclick = $("#cn-run2").onclick = () => cnRun();
+$("#cn-reset").onclick = () => { CN.settings = structuredClone(CNT_DEFAULTS); if (S.ds && Number.isFinite(S.ds.laser_nm)) CN.settings.laser = S.ds.laser_nm; cnSave(); cnForm(); cnRender(); };
+
+const cnMaps = linkedMaps("cn", { onTitle: (e, i) => pickMenu(e, [{ title: "Show", items: CN_QUANT.map(q => [q.key, q.label]) }], CN.specs[i], k => { CN.specs[i] = k; cnRenderMap(i); }),
+  onHover: p => { CN.hover = p; cnMaps.forEach(m => m.setCursor(p, CN.pinned)); cnRenderCursor(); },
+  onPick: p => { CN.pinned = p; CN.hover = null; cnMaps.forEach(m => m.setCursor(null, p)); cnRenderCursor(); } });
+const cnSpecR = new SpectrumPlot($("#cn-spec1")), cnSpecG = new SpectrumPlot($("#cn-spec2")), cnSpec2 = new SpectrumPlot($("#cn-spec3"));
+function cnMapData(key, R) {
+  const Q = cnRead(R).q;
+  if (key === "type") {
+    const index = Int8Array.from(Q.type, v => (Number.isFinite(v) ? v : -1));
+    return { values: Float32Array.from(index), label: CN_Q.type.label, unit: "", categories: { index, colours: CN_COLOURS(), names: CN_TYPES } };
+  }
+  const v = Float32Array.from(Q[key], (x, p) => (key === "rn" || cnIsCnt(Q, p) ? x : NaN));
+  return { values: v, label: CN_Q[key].label, unit: CN_Q[key].unit };
+}
+function cnRenderMap(i) { const R = cnCur(), fresh = R && R.key === cnFitKey(CN.settings); showOnMap(cnMaps[i], "Nanotubes", fresh ? cnMapData(CN.specs[i], R) : null); }
+function cnRenderCursor() {
+  const R = cnCur(), tb = $("#cn-cursor-table"), info = $("#cn-info"); tb.textContent = ""; info.textContent = "";
+  const p = CN.hover ?? CN.pinned ?? (P() === 1 ? 0 : null);
+  const plots = [[cnSpecR, "BR", "No RBM bands in the mean spectrum"], [cnSpecG, R && cnRead(R).one[p] ? "BG1" : "BG"], [cnSpec2, "B2", "The spectra do not reach the 2D band"]];
+  if (!R || p == null) { for (const [pl] of plots) { pl.emptyText = R ? "Hover or click a map" : "Analyse first"; pl.setData(null); } return; }
+  info.textContent = whereOf(p);
+  $("#cn-g-h").textContent = cnRead(R).one[p] ? "D and one G" : "D, G⁻ and G⁺";
+  for (const [pl, k, none] of plots) {
+    const B = R[k];
+    pl.emptyText = !B ? none : !B.status[p] ? "Not measured" : null;
+    pl.setData(B && B.status[p] ? batchSpectrum(B, p) : null);
+  }
+  const Q = cnRead(R).q, item = (k, d = 3) => tb.append(el("span", {}, el("b", {}, CN_Q[k].label), ` ${fmt(Q[k][p], d)}${CN_Q[k].unit ? ` ${CN_Q[k].unit}` : ""}`));
+  tb.append(el("span", {}, el("b", { style: `color:${CN_COLOURS()[Q.type[p]] || T.muted}` }, CN_TYPES[Q.type[p]] || "–")));
+  ["nrbm", "drbm", "dmean", "igd", "pgp", "pgm", "q", "dg"].forEach(k => { if (Number.isFinite(Q[k][p])) item(k, k === "pgp" || k === "pgm" ? 5 : 3); });
+}
+// each RBM band of the model: where it stands above its error, its median position and diameter
+function cnRbmRows(R) {
+  if (!R.BR) return [];
+  const s = CN.settings, n = R.BR.C.peaks.length, rows = [];
+  let nFit = 0; for (let p = 0; p < R.n; p++) if (fitted(R.BR, p)) nFit++;
+  for (let j = 0; j < n; j++) {
+    const c = [], h = [];
+    for (let p = 0; p < R.n; p++) {
+      if (!fitted(R.BR, p)) continue;
+      const v = pkVal(R.BR, p, j, "h"), e = pkSe(R.BR, p, j, "h");
+      if (v > 0 && v > s.snr * (e || 0)) { c.push(pkVal(R.BR, p, j, "c")); h.push(v); }
+    }
+    c.sort((a, b) => a - b); h.sort((a, b) => a - b);
+    const pos = c.length ? quantile(c, 0.5) : R.rbm[j].c;
+    rows.push({ j, pos, d: cnDiameter(pos, s), n: c.length, share: nFit ? c.length / nFit : NaN, ci: wilson(c.length, nFit), h: h.length ? quantile(h, 0.5) : NaN });
+  }
+  return rows;
+}
+function cnTypeRows(R) {
+  const Q = cnRead(R).q, c = [0, 0, 0, 0]; let n = 0;
+  for (let p = 0; p < R.n; p++) if (Number.isFinite(Q.type[p])) { c[Q.type[p]]++; n++; }
+  return CN_TYPES.map((name, k) => ({ name, k, n: c[k], share: n ? c[k] / n : NaN, ci: wilson(c[k], n) }));
+}
+function cnResultRows(R) {
+  const Q = cnRead(R).q, ok = p => cnIsCnt(Q, p);
+  return CN_QUANT.filter(q => q.key !== "type").map(q => ({ ...q, m: medIQR(Q[q.key], q.key === "rn" ? p => Number.isFinite(Q.type[p]) : ok) }));
+}
+function cnChecks(R) {
+  const out = [], add = (text, warn = false) => out.push({ text, warn }), s = CN.settings, Q = cnRead(R).q, T4 = cnTypeRows(R);
+  const nC = T4[0].n + T4[1].n + T4[2].n;
+  if (!nC) { add("No spectrum has a G band standing above its error.", true); return out; }
+  if (!R.rbm) add(`The spectra start at ${fmt(S.wn[0], 4)} cm⁻¹ and miss the RBM window (${s.winR[0]}–${s.winR[1]}): no diameters from RBMs, and nothing here shows the sample holds single-wall tubes.${T4[0].n + T4[1].n ? ` The ${fmt(T4[0].n + T4[1].n)} spectra read as metallic or semiconducting have a G band of two components, which a mixture of carbons (graphite with amorphous carbon) also gives: on a coated graphite map without nanotubes, 2 % of the spectra read so.` : ""}`, T4[0].n + T4[1].n > 0);
+  else if (!R.rbm.length) add("The mean spectrum shows no RBM band: multi-wall tubes or other carbon (single-wall tubes in resonance with this laser would show them). G⁻ and G⁺ are therefore not told apart: every G is read as one band.");
+  else {
+    add(`${R.rbm.length} RBM band${R.rbm.length > 1 ? "s" : ""} found in the mean spectrum; diameters from ω = ${s.A} / d${s.B ? ` + ${s.B}` : ""}. Only tubes in resonance with the ${fmt(s.laser, 4)} nm laser show: another laser sees other tubes, so this is not the sample's diameter distribution.`);
+    const lowest = s.A / (Math.max(S.wn[0], s.winR[0]) + 5 - s.B);
+    if (Number.isFinite(lowest) && lowest > 0) add(`The lowest shift measured, ${fmt(Math.max(S.wn[0], s.winR[0]), 4)} cm⁻¹, puts tubes wider than about ${fmt(lowest, 2)} nm out of reach (the laser filter's edge).`);
+  }
+  if (T4[0].n + T4[1].n) add(`G⁻ is fitted as a Breit-Wigner-Fano line: metallic where its coupling 1/Q is below −${s.qMin} and 3 errors below zero, semiconducting where it is not (a Lorentzian). Diameters from the splitting (ωG⁺ − ωG⁻ = C / d², C = ${s.cS} or ${s.cM} cm⁻¹ nm², Jorio et al. 2002) hold for single-wall tubes up to about 2 nm.`);
+  const igd = medIQR(Q.igd, p => cnIsCnt(Q, p));
+  if (igd.n) add(`Median I(G)/I(D) ${fmt(igd.median, 3)} over ${fmt(igd.n)} spectra (the purity measure of single-wall tubes: high for clean tubes, near 1 or below where amorphous carbon or defective walls dominate).`, igd.median < 2 && R.rbm && R.rbm.length > 0);
+  const hi = Array.from(Q.rn).filter(v => v > 2).length;
+  if (hi) add(`${fmt(hi)} spectra leave more than 2 × their noise: a band the model lacks (a split 2D, an iD or M band, or another material).`, hi > 0.1 * nC);
+  return out;
+}
+function cnFormFields() {
+  const s = CN.settings, set = (id, v) => { $(id).value = v; };
+  set("#cn-laser", s.laser); set("#cn-rlo", s.winR[0]); set("#cn-rhi", s.winR[1]); set("#cn-glo", s.winG[0]); set("#cn-ghi", s.winG[1]); set("#cn-2lo", s.win2[0]); set("#cn-2hi", s.win2[1]);
+  set("#cn-prom", s.prom); set("#cn-rel", s.relation); set("#cn-a", s.A); set("#cn-b", s.B); set("#cn-cs", s.cS); set("#cn-cm", s.cM); set("#cn-qmin", s.qMin);
+  $("#cn-a").disabled = $("#cn-b").disabled = s.relation !== "custom";
+}
+const cnForm = () => cnFormFields();
+const cnOn = (id, set) => $(id).addEventListener("change", e => { const v = parseFloat(e.target.value); if (Number.isFinite(v)) set(v); cnFormFields(); cnSave(); cnRender(); });
+cnOn("#cn-laser", v => { if (v > 200 && v < 1200) CN.settings.laser = v; });
+cnOn("#cn-rlo", v => { CN.settings.winR = [v, CN.settings.winR[1]]; }); cnOn("#cn-rhi", v => { CN.settings.winR = [CN.settings.winR[0], v]; });
+cnOn("#cn-glo", v => { CN.settings.winG = [v, CN.settings.winG[1]]; }); cnOn("#cn-ghi", v => { CN.settings.winG = [CN.settings.winG[0], v]; });
+cnOn("#cn-2lo", v => { CN.settings.win2 = [v, CN.settings.win2[1]]; }); cnOn("#cn-2hi", v => { CN.settings.win2 = [CN.settings.win2[0], v]; });
+cnOn("#cn-prom", v => { if (v > 0) CN.settings.prom = v; });
+cnOn("#cn-a", v => { if (v > 0) CN.settings.A = v; }); cnOn("#cn-b", v => { CN.settings.B = v; });
+cnOn("#cn-cs", v => { if (v > 0) CN.settings.cS = v; }); cnOn("#cn-cm", v => { if (v > 0) CN.settings.cM = v; }); cnOn("#cn-qmin", v => { if (v >= 0) CN.settings.qMin = v; });
+$("#cn-rel").onchange = e => { const r = CNT_RELATIONS[e.target.value]; CN.settings.relation = e.target.value; if (e.target.value !== "custom") { CN.settings.A = r.A; CN.settings.B = r.B; } cnFormFields(); cnSave(); cnRender(); };
+$("#cn-rel").replaceChildren(...Object.entries(CNT_RELATIONS).map(([k, r]) => el("option", { value: k }, r.label)));
+function cnShow() { if (S.ds && Number.isFinite(S.ds.laser_nm) && CN.laserFile !== S.ds) { CN.settings.laser = S.ds.laser_nm; CN.laserFile = S.ds; } cnForm(); cnRender(); setTimeout(() => { cnMaps.forEach(m => m.render()); cnSpecR.render(); cnSpecG.render(); cnSpec2.render(); }, 0); if (S.cube && !cnCur() && !CN.running) cnRun(); }
+function cnRender() {
+  const R = cnCur(), fresh = R && R.key === cnFitKey(CN.settings), empty = $("#cn-empty");
+  const why = !S.ds ? "Open a map, a set of spectra or one spectrum of carbon nanotubes first." : !S.cube ? "This file holds fitted values, not spectra." : !R ? (CN.running ? "Fitting…" : "Every spectrum is fitted in up to three windows: the radial breathing modes (diameters), D with G⁻ and G⁺ (metallic or semiconducting, purity) and 2D.") : null;
+  empty.classList.toggle("hidden", !why); empty.classList.toggle("can-fit", !!S.cube && !R && !CN.running);
+  if (why) $("#cn-empty-p").textContent = why;
+  if (R && !CN.running) $("#cn-status").textContent = `${fmt(R.n)} spectra in ${R.seconds.toFixed(1)} s.${R.rbm && R.rbm.length ? ` RBM bands at ${R.rbm.map(b => fmt(b.c, 4)).join(", ")} cm⁻¹.` : ""}${fresh ? "" : " The windows, the laser or the RBM search have changed: Analyse again."}`;
+  cnMaps.forEach((_, i) => cnRenderMap(i)); cnRenderCursor();
+  const tt = $("#cn-type-table"), bt = $("#cn-rbm-table"), rt = $("#cn-res-table"), ck = $("#cn-checks");
+  if (!R || !fresh) { for (const t of [tt, bt, rt, ck]) t.replaceChildren(); return; }
+  tt.replaceChildren(el("tr", {}, ...["", "Spectra", "Share (95 % interval)"].map((h, i) => el("th", { class: i ? "" : "l" }, h))),
+    ...cnTypeRows(R).map(r => el("tr", {}, el("td", { class: "l" }, el("span", { class: "sw", style: `background:${CN_COLOURS()[r.k]}` }), r.name), el("td", {}, fmt(r.n)), el("td", {}, `${dlcPct(r.share)} (${dlcPct(r.ci[0])} – ${dlcPct(r.ci[1])})`))));
+  const rows = cnRbmRows(R);
+  bt.replaceChildren(...(rows.length ? [el("tr", {}, ...["RBM (cm⁻¹)", "d (nm)", "Present in", "Height"].map((h, i) => el("th", { class: i ? "" : "l" }, h))),
+    ...rows.map(r => el("tr", {}, el("td", { class: "l" }, fmt(r.pos, 4)), el("td", {}, fmt(r.d, 3)), el("td", {}, `${dlcPct(r.share)} (${dlcPct(r.ci[0])} – ${dlcPct(r.ci[1])})`), el("td", {}, fmt(r.h, 3))))]
+    : [el("tr", {}, el("td", { class: "l muted" }, R.rbm ? "No RBM band in the mean spectrum." : "The spectra miss the RBM window."))]));
+  rt.replaceChildren(el("tr", {}, ...["", "Median (quartiles)", "n"].map((h, i) => el("th", { class: i ? "" : "l" }, h))),
+    ...cnResultRows(R).map(r => el("tr", {}, el("td", { class: "l" }, `${r.label}${r.unit ? ` (${r.unit})` : ""}`), el("td", {}, miq(r.m, r.key === "pgp" || r.key === "pgm" || r.key === "prbm" || r.key === "p2d" ? 5 : 3)), el("td", {}, fmt(r.m.n)))));
+  ck.replaceChildren(...cnChecks(R).map(c => el("li", { class: c.warn ? "warn" : "" }, c.text)));
+}
+$("#cn-csv").onclick = () => {
+  const R = cnCur(); if (!R) { toast("Analyse first.", "error"); return; }
+  const Q = cnRead(R).q, rows = [[S.names ? "Spectrum" : S.points ? "Particle" : "Point", "X (um)", "Y (um)", ...CN_QUANT.map(q => `${q.label}${q.unit ? ` (${q.unit.replace("cm⁻¹", "cm-1")})` : ""}`)]];
+  for (let p = 0; p < R.n; p++) {
+    if (!R.BG.status[p]) continue;
+    rows.push([S.names ? S.names[p] : p + 1, S.points ? S.points.x[p] : S.x[p % S.nx], S.points ? S.points.y[p] : S.y[Math.floor(p / S.nx)], ...CN_QUANT.map(q => (q.key === "type" ? CN_TYPES[Q.type[p]] || "" : Q[q.key][p]))]);
+  }
+  download(`${S.ds.name}_nanotubes.csv`, rows.map(r => r.map(pkCell).join(",")).join("\n").replace(/[⁺]/g, "+").replace(/[⁻]/g, "-") + "\n", "text/csv");
+};
+$("#cn-png").onclick = () => cnMaps.forEach((m, i) => setTimeout(() => m.save(), i * 250));
+$("#cn-report").onclick = () => { $("#rp-kind").value = "cnt"; rpTitle(); switchTab("report"); };
+function makeCntReport() {
+  const R = cnCur();
+  if (!R) { $("#report-paper").replaceChildren(el("p", {}, "Analyse first: open Nanotubes, then Analyse.")); return; }
+  buildCntReport($("#report-paper"), { title: $("#rp-title").value, ds: S.ds, R, s: CN.settings, types: cnTypeRows(R), rbm: cnRbmRows(R), rows: cnResultRows(R), checks: cnChecks(R),
+    colours: CN_COLOURS(), maps: P() > 1 ? CN.specs.map((k, i) => mapFigure(cnMaps[i], "Nanotubes", cnMapData(k, R), CN.pinned)) : [] });
+}
+
+// --------------------------------------------------------------------------
 // Silicon
 // --------------------------------------------------------------------------
 const SI_STORE = "carbo-silicon", SI_LOG = "carbo-si-log";
@@ -6546,6 +6794,15 @@ $("#si-log-csv").onclick = () => {
   if (!SI.log.length) { toast("The log is empty.", "error"); return; }
   const rows = [["Date", "File", "Spectrum", "Position (cm-1)", "FWHM (cm-1)", "Height", "Laser (nm)", "Pass"], ...SI.log.map(e => [new Date(e.at).toISOString(), e.file, e.label, e.pos, e.fwhm, e.h, e.laser ?? "", e.pass ? "yes" : "no"])];
   download("silicon_calibration_log.csv", rows.map(r => r.map(pkCell).join(",")).join("\n") + "\n", "text/csv");
+};
+$("#si-axis").onclick = () => {
+  const c = SI.calNow && !SI.calNow.error ? SI.calNow : siCalNow();
+  if (!c || c.error) { toast("Open a silicon spectrum first.", "error"); return; }
+  const shift = +(SI.settings.w0 - c.pos).toFixed(4);
+  TB.calRes = { bands: [{ ref: SI.settings.w0, pos: c.pos, se: c.sPos, used: true, why: "" }], label: c.label, standard: "si" };
+  TB.calRes.fit = calFitCorrection(TB.calRes.bands, "0");
+  switchTab("tools");
+  tbUseAxis({ shift, stretch: 0, curve: 0, mid: +c.pos.toFixed(2) }, `the silicon check (${c.label})`);
 };
 $("#si-w0-pin").onclick = () => {
   const R = siCur(), p = SI.pinned;
@@ -6925,7 +7182,7 @@ const TB_ARGS = {
   smooth: [["kind", "Filter", [["savgol", "Savitzky-Golay"], ["mean", "Moving mean"], ["median", "Median"]]], ["window", "Window"], ["order", "Order"]],
   deriv: [["order", "Derivative", [[1, "First"], [2, "Second"]]], ["window", "Window"], ["poly", "Order"]],
   normalise: [["mode", "To", Object.entries(TB_NORMS)], ["at", "Band at"], ["half", "± cm⁻¹"]],
-  resample: [["step", "Step (cm⁻¹)"]], subtract: [["scale", "Scale", [["fit", "Least squares"], ["factor", "Factor"]]], ["factor", "Factor"]], divide: [], offset: [["add", "Add"], ["mul", "Multiply"]],
+  resample: [["step", "Step (cm⁻¹)"]], axis: [["shift", "Shift (cm⁻¹)"], ["stretch", "Per 1000 cm⁻¹"], ["curve", "Per (1000 cm⁻¹)²"], ["mid", "About (cm⁻¹)"]], subtract: [["scale", "Scale", [["fit", "Least squares"], ["factor", "Factor"]]], ["factor", "Factor"]], divide: [], offset: [["add", "Add"], ["mul", "Multiply"]],
 };
 // which arguments apply (a method's own)
 const tbShown = (op, a) => (op.op === "baseline" ? { modpoly: ["order"], als: ["lambda", "p"], snip: ["width"], rubber: [] }[a.kind || "modpoly"].includes(op.k) || op.k === "kind"
@@ -7027,7 +7284,80 @@ $("#tb-one").onclick = () => {
   try { const r = tbProcess(W.y); download(`${S.ds.name} ${W.label.replace(/[^\w.-]+/g, "_")} processed.csv`, ["Raman shift (cm-1),Processed", ...Array.from(r.nu, (v, k) => `${v},${r.y[k]}`)].join("\n") + "\n", "text/csv"); }
   catch (e) { toast(e.message, "error"); }
 };
-function tbShow() { tbFillWhich(); tbOpsList(); tbRender(); setTimeout(() => { tbBefore.render(); tbAfter.render(); }, 0); }
+// --------------------------------------------------------------------------
+// axis calibration (calibrate.js): a reference material's bands fitted, the correction made a step
+// --------------------------------------------------------------------------
+const TB_CAL_STORE = "carbo-axis-cal";
+TB.cal = { ...CAL_DEFAULTS, ...((storeGet(TB_CAL_STORE) || {}).settings || {}) }; TB.calSrc = "view"; TB.calFile = null; TB.calRes = null;
+const tbCalSave = () => storeSet(TB_CAL_STORE, { settings: TB.cal });
+function tbCalForm() {
+  const c = TB.cal;
+  $("#tb-cal-std").replaceChildren(...Object.entries(CAL_STANDARDS).map(([k, v]) => el("option", { value: k }, v.label))); $("#tb-cal-std").value = c.standard;
+  $("#tb-cal-order").replaceChildren(...Object.entries(CAL_ORDERS).map(([k, v]) => el("option", { value: k }, v))); $("#tb-cal-order").value = String(c.order);
+  $("#tb-cal-custom").value = c.custom; $("#tb-cal-custom-row").classList.toggle("hidden", c.standard !== "custom"); $("#tb-cal-search").value = c.search;
+  const src = [["view", "The spectrum in view"], ...(TB.calFile ? [["file", TB.calFile.name]] : [])];
+  $("#tb-cal-src").replaceChildren(...src.map(([v, t]) => el("option", { value: v }, t))); $("#tb-cal-src").value = src.some(o => o[0] === TB.calSrc) ? TB.calSrc : "view";
+}
+$("#tb-cal-std").onchange = e => { TB.cal.standard = e.target.value; tbCalSave(); tbCalForm(); };
+$("#tb-cal-order").onchange = e => { TB.cal.order = e.target.value; tbCalSave(); if (TB.calRes) tbCalFit(); };
+$("#tb-cal-custom").onchange = e => { TB.cal.custom = e.target.value; tbCalSave(); };
+$("#tb-cal-search").onchange = e => { const v = parseFloat(e.target.value); if (v > 0) TB.cal.search = v; tbCalSave(); tbCalForm(); };
+$("#tb-cal-src").onchange = e => { TB.calSrc = e.target.value; };
+$("#tb-cal-load").onclick = () => $("#tb-cal-file").click();
+$("#tb-cal-file").onchange = async e => {
+  const f = e.target.files[0]; e.target.value = ""; if (!f) return;
+  try {
+    const R = await import("./engine/readers.js"), name = f.name.replace(/\.[^.]+$/, "");
+    if (/\.l6s$/i.test(f.name)) { const m = R.readL6s(await f.arrayBuffer(), f.name); TB.calFile = { name, nu: m.wn, y: m.y }; }
+    else {
+      // a file of several spectra: their mean
+      const m = R.readText(await f.text(), f.name), K = m.wn.length, n = m.cube.length / K, y = new Float64Array(K); let used = 0;
+      for (let p = 0; p < n; p++) { const v = m.cube.subarray(p * K, (p + 1) * K); if (v.every(Number.isFinite)) { used++; for (let k = 0; k < K; k++) y[k] += v[k]; } }
+      if (!used) throw new Error(`${f.name}: no complete spectrum`);
+      TB.calFile = { name: used > 1 ? `${name} (mean of ${used})` : name, nu: Float64Array.from(m.wn), y: y.map(v => v / used) };
+    }
+    TB.calSrc = "file"; tbCalForm(); tbCalRun();
+  } catch (err) { toast(err.message, "error", 8000); }
+};
+function tbCalRun() {
+  let src = null;
+  if (TB.calSrc === "file" && TB.calFile) src = { nu: TB.calFile.nu, y: TB.calFile.y, label: TB.calFile.name };
+  else { const W = tbSpectrum(); if (W) src = { nu: Float64Array.from(S.wn), y: W.y, label: W.label }; }
+  if (!src) { toast("Open a spectrum of the reference material, or load one.", "error"); return; }
+  const refs = calRefs(TB.cal.standard, TB.cal.custom);
+  if (!refs.length) { toast("Enter the reference bands' shifts.", "error"); return; }
+  TB.calRes = { bands: calFitBands(src.nu, src.y, refs, TB.cal), label: src.label, standard: TB.cal.standard };
+  tbCalFit();
+}
+function tbCalFit() {
+  const R = TB.calRes; R.fit = null; R.err = null;
+  try { R.fit = calFitCorrection(R.bands, TB.cal.order); } catch (e) { R.err = e.message; }
+  tbCalRender();
+}
+function tbCalRender() {
+  const R = TB.calRes, t = $("#tb-cal-table"), note = $("#tb-cal-note"), sg = (v, d = 2) => `${v >= 0 ? "+" : "−"}${Math.abs(v).toFixed(d)}`;
+  $("#tb-cal-use").disabled = !(R && R.fit);
+  if (!R) { t.replaceChildren(); note.textContent = ""; return; }
+  t.replaceChildren(el("tr", {}, ...["True", "Measured", "Δ", "After", ""].map((h, i) => el("th", { class: i ? "" : "l" }, h))),
+    ...R.bands.map(b => el("tr", { class: b.used ? "" : "warn" }, el("td", { class: "l" }, fmt(b.ref, 5)), el("td", {}, Number.isFinite(b.pos) ? `${b.pos.toFixed(2)} ± ${Math.max(b.se || 0, 0.005).toFixed(2)}` : "–"),
+      el("td", {}, Number.isFinite(b.pos) ? sg(b.ref - b.pos) : "–"), el("td", {}, R.fit && b.used ? sg(R.fit.resid[b.ref], 3) : "–"), el("td", { class: "l muted" }, b.used ? "" : b.why))));
+  if (!R.fit) { note.textContent = `${R.label}: ${R.err}.`; return; }
+  const c = R.fit.coef, f = R.fit;
+  note.textContent = `${R.label}: ${f.n} band${f.n > 1 ? "s" : ""}, ${CAL_ORDERS[f.order].toLowerCase()}. Δ = ${sg(c.shift)} cm⁻¹ at ${fmt(c.mid, 5)}${f.order >= 1 ? `, ${sg(c.stretch, 3)} per 1000 cm⁻¹` : ""}${f.order >= 2 ? `, ${sg(c.curve, 3)} per (1000 cm⁻¹)²` : ""}.${f.dof > 0 ? ` After it the bands are off by ${f.rms.toFixed(3)} cm⁻¹ (RMS).` : ""}${f.n < 3 && f.order === 0 ? " One or two bands give an offset only: a reference with bands across the range (polystyrene, cyclohexane) also corrects a stretch." : ""}`;
+}
+// the correction as the first operation (replacing an earlier one)
+function tbUseAxis(args, from) {
+  TB.ops = [{ op: "axis", on: true, args }, ...TB.ops.filter(o => o.op !== "axis")];
+  tbSave(); tbOpsList(); tbRender();
+  toast(`Axis correction from ${from} is step 1. Process every spectrum to apply it to ${S.ds ? S.ds.name : "the file"}.`, "info", 7000);
+}
+$("#tb-cal-run").onclick = () => tbCalRun();
+$("#tb-cal-use").onclick = () => {
+  const R = TB.calRes; if (!R || !R.fit) return;
+  const c = R.fit.coef, r4 = v => +v.toFixed(4);
+  tbUseAxis({ shift: r4(c.shift), stretch: r4(c.stretch), curve: r4(c.curve), mid: +c.mid.toFixed(2) }, R.label);
+};
+function tbShow() { tbFillWhich(); tbOpsList(); tbCalForm(); tbCalRender(); tbRender(); setTimeout(() => { tbBefore.render(); tbAfter.render(); }, 0); }
 
 // =========================================================================
 // report
@@ -7127,6 +7457,7 @@ async function makeReport() {
   if ($("#rp-kind").value === "mva") { ++reportRun; makeMvaReport(); return; }
   if ($("#rp-kind").value === "fit") { ++reportRun; makePeakFitReport(); return; }
   if ($("#rp-kind").value === "graphene") { ++reportRun; makeGrapheneReport(); return; }
+  if ($("#rp-kind").value === "cnt") { ++reportRun; makeCntReport(); return; }
   if ($("#rp-kind").value === "si") { ++reportRun; makeSiliconReport(); return; }
   if ($("#rp-kind").value === "id") { ++reportRun; makeIdentifyReport(); return; }
   if (!S.fit) { $("#report-paper").replaceChildren(el("p", {}, "Open and fit a map first.")); return; }
@@ -7176,8 +7507,8 @@ function repaintAll() {
   pkForm();                                       // band swatches
   for (const m of pkMaps) m._dirty = true;
   pkRender();
-  for (const m of [...grMaps, ...siMaps, ...idMaps]) m._dirty = true;
-  grRender(); siRender(); idLibList(); idRender(); tbRender();
+  for (const m of [...grMaps, ...cnMaps, ...siMaps, ...idMaps]) m._dirty = true;
+  grRender(); cnRender(); siRender(); idLibList(); idRender(); tbRender();
 }
 themeButton();
 
