@@ -1,8 +1,11 @@
-// Graphene, Silicon and Identify:  node --test tests/js/modules.test.mjs
+// Graphene, Nanotubes, Silicon, axis calibration and Identify:  node --test tests/js/modules.test.mjs
 import test from "node:test";
 import assert from "node:assert/strict";
 import { compile, fitOne, cut } from "../../web/js/peakfit.js";
 import { GRAPHENE_DEFAULTS, models as grModels, readOne as grRead, defectType } from "../../web/js/graphene.js";
+import { CNT_DEFAULTS, models as cntModels, rbmPeaks, readOne as cntRead1, gMax, preferOne } from "../../web/js/cnt.js";
+import { STANDARDS, fitBands, fitCorrection, correctAxis, referenceBands } from "../../web/js/calibrate.js";
+import { applyOps } from "../../web/js/spectra.js";
 import { SI_DEFAULTS, model as siModel, readOne as siRead, calCheck, controlLimits } from "../../web/js/silicon.js";
 import { refVectors, hits, mixture, searchAll } from "../../web/js/identify.js";
 import { prepare } from "../../web/js/layers.js";
@@ -75,4 +78,83 @@ test("identify: the right reference, its HQI, and a mixture of two", () => {
   close(mix.a === 0 ? mix.share : 1 - mix.share, want, 0.06, "share of ref 0");
   // the derivative search agrees
   assert.deepEqual(Array.from(searchAll(prep, refVectors(refs, prep, true), true).best), [1, 2, 0, 1, 1]);
+});
+
+// a BWF band as peakfit.js draws it (height h at c, width parameter w, coupling q)
+const bwf = (v, c, w, q) => { const x = 2 * (v - c) / w + q, a = 1 + q * x; return a * a / ((1 + x * x) * (1 + q * q)); };
+const withQ = r => bandsOf(r).map((b, j) => ({ ...b, q: r.D.vals[j][4], sq: r.D.ses[j][4] }));
+function cntRead(wn, y, s) {
+  const M = cntModels(s, rbmPeaks(wn, y, s)), fit = m => { const C = compile(m, wn); return { r: fitOne(C, cut(C, y)), N: C.N }; };
+  const G = fit(M.mG), G1 = fit(M.mG1), rR = M.mR ? fit(M.mR).r : null, r2 = fit(M.m2).r;
+  const one = preferOne(G.r.D.rn, G1.r.D.rn, G.N), rnG = one ? G1.r.D.rn : G.r.D.rn;
+  return { M, one, out: cntRead1(rR ? withQ(rR) : null, withQ(G.r), withQ(r2)[0], Math.max(rnG, r2.D.rn, rR ? rR.D.rn : 0), s, one ? withQ(G1.r) : null) };
+}
+
+test("nanotubes: RBM diameters, a metallic G⁻ and the diameter from the splitting read back", () => {
+  const s = { ...CNT_DEFAULTS, laser: 532 }, g = gauss(rng(11)), wn = Float64Array.from({ length: 2921 }, (_, k) => 80 + k);
+  const gm = { h: 400, c: 1550, w: 40, q: -0.25 }, gp = { h: 1500, c: 1591, w: 12 };
+  const y = Float64Array.from(wn, v => 80 + 0.01 * v + 300 * lor(v, 160, 6) + 500 * lor(v, 260, 5) + 150 * lor(v, 1340, 30)
+    + gm.h * bwf(v, gm.c, gm.w, gm.q) + gp.h * lor(v, gp.c, gp.w) + 600 * lor(v, 2680, 50) + 4 * g());
+  const { M, one, out } = cntRead(wn, y, s);
+  assert.equal(M.mR.peaks.length, 2, "two RBM bands found");
+  assert.equal(one, false, "the split G model is kept");
+  assert.equal(out.nrbm, 2);
+  close(out.prbm, 260, 0.1, "strongest RBM"); close(out.drbm, 248 / 260, 0.002, "its diameter");
+  close(out.dmean, (500 * 248 / 260 + 300 * 248 / 160) / 800, 0.01, "mean diameter");
+  assert.equal(out.type, 0, "metallic");
+  close(out.q, -0.25, 0.03, "1/Q"); close(out.pgm, 1550, 0.5, "Pos(G⁻)"); close(out.pgp, 1591, 0.1, "Pos(G⁺)");
+  close(out.dg, Math.sqrt(79.5 / 41), 0.02, "diameter from the splitting");
+  const fw = gm.w * (1 + gm.q ** 2) / (1 - gm.q ** 2), iG = gMax({ ...gm, w: fw }, gp).h;
+  close(out.igd, iG / 150, 0.05 * iG / 150, "I(G)/I(D)"); close(out.p2d, 2680, 0.3, "Pos(2D)");
+  // the laser filter's steep edge under the RBMs: both found, both read
+  const yt = Float64Array.from(wn, (v, k) => y[k] + 5000 * Math.exp(-(v - 80) / 60)), t = cntRead(wn, yt, s).out;
+  assert.equal(t.nrbm, 2); close(t.prbm, 260, 0.3, "strongest RBM on a tail");
+  // the RBM relation is applied at reading: bundles give larger diameters for the same bands
+  const b = { ...s, relation: "bundles", A: 234, B: 10 }, ob = cntRead1([{ h: 500, sh: 1, c: 260, w: 5 }], [], null, 1, b);
+  close(ob.drbm, 234 / 250, 1e-12, "bundle relation");
+});
+
+test("nanotubes: a Lorentzian G⁻ is semiconducting; one broad G band without RBMs is neither", () => {
+  const s = CNT_DEFAULTS, g = gauss(rng(12)), wn = Float64Array.from({ length: 1700 }, (_, k) => 1000 + k);
+  const y = Float64Array.from(wn, v => 60 + 300 * lor(v, 1570, 15) + 1500 * lor(v, 1591, 12) + 100 * lor(v, 1340, 30) + 400 * lor(v, 2680, 50) + 4 * g());
+  const { M, one, out } = cntRead(wn, y, s);
+  assert.equal(M.mR, null, "no RBM window: no RBM model");
+  assert.equal(one, false, "the split G model is kept");
+  assert.equal(out.type, 1, "semiconducting");
+  close(out.dg, Math.sqrt(47.7 / 21), 0.03, "diameter from the splitting");
+  // multi-wall tubes: one broad G band, a strong D
+  const y2 = Float64Array.from(wn, v => 60 + 800 * lor(v, 1582, 35) + 900 * lor(v, 1345, 45) + 300 * lor(v, 1615, 20) + 300 * lor(v, 2690, 70) + 4 * g());
+  const r2 = cntRead(wn, y2, s), o2 = r2.out;
+  assert.equal(r2.one, true, "the one-G model is kept");
+  assert.equal(o2.type, 2, "one G band");
+  close(o2.pgp, 1582, 0.3, "Pos(G)"); close(o2.wgp, 35, 0.5, "FWHM(G)");
+  assert.ok(Number.isNaN(o2.dg));
+  assert.ok(o2.idg > 0.9 && o2.idg < 1.3, `I(D)/I(G) ${o2.idg}`);
+  // where the RBM window shows no tube the caller reads every G as one band, whatever its components
+  const f = (h, c, w, q = 0) => ({ h, sh: 1, c, w, q, sq: 0.01 }), G = [f(100, 1340, 30), f(450, 1550, 45, -0.25), f(1500, 1591, 12), f(0, 1620, 10)];
+  assert.equal(cntRead1(null, G, null, 1, s).type, 0); assert.equal(cntRead1(null, G, null, 1, s, null, false).type, 2);
+});
+
+test("axis calibration: polystyrene on a shifted, stretched axis corrected back to ASTM E1840", () => {
+  const g = gauss(rng(21)), refs = STANDARDS.ps.bands, wn = Float64Array.from({ length: 3200 }, (_, k) => 200 + k);
+  // the instrument reads each band at m, where true = m + 1.5 + 0.9 (m − 1500) / 1000
+  const meas = refs.map(r => (r - 1.5 + 0.9 * 1.5) / 1.0009), heights = [300, 120, 2000, 700, 500, 600, 300, 800, 900, 1500, 1800];
+  const y = Float64Array.from(wn, v => 100 + 0.05 * v + meas.reduce((t, m, i) => t + heights[i] * lor(v, m, 7), 0) + 5 * g());
+  const bands = fitBands(wn, y, refs), used = bands.filter(b => b.used);
+  assert.equal(used.length, refs.length, `all eleven bands: ${bands.filter(b => !b.used).map(b => `${b.ref} ${b.why}`)}`);
+  const fit = fitCorrection(bands, "auto");
+  assert.equal(fit.order, 1);
+  const fixed = correctAxis(Float64Array.from(used, b => b.pos), fit.coef);
+  used.forEach((b, i) => close(fixed[i], b.ref, 0.15, `band ${b.ref}`));
+  close(correctAxis([1500], fit.coef)[0] - 1500, 1.5, 0.05, "shift at 1500");
+  assert.ok(fit.rms < 0.1, `rms ${fit.rms}`);
+  // the Toolbox step moves the axis by the same correction
+  const r = applyOps(wn, y, [{ op: "axis", args: fit.coef }]);
+  close(r.nu[1300] - wn[1300], correctAxis([wn[1300]], fit.coef)[0] - wn[1300], 1e-12, "the step");
+  // silicon: one band, an offset; a band off the spectrum is reported, not used
+  const ys = Float64Array.from(wn, v => 50 + 3000 * lor(v, 519.9, 4) + 4 * g());
+  const bs = fitBands(wn, ys, [520.7, 3500]), fs = fitCorrection(bs);
+  assert.equal(fs.order, 0); close(fs.coef.shift, 0.8, 0.02, "silicon offset");
+  assert.equal(bs.find(b => b.ref === 3500).why, "outside the spectrum");
+  assert.deepEqual(referenceBands("custom", "3054.3; 1001.4, 1602.3"), [1001.4, 1602.3, 3054.3]);
 });

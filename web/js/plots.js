@@ -272,7 +272,7 @@ export class LinesPlot extends Base {
 
 // ---------------------------------------------------------------------------
 // Points in two dimensions (the MVA tab's scores), coloured by class:
-// d = { x, y, cls, colours, xl, yl, mark }. onPick gets the nearest point.
+// d = { x, y, ey (± errors, optional), cls, colours, xl, yl, mark }. onPick gets the nearest point.
 export class ScatterPlot extends Base {
   constructor(host, { onPick = null } = {}) {
     super(host);
@@ -298,7 +298,8 @@ export class ScatterPlot extends Base {
     let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
     for (let i = 0; i < d.x.length; i++) {
       if (!Number.isFinite(d.x[i]) || !Number.isFinite(d.y[i])) continue;
-      x0 = Math.min(x0, d.x[i]); x1 = Math.max(x1, d.x[i]); y0 = Math.min(y0, d.y[i]); y1 = Math.max(y1, d.y[i]);
+      const e = d.ey && d.ey[i] > 0 ? d.ey[i] : 0;
+      x0 = Math.min(x0, d.x[i]); x1 = Math.max(x1, d.x[i]); y0 = Math.min(y0, d.y[i] - e); y1 = Math.max(y1, d.y[i] + e);
     }
     if (!(x1 > x0)) x1 = x0 + 1;
     if (!(y1 > y0)) y1 = y0 + 1;
@@ -306,6 +307,14 @@ export class ScatterPlot extends Base {
     this.S = this.axes(F, [x0 - px, x1 + px], [y0 - py, y1 + py], { yl: d.yl || "" });
     const { X, Y } = this.S, r = d.x.length > 4000 ? 1.5 : 2.5;
     ctx.save(); ctx.beginPath(); ctx.rect(F.x, F.y, F.w, F.h); ctx.clip();
+    if (d.ey) {
+      ctx.strokeStyle = T.muted; ctx.lineWidth = 1; ctx.beginPath();
+      for (let i = 0; i < d.x.length; i++) {
+        if (!(d.ey[i] > 0) || !Number.isFinite(d.x[i]) || !Number.isFinite(d.y[i])) continue;
+        const px = X(d.x[i]); ctx.moveTo(px, Y(d.y[i] - d.ey[i])); ctx.lineTo(px, Y(d.y[i] + d.ey[i]));
+      }
+      ctx.stroke();
+    }
     ctx.globalAlpha = 0.75;
     for (let i = 0; i < d.x.length; i++) {
       if (!Number.isFinite(d.x[i]) || !Number.isFinite(d.y[i])) continue;

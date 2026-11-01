@@ -144,4 +144,8 @@ test("cosmic rays: a spike goes, the top of a band eight channels wide stays", a
   assert.equal(r.spikes, 2);
   for (let k = 0; k < 400; k++) if (k !== 100 && k !== 300 && k !== 301) assert.equal(r.y[k], y[k], `channel ${k} changed`);
   assert.ok(Math.abs(r.y[100] - clean[100]) < 40 && Math.abs(r.y[300] - clean[300]) < 40);
+  // silicon on a coarse axis (2 cm⁻¹ a channel: FWHM 2 channels) has wings, so its top stays
+  const xc = Float64Array.from({ length: 200 }, (_, k) => 320 + 2 * k), yc = Float64Array.from(xc, v => 200 + 3000 / (1 + (2 * (v - 520.7) / 4) ** 2) + 8 * g());
+  const rc = despikeSpectrum(yc);
+  assert.equal(rc.spikes, 0); assert.deepEqual(Array.from(rc.y), Array.from(yc));
 });
