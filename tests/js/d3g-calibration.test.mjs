@@ -3,7 +3,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { BANDS, SC_SETTINGS, PRESET_21OCT, noiseSigma, despike, savgol, prepare, boxSolver, unmix, freeFits, calibrate, standards,
          blocksOf, blockMedian, compareMedians, mapBlock, stageBlock, toJSON, fromJSON, shapeArea,
-         medianSpectrumBand, refineOnMedian, standardRatio, scaleIndex } from "../../web/js/d3g-calibration.js";
+         medianSpectrumBand, refineOnMedian, standardRatio, scaleIndex, attribution } from "../../web/js/d3g-calibration.js";
 import { rng } from "../../web/js/pf-analysis.js";
 
 const near = (a, b, tol, msg) => assert.ok(Math.abs(a - b) <= tol, `${msg ?? ""} ${a} vs ${b}`);
@@ -161,6 +161,29 @@ test("without D3 the median spectrum finds none, and glassy carbon's shape stays
   assert.ok(!r.median.present, `z ${r.median.z}`);
   assert.equal(r.shapes.D3, per.D3);
   assert.equal(r.shapes.D3.pos, prev.D3.pos);
+});
+
+// where the D3 comes from: a core with none against a coated map, then a core that has its own
+test("attribution: the coating's D3 is told from a core's, with the core's detection limit", () => {
+  const shapes = PRESET_21OCT.steps[2].shapes, core = weakD3Map(0, 400, 41), coated = weakD3Map(8, 400, 43);
+  const a = attribution(coated, coated.carbon, core, core.carbon, shapes);
+  assert.equal(a.kind, "coating");
+  assert.ok(!a.ref.test.present && a.sample.test.present, `z core ${a.ref.test.z}, coated ${a.sample.test.z}`);
+  near(a.sample.test.pos, 1500, 6, "the coating's band"); near(a.sample.test.fwhm, 160, 20);
+  // the limit sits below the coating's D3/G (8/150) and above zero; the core's held-shape value is near 0 here
+  assert.ok(a.ref.limit > 0 && a.ref.limit < 8 / 150, `limit ${a.ref.limit}`);
+  near(a.sample.held, 8 / 150, 0.006, "held-shape D3/G of the median spectrum");
+  // the scaled spectra (smoothed for display, which leaves a band as broad as D1 alone): at D1's
+  // position, every band's share of G there
+  const at = (o, x) => o.y[o.nu.findIndex(v => v >= x)], x1 = shapes.D1.pos, truth = { ...shapes, D3: { pos: 1500, fwhm: 160 } };
+  const want = [["D4", 2], ["D1", 40], ["D3", 8], ["G", 150], ["D2", 15]].reduce((t, [k, h]) => t + h / 150 * (k === "D3" ? gau(x1, truth[k].pos, truth[k].fwhm) : lor(x1, truth[k].pos, truth[k].fwhm)), 0);
+  near(at(a.sample, x1), want, 0.01, "D1 over G");
+  // a core with D3 of its own: about 3/8 of the sample's
+  const own = weakD3Map(3, 400, 47), b = attribution(coated, coated.carbon, own, own.carbon, shapes);
+  assert.equal(b.kind, "core");
+  near(b.coreShare, 3 / 8, 0.08, "the core's share");
+  // a sample without D3
+  assert.equal(attribution(core, core.carbon, own, own.carbon, shapes).kind, "none");
 });
 
 test("glassy carbon's ratio with held shapes, and the scale from the uncoated reference to it", () => {
