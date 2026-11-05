@@ -19,7 +19,7 @@ import { rng, wilson, weightedQuantile, laCancado, robustScale, bestGmm, bootstr
          kruskalWallis, brownForsythe, groupGap, thinTail, mixtureCoverage, olsHC3, nForMean, nForSpread, tQuantile } from "./pf-analysis.js";
 import { PRESET_21OCT, SC_SETTINGS, BANDS as D3G_BANDS, prepare as d3gPrepare, unmix, freeFits, calibrate, standards as d3gStandards,
          blocksOf, blockMedian, compareMedians, mapBlock, stageBlock, toJSON as calToJSON, fromJSON as calFromJSON,
-         refineOnMedian, standardRatio, scaleIndex } from "./d3g-calibration.js";
+         refineOnMedian, standardRatio, scaleIndex, attribution as d3gAttribution } from "./d3g-calibration.js";
 import { DLC_DEFAULTS, DLC_PARAMS, SE_KEYS as DLC_SE_KEYS, STATUS as DLC_STATUS, FLAG as DLC_FLAG, prepare as dlcPrepare, fitMean as dlcFitMean,
          fitSpectra as dlcFitSpectra, makeFitter as dlcFitter, components as dlcComponents, bwfFwhm, qcTest, paramStats, homogeneity, homogeneityLevel } from "./dlc.js";
 import { MVA_DEFAULTS, METHODS, runMva, identify, compareLoadings } from "./mva.js";
@@ -2362,7 +2362,7 @@ $("#side-file").onchange = async e => {
 // file. Every carbon spectrum's five heights and background are solved with the positions and widths
 // held, so the median I(D3)/I(G) compares between samples, and against an uncoated reference fitted
 // the same way. The work runs once per file and calibration step, and is kept.
-const D3G = { cals: [PRESET_21OCT], pick: "0:2", std: {}, prep: new Map(), res: new Map(), cmp: new Map(), check: new Map(), running: new Set(), building: false };
+const D3G = { cals: [PRESET_21OCT], pick: "0:2", std: {}, prep: new Map(), res: new Map(), cmp: new Map(), check: new Map(), attr: new Map(), running: new Set(), building: false };
 
 function d3gFill(sel, opts, want) {
   const ids = opts.map(o => o[0]).join("|"), keep = want ?? sel.value;
@@ -7426,6 +7426,18 @@ async function reportAnalysis() {
       bands: D3G_BANDS.map(b => ({ name: b, pos: sh[b].pos, fwhm: sh[b].fwhm, shape: set.bands[b].shape,
         from: /^median spectrum/.test(sh[b].note || "") ? "median spectrum" : sh[b].support > 1 ? `median of ${fmt(sh[b].support)} spectra` : sh[b].note || "" })) };
   } else A.calib = { missing: Z.pending ? "Still fitting the heights: refresh the report in a moment." : Z.missing || "Not available." };
+
+  // where the amorphous carbon comes from: D3 fitted freely on the median spectrum of the sample and
+  // of its uncoated reference (the reference's spectra are needed, not only its median)
+  if (Z.res && Z.ref && Z.ref.n && Z.cmp) {
+    const k = `${Z.res.key}~${Z.ref.key}`;
+    if (!D3G.attr.has(k)) D3G.attr.set(k, d3gAttribution(Z.res.prep, d3gList(Z.res.prep), Z.ref.prep, d3gList(Z.ref.prep), Z.ch.step.shapes));
+    const a = D3G.attr.get(k), t = x => ({ z: x.test.z, pos: x.test.pos, fwhm: x.test.fwhm, h: x.test.h / x.test.hG, posLim: x.test.posLim, wLim: x.test.wLim, present: x.test.present });
+    A.attr = { kind: a.kind, coreShare: a.coreShare, unit: Z.unit, dp: Z.dp, present: Z.res.prep.settings.present, d3: Z.ch.step.shapes.D3,
+      sample: { name: Z.cur.name, n: a.sample.n, held: a.sample.held, nu: a.sample.nu, y: a.sample.y, ...t(a.sample), median: Z.M.median, lo: Z.M.lo, hi: Z.M.hi },
+      ref: { name: Z.refName, n: a.ref.n, held: a.ref.held, nu: a.ref.nu, y: a.ref.y, ...t(a.ref), limit: a.ref.limit, median: Z.ref.med.median, lo: Z.ref.med.lo, hi: Z.ref.med.hi },
+      cmp: { diff: Z.cmp.diff, lo: Z.cmp.lo, hi: Z.cmp.hi } };
+  } else A.attr = { missing: !Z.res ? "" : Z.ref && !Z.ref.n ? `${Z.refName} has no carbon spectra.` : "Choose the uncoated reference as an open file under Particles › D3/G calibration (not a median typed in): the test needs its spectra." };
 
   // coverage against the uncoated reference: how many particles, or how much of the area, carry the coating
   const R = S.covR, refName = $("#cov-ref").value ? (fileOf($("#cov-ref").value) || {}).name : "";

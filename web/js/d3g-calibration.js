@@ -391,8 +391,35 @@ export function medianSpectrumBand(prep, list, init, band, settings = prep.setti
   const noise = Math.max(U.rmse[0], sMed), w = settings.bands[band], at = (v, a, b) => Math.abs(v - a) <= 0.05 || Math.abs(v - b) <= 0.05;
   const h = f.h[j], pos = f.c[j], fwhm = f.w[j], z = h / noise, present = z >= settings.present && f.r2[0] > 0.5;
   const posLim = at(pos, w.pos_min, w.pos_max), wLim = at(fwhm, w.width_min, w.width_max);
-  return { n: list.length, h, pos, fwhm, z, r2: f.r2[0], noise, present, posLim, wLim,
+  return { n: list.length, h, pos, fwhm, z, r2: f.r2[0], noise, present, posLim, wLim, hG: f.h[BANDS.indexOf("G")],
            shape: present ? { pos: posLim ? init[band].pos : pos, fwhm: wLim ? init[band].fwhm : fwhm } : null };
+}
+
+// Where a sample's D3 comes from, against its uncoated reference: D3 fitted freely on the median
+// spectrum of each (medianSpectrumBand, from the held shapes). Where the reference shows no D3 band,
+// its held-shape I(D3)/I(G) is what the fixed broad D3 takes up of the misfit in the D1-G valley:
+// the method's floor on that material, not amorphous carbon. The smallest D3 its test would have
+// found, `present` x that fit's noise over its G, is the most the core can hold unseen. kind:
+// "coating" (a D3 band in the sample, none in the reference), "core" (the reference has one too;
+// coreShare its held-shape I(D3)/I(G) over the sample's) or "none" (no D3 band in the sample).
+// Each median spectrum also comes with the held-shape background off, scaled to G and smoothed
+// (Savitzky-Golay 11/2: a median of whole counts moves in whole counts), for a figure.
+export function attribution(sPrep, sList, rPrep, rList, shapes) {
+  const init = Object.fromEntries(BANDS.map(b => [b, { pos: shapes[b].pos, fwhm: shapes[b].fwhm }])), jG = BANDS.indexOf("G");
+  const one = (prep, list) => {
+    const s = prep.settings, test = medianSpectrumBand(prep, list, init, "D3"), med = medianSpectrum(prep, list);
+    const U = unmix({ nu: prep.nu, N: prep.N, Y: med, settings: s }, shapes, [0]), hG = U.h[jG];
+    const [lo, hi] = s.range, mid = (lo + hi) / 2, half = (hi - lo) / 2;
+    const y = savgol(Float64Array.from(med, (v, n) => {
+      const t = (prep.nu[n] - mid) / half; let b = 0, p = 1;
+      for (let k = 0; k < U.nbase; k++) { b += U.base[k] * p; p *= t; }
+      return (v - b) / hG;
+    }), 11, 2);
+    return { n: list.length, test, held: U.ratio["ID3/IG"][0], limit: s.present * test.noise / test.hG, nu: prep.nu, y };
+  };
+  const sample = one(sPrep, sList), ref = one(rPrep, rList);
+  const kind = !sample.test.present ? "none" : ref.test.present ? "core" : "coating";
+  return { sample, ref, kind, coreShare: kind === "core" ? ref.held / sample.held : 0 };
 }
 
 // One calibration step's shapes with band refined on the median spectrum where the spectrum-by-

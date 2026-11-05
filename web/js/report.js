@@ -1,7 +1,8 @@
 // Printable report from the current state (Print -> Save as PDF): the results at a glance, how
 // many particles (or how much area) carry the coating against the uncoated reference, the
-// calibrated D3/G and the analysis in a few plain questions, then the maps, spectra, quality and
-// configuration. Charts are inline SVG so they print sharply.
+// calibrated D3/G and where its amorphous carbon comes from, the analysis in a few plain
+// questions, then the maps, spectra, quality and configuration. Charts are inline SVG so they
+// print sharply.
 
 import { el, fmt } from "./util.js";
 
@@ -136,6 +137,106 @@ function calibrationSection(A) {
     el("p", { class: "note" }, `Median over spectra whose G stands at least 10 × their noise; the interval resamples whole blocks of neighbouring spectra. The fixed shapes leave a residual of ${C.rn.toFixed(2)} × the noise.`)];
 }
 
+// --------------------------------------------------------------------------
+// where the amorphous carbon comes from (Particles › D3/G calibration with an uncoated reference file)
+// --------------------------------------------------------------------------
+// the three panels: (a) both median spectra, background off and scaled to G, with each one's free D3
+// band; (b) that band's height over the fit's residual against the threshold; (c) I(D3)/I(G) with the
+// held shapes, both medians with their intervals, the reference's detection limit and the coating's part
+function attributionFigure(T) {
+  const W = 600, H = 292, g = sv("svg", { viewBox: `0 0 ${W} ${H}`, class: "chart", role: "img", "aria-label": "Where the amorphous carbon comes from" });
+  const S = T.sample, R = T.ref, cS = COL.coated, cR = COL.uncoated, title = (x, y, t) => g.append(sv("text", { x, y, class: "lbl", "font-weight": 700 }, t));
+  // (a) spectra
+  const aL = 46, aR = 352, aT = 26, aB = 238, x0 = 1000, x1 = 1800, yMax = 0.45;
+  const X = v => aL + (v - x0) / (x1 - x0) * (aR - aL), Y = v => aB - Math.max(-0.02, Math.min(yMax, v)) / yMax * (aB - aT);
+  title(aL - 40, 12, "a  Median spectra, scaled to G");
+  g.append(sv("defs", {}, sv("clipPath", { id: "rp-attr-clip" }, sv("rect", { x: aL, y: aT, width: aR - aL, height: aB - aT }))));
+  for (const t of [0, 0.1, 0.2, 0.3, 0.4]) {
+    g.append(sv("line", { x1: aL, x2: aR, y1: Y(t), y2: Y(t), stroke: COL.grid, "stroke-width": 1 }));
+    g.append(sv("text", { x: aL - 5, y: Y(t) + 3.5, "text-anchor": "end", class: "tk" }, t.toFixed(1)));
+  }
+  for (const v of [1000, 1200, 1400, 1600, 1800]) g.append(sv("text", { x: X(v), y: aB + 16, "text-anchor": "middle", class: "tk" }, String(v)));
+  g.append(sv("text", { x: (aL + aR) / 2, y: aB + 30, "text-anchor": "middle", class: "lb" }, "Raman shift (cm⁻¹)"));
+  g.append(sv("text", { x: 10, y: (aT + aB) / 2, "text-anchor": "middle", class: "lb", transform: `rotate(-90 10 ${(aT + aB) / 2})` }, "Intensity / I(G)"));
+  const path = (nu, y) => Array.from(nu, (v, n) => `${n ? "L" : "M"}${X(v).toFixed(1)},${Y(y[n]).toFixed(1)}`).join("");
+  const band = (o, k) => { const xs = Array.from({ length: 161 }, (_, i) => x0 + i * 5); return xs.map((v, i) => `${i ? "L" : "M"}${X(v).toFixed(1)},${Y(o.h * Math.exp(-4 * Math.LN2 * ((v - o.pos) / o.fwhm) ** 2) * k).toFixed(1)}`).join(""); };
+  const clip = sv("g", { "clip-path": "url(#rp-attr-clip)" });
+  clip.append(sv("path", { d: path(R.nu, R.y), fill: "none", stroke: cR, "stroke-width": 1.6 }), sv("path", { d: path(S.nu, S.y), fill: "none", stroke: cS, "stroke-width": 1.6 }));
+  if (S.h > 0) clip.append(sv("path", { d: band(S, 1), fill: "none", stroke: cS, "stroke-width": 1.4, "stroke-dasharray": "5 3" }));
+  if (R.h > 0) clip.append(sv("path", { d: band(R, 1), fill: "none", stroke: cR, "stroke-width": 1.4, "stroke-dasharray": "5 3" }));
+  g.append(clip);
+  g.append(sv("text", { x: X(1580), y: aT - 3, "text-anchor": "middle", class: "tk" }, "G = 1 ↑"));
+  const leg = [[cS, "", "this sample"], [cR, "", "uncoated reference"], [COL.faint, "5 3", "free D3 band of each"]];
+  leg.forEach(([c, d, t], i) => {
+    const y = aT + 12 + i * 14;
+    g.append(sv("line", { x1: aL + 8, x2: aL + 28, y1: y - 3, y2: y - 3, stroke: c, "stroke-width": 1.8, "stroke-dasharray": d || null }));
+    g.append(sv("text", { x: aL + 32, y, class: "tk", fill: COL.ink }, t));
+  });
+  // (b) the D3 band test
+  // the value in its own column right of the bars; the threshold drawn across the bars only
+  const bL = 412, bR = 540, zMax = Math.max(6, Math.ceil(Math.max(S.z, R.z, T.present) + 1)), Z = v => bL + Math.max(0, Math.min(zMax, v)) / zMax * (bR - bL);
+  title(366, 12, "b  D3 band found?");
+  [[R, cR, "Uncoated"], [S, cS, "Sample"]].forEach(([o, c, name], i) => {
+    const y = 26 + i * 46;
+    g.append(sv("text", { x: bL - 6, y: y + 10, "text-anchor": "end", class: "lbl" }, name));
+    g.append(sv("rect", { x: bL, y, width: bR - bL, height: 13, rx: 3, fill: COL.track }));
+    g.append(sv("rect", { x: bL, y, width: Math.max(0, Z(o.z) - bL), height: 13, rx: 3, fill: c }, sv("title", {}, `${name}: D3 height ${o.z.toFixed(1)} × the fit's residual`)));
+    g.append(sv("text", { x: bR + 6, y: y + 10, class: "val" }, `${o.z.toFixed(1)} ×`));
+    g.append(sv("line", { x1: Z(T.present), x2: Z(T.present), y1: y - 3, y2: y + 16, stroke: COL.ink, "stroke-width": 1.4, "stroke-dasharray": "3 2" }));
+    g.append(sv("text", { x: bL, y: y + 27, class: "tk", fill: COL.ink }, `${o.present ? "band" : "none"}: FWHM ${Math.round(o.fwhm)} cm⁻¹ at ${Math.round(o.pos)}${o.posLim ? " (limit)" : ""}`));
+  });
+  g.append(sv("text", { x: bL, y: 112, class: "tk" }, `dashed: ${T.present} × makes a band`));
+  // (c) I(D3)/I(G)
+  const cL = 412, cR2 = 590, vMax = Math.max(S.hi, R.hi, R.limit) * 1.18 || 0.1, V = v => cL + Math.max(0, Math.min(vMax, v)) / vMax * (cR2 - cL);
+  title(366, 146, "c  I(D3)/I(G), held shapes");
+  const e10 = 10 ** Math.floor(Math.log10(vMax / 3)), stp = [1, 2, 5, 10].map(m => m * e10).find(s => vMax / s <= 4), ticks = Array.from({ length: Math.floor(vMax / stp + 1e-9) + 1 }, (_, i) => +(i * stp).toPrecision(3));
+  for (const t of ticks) { g.append(sv("line", { x1: V(t), x2: V(t), y1: 156, y2: 226, stroke: COL.grid, "stroke-width": 1 })); g.append(sv("text", { x: V(t), y: 238, "text-anchor": "middle", class: "tk" }, String(t))); }
+  g.append(sv("line", { x1: V(R.limit), x2: V(R.limit), y1: 154, y2: 228, stroke: cR, "stroke-width": 1.2, "stroke-dasharray": "4 3" }));
+  g.append(sv("text", { x: V(R.limit), y: 250, "text-anchor": "middle", class: "tk" }, "uncoated detection limit"));
+  [[R, cR, "Uncoated", 170], [S, cS, "Sample", 206]].forEach(([o, c, name, y]) => {
+    g.append(sv("text", { x: cL - 6, y: y + 4, "text-anchor": "end", class: "lbl" }, name));
+    g.append(sv("line", { x1: V(o.lo), x2: V(o.hi), y1: y, y2: y, stroke: c, "stroke-width": 2 }));
+    g.append(sv("circle", { cx: V(o.median), cy: y, r: 4, fill: c }, sv("title", {}, `${name}: ${fx(o.median, T.dp)} (95 % CI ${fx(o.lo, T.dp)}–${fx(o.hi, T.dp)})`)));
+  });
+  // the coating's part: from the reference's median to the sample's
+  const yb = 188;
+  g.append(sv("line", { x1: V(R.median), x2: V(S.median), y1: yb, y2: yb, stroke: COL.ink, "stroke-width": 1 }));
+  g.append(sv("text", { x: (V(R.median) + V(S.median)) / 2, y: yb - 4, "text-anchor": "middle", class: "tk", fill: COL.ink }, `${sgn(T.cmp.diff, T.dp)}`));
+  // the caption line under (a)
+  g.append(sv("text", { x: aL - 40, y: H - 10, class: "tk" }, "Background off with the held shapes, smoothed for display (Savitzky-Golay, 11 points); dashed: each one's free D3."));
+  return g;
+}
+
+function attributionSection(A) {
+  const T = A.attr;
+  if (!T || T.missing) return [el("div", { class: "callout" }, el("b", {}, "Not tested. "), (T && T.missing) || "Run the D3/G calibration with an uncoated reference first.")];
+  const S = T.sample, R = T.ref, dp = T.dp, f1 = v => v.toFixed(1), at = o => `${f1(o.pos)} cm⁻¹${o.posLim ? " (on the window's limit)" : ""}, ${Math.round(o.fwhm)} cm⁻¹ wide`;
+  const excess = T.cmp.lo > 0, d3 = T.d3;
+  let head, lead;
+  if (T.kind === "none") {
+    head = "No amorphous-carbon band stands out in this sample.";
+    lead = `A free fit on the median of its ${fmt(S.n)} carbon ${T.unit} finds D3 at only ${f1(S.z)} × the fit's residual (${T.present} × counts as a band).`;
+  } else if (T.kind === "core") {
+    head = "Part of the amorphous carbon is the uncoated material's own.";
+    lead = `The uncoated reference carries a D3 band too (${at(R)}, ${f1(R.z)} × the residual), so about ${pct(T.coreShare)} of this sample's I(D3)/I(G) is already there without a coating; the coating adds ${sgn(T.cmp.diff, dp)} (95 % CI ${fx(T.cmp.lo, dp)} to ${fx(T.cmp.hi, dp)}).`;
+  } else if (!excess) {
+    head = "The sample shows a D3 band, but no more D3 than the uncoated reference.";
+    lead = `Its band: ${at(S)}, ${f1(S.z)} × the residual. Its I(D3)/I(G) differs from the reference's by ${sgn(T.cmp.diff, dp)} (95 % CI ${fx(T.cmp.lo, dp)} to ${fx(T.cmp.hi, dp)}), within the measurement's spread.`;
+  } else {
+    head = "The amorphous-carbon (D3) band comes from the coating.";
+    lead = `On the median of the ${fmt(S.n)} carbon ${T.unit} of this sample, a free fit finds a D3 band at ${at(S)}, ${f1(S.z)} × the fit's residual: the shape of the calibration's D3 (${f1(d3.pos)} / ${Math.round(d3.fwhm)} cm⁻¹, from glassy carbon). ` +
+      `The uncoated reference (${R.name}, ${fmt(R.n)} ${T.unit}) shows none: its fit puts only a ${Math.round(R.fwhm)} cm⁻¹ shoulder at ${f1(R.pos)} cm⁻¹${R.posLim ? " on the window's limit" : ""}, ${f1(R.z)} × the residual, under the ${T.present} × a band needs. ` +
+      `Above the reference the sample's I(D3)/I(G) rises by ${sgn(T.cmp.diff, dp)} (95 % CI ${fx(T.cmp.lo, dp)} to ${fx(T.cmp.hi, dp)}): that part is the coating's.`;
+  }
+  const kids = [el("p", { class: "lead" }, el("b", {}, `${head} `), lead), attributionFigure(T)];
+  if (T.kind === "coating" && excess)
+    kids.push(el("p", { class: "note" }, `What the test cannot rule out: with the held shapes the uncoated reference still reads ${fx(R.median, dp)}, at the level of its detection limit (${fx(R.limit, dp)}: a D3 band that small would stand under ${T.present} × the residual). ` +
+      `It is the fixed broad D3 taking up the misfit between D1 and G, or amorphous carbon too little to show. Either way it is at most ${pct(R.median / S.median)} of this sample's ${fx(S.median, dp)}; the rest, ${pct(1 - R.median / S.median)}, is the coating's.`));
+  kids.push(el("p", { class: "note" }, `How: the element-wise median of each file's carbon ${T.unit}; D3 is fitted on it with every band free in its S Carbon window, from the held shapes, and counts as a band when its height is at least ${T.present} × the larger of the fit's residual and the median's own noise (as in a calibration build). ` +
+    "The detection limit is that height over the free fit's G. The medians in (c) and their intervals are those of Calibrated D3/G (whole blocks of neighbouring spectra resampled). The test compares this sample with one uncoated reference: it speaks for the reference's material, measured alike."));
+  return kids;
+}
+
 // the analysis in a few plain questions
 function statsSummary(A) {
   const rows = [], U = A.uni, V = A.cov, C = A.calib, checks = [];
@@ -145,6 +246,12 @@ function statsSummary(A) {
     if (C.cmp) row("More than the uncoated reference?", C.cmp.lo > 0 ? `Yes, ${C.cmp.ratio.toFixed(2)} ×` : C.cmp.hi < 0 ? "No, less" : "Not clearly",
       `${sgn(C.cmp.diff, C.dp)} (95 % CI ${fx(C.cmp.lo, C.dp)} to ${fx(C.cmp.hi, C.dp)})`);
     if (C.rn > 2) checks.push(`the fixed band shapes fit these spectra less closely (residual ${C.rn.toFixed(1)} × the noise)`);
+  }
+  const T = A.attr;
+  if (T && !T.missing) {
+    const ans = T.kind === "none" ? "No D3 band" : T.kind === "core" ? "Partly the uncoated material" : T.cmp.lo > 0 ? "The coating" : "Not told apart";
+    row("Where does the amorphous carbon come from?", ans, T.kind === "core" ? `about ${pct(T.coreShare)} is already in the uncoated reference`
+      : `D3 band ${T.sample.z.toFixed(1)} × the residual here, ${T.ref.z.toFixed(1)} × in the uncoated reference (${T.present} × counts)${T.kind === "coating" && T.cmp.lo > 0 ? `; at least ${pct(1 - T.ref.median / T.sample.median)} of the D3 signal is the coating's` : ""}`);
   }
   if (V && V.mode === "pf") {
     row("How many particles are coated?", `${fmt(V.x)} of ${fmt(V.n)} (${pct(V.c, 1)})`, `at least ${pct(V.lower, 1)} (95 % confidence), compared with the uncoated reference`);
@@ -185,6 +292,7 @@ export function buildReport(host, R) {
     host.append(sec(n++, "At a glance", glance(A)));
     host.append(sec(n++, pf ? "Particles covered by the coating" : "Area covered by the coating", ...coverageSection(A)));
     host.append(sec(n++, "Calibrated D3/G", ...calibrationSection(A)));
+    if (A.attr && A.attr.missing !== "") host.append(sec(n++, "Where the amorphous carbon comes from", ...attributionSection(A)));
     host.append(sec(n++, "Statistical analysis: summary", ...statsSummary(A)));
   }
 
