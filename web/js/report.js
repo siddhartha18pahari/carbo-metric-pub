@@ -77,8 +77,8 @@ function particleBars(rows) {
 // --------------------------------------------------------------------------
 function glance(A) {
   const C = A.calib, V = A.cov, U = A.uni, out = [];
-  out.push(C && !C.missing ? tile("D3/G (amorphous carbon)", fx(C.median, C.dp), `median · 95 % CI ${fx(C.lo, C.dp)}–${fx(C.hi, C.dp)} · ${fmt(C.n)} carbon ${C.unit}`, null, `calibrated: ${C.name}`)
-    : tile("D3/G (amorphous carbon)", "–", C && C.missing ? C.missing : "not run"));
+  out.push(C && !C.missing ? tile(bandTitle(C), fx(C.median, C.dp), `median · 95 % CI ${fx(C.lo, C.dp)}–${fx(C.hi, C.dp)} · ${fmt(C.n)} carbon ${C.unit}`, null, `calibrated: ${C.name}`)
+    : tile(bandTitle(C), "–", C && C.missing ? C.missing : "not run"));
   out.push(C && C.cmp ? tile("Against the uncoated reference", `${C.cmp.ratio.toFixed(2)} ×`, `${sgn(C.cmp.diff, C.dp)} (95 % CI ${fx(C.cmp.lo, C.dp)} to ${fx(C.cmp.hi, C.dp)})`, null, C.ref ? C.ref.name : "")
     : tile("Against the uncoated reference", "–", "no uncoated reference chosen"));
   if (V && V.mode === "pf") out.push(tile("Particles coated", `${fmt(V.x)} of ${fmt(V.n)}`, `${pct(V.c, 1)} have more D3 than the uncoated reference`, null,
@@ -125,10 +125,14 @@ function coverageSection(A) {
   return kids;
 }
 
+// the band the Particles tab reads (D3 unless chosen otherwise)
+const bandOf = C => (C && C.band) || "D3";
+const bandTitle = C => (bandOf(C) === "D3" ? "D3/G (amorphous carbon)" : `${bandOf(C)}/G`);
+
 function calibrationSection(A) {
   const C = A.calib;
-  if (!C || C.missing) return [el("div", { class: "callout" }, el("b", {}, "Calibrated D3/G not available. "), (C && C.missing) || "Open the Particles tab once to run it.")];
-  return [el("p", { class: "lead" }, el("b", {}, `D3/G ${fx(C.median, C.dp)} (95 % CI ${fx(C.lo, C.dp)}–${fx(C.hi, C.dp)})`),
+  if (!C || C.missing) return [el("div", { class: "callout" }, el("b", {}, `Calibrated ${bandOf(C)}/G not available. `), (C && C.missing) || "Open the Particles tab once to run it.")];
+  return [el("p", { class: "lead" }, el("b", {}, `${bandOf(C)}/G ${fx(C.median, C.dp)} (95 % CI ${fx(C.lo, C.dp)}–${fx(C.hi, C.dp)})`),
       ` over ${fmt(C.n)} carbon ${C.unit} of ${fmt(C.measured)}, with the band shapes of ${C.name} held so the value compares between samples.` +
       (C.cmp ? ` That is ${C.cmp.ratio.toFixed(2)} × the uncoated reference (${fx(C.refMed, C.dp)}), a difference of ${sgn(C.cmp.diff, C.dp)} (95 % CI ${fx(C.cmp.lo, C.dp)} to ${fx(C.cmp.hi, C.dp)}): ` +
         (C.cmp.lo > 0 ? "more amorphous carbon than the reference." : C.cmp.hi < 0 ? "less than the reference." : "not told apart from the reference.") : " No uncoated reference was chosen to compare with.")),
@@ -237,12 +241,26 @@ function attributionSection(A) {
   return kids;
 }
 
+// the band over G read with the Carbon fit's own heights and with the calibration's, on the same spectra
+function calCompareSection(A) {
+  const K = A.calCmp;
+  if (K.missing) return [el("div", { class: "callout" }, el("b", {}, "Not compared. "), K.missing)];
+  const rl = `I(${K.band})/I(G)`, d3 = v => fx(v, 4), shift = K.free ? K.diff / K.free : NaN;
+  return [el("p", { class: "lead" }, el("b", {}, `${rl} ${d3(K.free)} without the calibration, ${d3(K.cal)} with it `), `(medians over the same ${fmt(K.n)} ${K.unit}). `,
+      `The calibration moves a ${K.unit === "particles" ? "particle" : "spectrum"}'s value by ${sgn(K.diff, 4)} (median${Number.isFinite(shift) ? `, ${sgn(100 * shift, 0)} %` : ""}), up in ${pct(K.up)} of them, ` +
+      `and the two rank them ${K.rho > 0.7 ? "alike" : K.rho > 0.4 ? "partly alike" : "differently"} (Spearman ρ ${fmt(K.rho, 2)}).`),
+    el("div", { class: "figs" }, img(K.maps[0].url, `Without the calibration: the Carbon fit tab's own heights. One colour scale for both maps, ${d3(K.range[0])} to ${d3(K.range[1])}.`),
+      img(K.maps[1].url, `With the calibration: ${K.name}. Same colour scale.`)),
+    el("div", { class: "figs" }, img(K.maps[2].url, `Difference, calibrated minus not: blue where the calibration reads lower, red where higher, white unchanged (scale ± ${d3(K.dm)}).`),
+      el("p", { class: "note" }, `Only ${K.unit} whose G stands at least 10 × their residual in both fits. Without the calibration every band's position and width are the Carbon fit's own (held from the mean spectrum where a single spectrum cannot set them); with it they are the calibration's, the same on every sample, so only the calibrated value compares between samples measured on other days.`))];
+}
+
 // the analysis in a few plain questions
 function statsSummary(A) {
   const rows = [], U = A.uni, V = A.cov, C = A.calib, checks = [];
   const row = (q, a, d) => rows.push(el("tr", {}, el("td", {}, q), el("td", {}, a), el("td", {}, d)));
   if (C && !C.missing) {
-    row("How much amorphous carbon (D3/G)?", fx(C.median, C.dp), `median, 95 % CI ${fx(C.lo, C.dp)}–${fx(C.hi, C.dp)}`);
+    row(bandOf(C) === "D3" ? "How much amorphous carbon (D3/G)?" : `How much ${bandOf(C)} (${bandOf(C)}/G)?`, fx(C.median, C.dp), `median, 95 % CI ${fx(C.lo, C.dp)}–${fx(C.hi, C.dp)}`);
     if (C.cmp) row("More than the uncoated reference?", C.cmp.lo > 0 ? `Yes, ${C.cmp.ratio.toFixed(2)} ×` : C.cmp.hi < 0 ? "No, less" : "Not clearly",
       `${sgn(C.cmp.diff, C.dp)} (95 % CI ${fx(C.cmp.lo, C.dp)} to ${fx(C.cmp.hi, C.dp)})`);
     if (C.rn > 2) checks.push(`the fixed band shapes fit these spectra less closely (residual ${C.rn.toFixed(1)} × the noise)`);
@@ -291,7 +309,8 @@ export function buildReport(host, R) {
   if (A) {
     host.append(sec(n++, "At a glance", glance(A)));
     host.append(sec(n++, pf ? "Particles covered by the coating" : "Area covered by the coating", ...coverageSection(A)));
-    host.append(sec(n++, "Calibrated D3/G", ...calibrationSection(A)));
+    host.append(sec(n++, `Calibrated ${bandOf(A.calib)}/G`, ...calibrationSection(A)));
+    if (A.calCmp) host.append(sec(n++, "With and without the calibration", ...calCompareSection(A)));
     if (A.attr && A.attr.missing !== "") host.append(sec(n++, "Where the amorphous carbon comes from", ...attributionSection(A)));
     host.append(sec(n++, "Statistical analysis: summary", ...statsSummary(A)));
   }

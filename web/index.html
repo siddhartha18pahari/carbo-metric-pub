@@ -36,6 +36,7 @@
     <button data-tab="files">Files</button>
     <button data-tab="splat">Splat&nbsp;3D</button>
     <button data-tab="particles">Particles</button>
+    <button data-tab="pspec" title="ParticleFinder: every particle's spectrum with its fitted bands, its band over G (with and without the calibration) and its coverage">Particle spectra</button>
     <button data-tab="dlc" title="Diamond-like carbon coatings: D and G fit, hydrogen content, quality test, homogeneity">DLC</button>
     <button data-tab="layers" title="Multilayer films: the materials, order and thickness of each layer, across a cut edge or in depth">Layers</button>
     <button data-tab="mva" title="Multivariate analysis: PCA, MCR, K-means and HCA, with images by CLS">MVA</button>
@@ -300,12 +301,19 @@
           <div class="plot" id="pf-spec"><canvas></canvas></div>
         </div>
         <div class="panel col">
-          <div class="panel-h"><select id="pf-dist" class="inline"><option value="funnel">Coating: funnel</option><option value="cater">Coating: caterpillar</option><option value="order">Coating: along the particle order</option><option value="dev">Coating: deviations</option><option value="la">Crystallite size La</option><option value="size">Particle diameter</option></select><span class="muted small" id="pf-dist-note"></span></div>
+          <div class="panel-h"><select id="pf-dist" class="inline"><option value="funnel">Coating: funnel</option><option value="cater">Coating: caterpillar</option><option value="order">Coating: along the particle order</option><option value="dev">Coating: deviations</option><option value="la">Crystallite size La</option><option value="size">Particle diameter</option></select><button class="help-q" data-help="dist" title="What this plot shows">?</button><span class="muted small" id="pf-dist-note"></span></div>
           <div class="plot" id="pf-dist-plot"><canvas></canvas></div>
         </div>
       </div>
     </div>
     <aside class="side">
+      <div class="sec" data-sec="pt-choice">
+        <div class="sec-h">Band and calibration <button class="help-q" data-help="band-cal" title="What these choose">?</button></div>
+        <div class="frow"><label>Band</label><select id="pt-band" title="The band read as the coating, over G, in every section of this tab (D3 by default)"></select></div>
+        <div class="frow"><label>Calibration <button class="help-q" data-help="baselines" title="What the baselines are">?</button></label><select id="pt-cal" title="The band shapes (baselines) this file's heights are read with: asked for with every file"></select></div>
+        <div class="frow"><label>Map shows</label><select id="pt-mapq" title="What colours the map above"><option value="coat">the coating classes (below, within, above)</option><option value="ratio">the band over G (ratio)</option><option value="signal">the band's own height (signal)</option><option value="spec">the quantity chosen on the map's title</option></select></div>
+        <div class="muted small" id="pt-cal-note"></div>
+      </div>
       <div class="sec seg-only">
         <div class="sec-h">Find particles</div>
         <div class="frow"><label>Segment on</label><select id="pt-src"></select></div>
@@ -314,7 +322,7 @@
         <div class="frow"><label></label><label class="chk" title="Distance-transform watershed: particles that touch are cut at their neck"><input type="checkbox" id="pt-split" checked> Split touching particles</label></div>
       </div>
       <div class="sec seg-only" data-sec="seg-coat">
-        <div class="sec-h toggle">Coating uniformity</div>
+        <div class="sec-h toggle">Coating uniformity <button class="help-q" data-help="tau-spread" title="What the real spread τ is">?</button></div>
         <div class="sec-b">
           <div class="frow"><label>Coating band</label><select id="seg-coat-band" title="The band of the amorphous carbon coating, taken over G (D3 by default)"></select></div>
           <div class="frow"><label>Leave out the rim</label><div class="kx"><input type="number" id="seg-rim" value="1" min="0" step="0.25" title="Pixels this close to a particle's edge are left out: the laser spot (about 1 µm) lies partly off the particle there"><span>µm from the edge</span></div></div>
@@ -358,7 +366,7 @@
         <div class="muted small">One spectrum per particle, placed at the particle's stage position and sized by its diameter. Positions and morphology are read from the project; each spectrum is fitted with the same configuration as a map.</div>
       </div>
       <div class="sec pf-only" data-sec="pf-coat">
-        <div class="sec-h toggle">Coating uniformity</div>
+        <div class="sec-h toggle">Coating uniformity <button class="help-q" data-help="tau-spread" title="What the real spread τ is">?</button></div>
         <div class="sec-b">
           <div class="frow"><label>Coating band</label><select id="pf-coat-band" title="The band of the amorphous carbon coating, taken over G (D3 by default)"></select></div>
           <div class="ov" id="pf-ov"></div>
@@ -405,7 +413,7 @@
         <div class="sec-h toggle">Coverage</div>
         <div class="sec-b">
           <div class="frow"><label>Uncoated reference</label><select id="cov-ref" title="An uncoated sample measured in the same session: one open in this window, or Choose a file… to read it from disk (it opens beside this one and is fitted with the Carbon fit settings). The threshold is the 99th percentile of its coating index"></select></div>
-          <div class="frow"><label>Threshold &tau;</label><div class="kx"><input type="number" id="cov-tau" step="any" min="0"><span id="cov-tau-note">uncoated above it: 1 %</span></div></div>
+          <div class="frow"><label>Threshold &tau; <button class="help-q" data-help="tau-threshold" title="What the threshold τ is">?</button></label><div class="kx"><input type="number" id="cov-tau" step="any" min="0"><span id="cov-tau-note">uncoated above it: 1 %</span></div></div>
           <div class="frow"><label>Thinnest coating</label><div class="kx"><input type="number" id="cov-rc" step="any" min="0" placeholder="2 &times; &tau;"><span>that must still be found</span></div></div>
           <div class="frow"><label>Detection power</label><div class="kx"><input type="number" id="cov-power" value="0.95" min="0.5" max="0.9999" step="0.01"><span>at the signal floor</span></div></div>
           <div class="frow"><label>Certify</label><div class="kx"><input type="number" id="cov-spec" value="0.99" min="0.5" max="0.9999" step="0.005"><span>coated, 95 % confidence</span></div></div>
@@ -467,7 +475,7 @@
       <div class="sec pf-only" data-sec="pf-pop">
         <div class="sec-h toggle">Populations</div>
         <div class="sec-b">
-          <div class="frow"><label>Group on</label><select id="pf-pop-ratio" title="The band ratio the populations are found on (with the G width and position). D1/G by default: weak bands such as D3 are rarely detected in one particle's spectrum."></select></div>
+          <div class="frow"><label>Group on</label><select id="pf-pop-ratio" title="The band ratio the populations are found on (with the G width and position): the band chosen at the top of this tab, D3/G by default"></select></div>
           <div class="frow"><label>Grouping</label><select id="pf-pop-mode"><option value="auto">Found automatically</option><option value="cut">Cut-offs on the ratio</option><option value="none">None</option></select></div>
           <div class="frow pf-cut hidden"><label id="pf-cut-label">Cut-offs</label><div class="row2"><input type="number" id="pf-cut1" step="any" placeholder="first"><input type="number" id="pf-cut2" step="any" placeholder="second (optional)"></div></div>
           <div class="pf-scroll"><table class="stats pf-pops" id="pf-pop-table"></table></div>
@@ -511,6 +519,37 @@
   </section>
 
   <!-- ======================= DLC coating ======================= -->
+  <section id="tab-pspec" class="tab">
+    <div class="ps-main">
+      <div class="panel col">
+        <div class="panel-h">Particles <span class="muted small" id="ps-count"></span><span class="grow"></span>
+          <select id="ps-filter" class="inline" title="Which particles are listed"><option value="all">all measured</option><option value="carbon">carbon (G at least 10 × noise)</option><option value="coated">coated (above τ)</option><option value="uncoated">not coated (judged, below τ)</option></select>
+          <select id="ps-sort" class="inline" title="The order of the list"><option value="ratio">band/G, high first</option><option value="ratio-asc">band/G, low first</option><option value="size">diameter, large first</option><option value="g">G height, high first</option><option value="num">particle number</option></select></div>
+        <div class="pk-scroll"><table class="stats" id="ps-table"></table></div>
+      </div>
+      <div class="panel col">
+        <div class="panel-h"><b id="ps-title">Particle</b><span class="muted" id="ps-info"></span><span class="grow"></span>
+          <button class="icon" id="ps-prev" title="Previous in the list (↑ or ←)">‹</button><button class="icon" id="ps-next" title="Next in the list (↓ or →)">›</button></div>
+        <div class="plot" id="ps-plot"></div>
+        <div class="cursor-table" id="ps-values"></div>
+      </div>
+      <div class="dlc-empty hidden" id="ps-empty"><div><h2>Particle spectra</h2><p id="ps-empty-p"></p></div></div>
+    </div>
+    <aside class="side">
+      <div class="sec" data-sec="ps-this">
+        <div class="sec-h">This particle</div>
+        <div class="cards" id="ps-cards"></div>
+        <div class="panel map ps-mosaic" id="ps-map"></div>
+        <div class="muted small" id="ps-note"></div>
+      </div>
+      <div class="sec" data-sec="ps-exp">
+        <div class="sec-h">Export</div>
+        <div class="btnrow"><button id="ps-csv-one" title="This particle's spectrum, the background, each band and the fit">This spectrum (CSV)</button><button id="ps-csv-all" title="Every particle listed, with its values">The list (CSV)</button></div>
+        <div class="btnrow"><button id="ps-to-map" title="Pin this particle on the Particles tab's map">Show on the Particles map</button><span></span></div>
+      </div>
+    </aside>
+  </section>
+
   <section id="tab-dlc" class="tab">
     <div class="dlc-main">
       <div class="dlc-maps">

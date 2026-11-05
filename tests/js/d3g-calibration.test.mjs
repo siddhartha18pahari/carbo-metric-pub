@@ -3,7 +3,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { BANDS, SC_SETTINGS, PRESET_21OCT, noiseSigma, despike, savgol, prepare, boxSolver, unmix, freeFits, calibrate, standards,
          blocksOf, blockMedian, compareMedians, mapBlock, stageBlock, toJSON, fromJSON, shapeArea,
-         medianSpectrumBand, refineOnMedian, standardRatio, scaleIndex, attribution } from "../../web/js/d3g-calibration.js";
+         medianSpectrumBand, refineOnMedian, standardRatio, scaleIndex, attribution, asFit } from "../../web/js/d3g-calibration.js";
 import { rng } from "../../web/js/pf-analysis.js";
 
 const near = (a, b, tol, msg) => assert.ok(Math.abs(a - b) <= tol, `${msg ?? ""} ${a} vs ${b}`);
@@ -96,6 +96,29 @@ test("the height errors from the linear fit match the scatter of repeated noisy 
     const sd = Math.sqrt(v.reduce((t, x) => t + (x - m) ** 2, 0) / (n - 1)), se = U.se.filter((_, i) => i % nb === j).reduce((t, x) => t + x, 0) / n;
     near(se / sd, 1, 0.12, b);
   }
+});
+
+// the covariance of D1, D3 and G (the D3-G and D1-D3 terms set a ratio's error), and the calibrated
+// heights laid out as a Carbon fit result
+test("the band covariance matches repeated spectra, and asFit lays the heights out as a fit result", () => {
+  const R = rng(19), K = WN.length, n = 400, cube = new Float32Array((n + 1) * K), shapes = PRESET_21OCT.steps[2].shapes;
+  for (let p = 0; p < n; p++) cube.set(spectrum({ D4: 4, D1: 50, D3: 6, G: 120, D2: 20 }, { sd: 3, R }), p * K);
+  cube.fill(NaN, n * K);                                   // one spectrum never measured
+  const pr = prepare(cube, K, WN, n + 1), list = Array.from({ length: n }, (_, i) => i), U = unmix(pr, shapes, list, { cov: true }), nb = BANDS.length;
+  const col = b => Array.from({ length: n }, (_, i) => U.h[i * nb + BANDS.indexOf(b)]), mean = v => v.reduce((t, x) => t + x, 0) / v.length;
+  for (const [a, b] of [["D3", "G"], ["D1", "D3"], ["G", "G"]]) {
+    const x = col(a), y = col(b), mx = mean(x), my = mean(y), emp = x.reduce((t, v, i) => t + (v - mx) * (y[i] - my), 0) / (n - 1);
+    // compared on the correlation scale: 400 draws pin a correlation to about 0.05
+    const fit = mean(list.map(i => U.cov[(i * nb + BANDS.indexOf(a)) * nb + BANDS.indexOf(b)]));
+    const sa = Math.sqrt(x.reduce((t, v) => t + (v - mx) ** 2, 0) / (n - 1)), sb = Math.sqrt(y.reduce((t, v) => t + (v - my) ** 2, 0) / (n - 1));
+    near((fit - emp) / (sa * sb), 0, 0.12, `cov ${a}-${b}`);
+  }
+  near(U.cov[BANDS.indexOf("D3") * nb + BANDS.indexOf("D3")], U.se[BANDS.indexOf("D3")] ** 2, 1e-9, "diagonal = se²");
+  const f = asFit(pr, U, shapes), jG = BANDS.indexOf("G"), j3 = BANDS.indexOf("D3");
+  assert.equal(f.m, nb); assert.deepEqual(f.names, BANDS);
+  near(f.intensity[5 * nb + jG], U.h[5 * nb + jG], 1e-3); near(f.position[5 * nb + j3], shapes.D3.pos, 1e-3); near(f.width[5 * nb + jG], shapes.G.fwhm, 1e-3);
+  assert.ok(Number.isNaN(f.intensity[n * nb + jG]) && Number.isNaN(f.std_error[n]), "the spectrum not measured stays empty");
+  near(mean(Array.from(f.std_error.subarray(0, n))), 3, 0.3, "each spectrum's error is its noise");
 });
 
 test("free fits and one calibration step recover the shapes of noisy spectra", () => {

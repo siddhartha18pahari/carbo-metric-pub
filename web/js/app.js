@@ -19,7 +19,7 @@ import { rng, wilson, weightedQuantile, laCancado, robustScale, bestGmm, bootstr
          kruskalWallis, brownForsythe, groupGap, thinTail, mixtureCoverage, olsHC3, nForMean, nForSpread, tQuantile } from "./pf-analysis.js";
 import { PRESET_21OCT, SC_SETTINGS, BANDS as D3G_BANDS, prepare as d3gPrepare, unmix, freeFits, calibrate, standards as d3gStandards,
          blocksOf, blockMedian, compareMedians, mapBlock, stageBlock, toJSON as calToJSON, fromJSON as calFromJSON,
-         refineOnMedian, standardRatio, scaleIndex, attribution as d3gAttribution } from "./d3g-calibration.js";
+         refineOnMedian, standardRatio, scaleIndex, attribution as d3gAttribution, asFit as d3gAsFit } from "./d3g-calibration.js";
 import { DLC_DEFAULTS, DLC_PARAMS, SE_KEYS as DLC_SE_KEYS, STATUS as DLC_STATUS, FLAG as DLC_FLAG, prepare as dlcPrepare, fitMean as dlcFitMean,
          fitSpectra as dlcFitSpectra, makeFitter as dlcFitter, components as dlcComponents, bwfFwhm, qcTest, paramStats, homogeneity, homogeneityLevel } from "./dlc.js";
 import { MVA_DEFAULTS, METHODS, runMva, identify, compareLoadings } from "./mva.js";
@@ -776,6 +776,8 @@ async function loadDataset(info) {
   if ($("#tab-si").classList.contains("on")) siShow();
   if ($("#tab-id").classList.contains("on")) idShow();
   if ($("#tab-tools").classList.contains("on")) tbShow();
+  PS.sel = null;
+  if ($("#tab-pspec").classList.contains("on")) psShow();
   // reopening a map the server already fitted with these settings: reuse it
   const prev = await api(`/api/ds/${info.id}/fit?result=1`).catch(() => null);
   if (prev && prev.state === "done" && prev.result && JSON.stringify(prev.result.config) === JSON.stringify(S.cfg)) {
@@ -1023,6 +1025,7 @@ function switchTab(name) {
   moveInk();
   if (name === "splat") splatShow();
   if (name === "particles") particlesInit();
+  if (name === "pspec") psShow();
   if (name === "dlc") dlcShow();
   if (name === "layers") lyShow();
   if (name === "mva") mvShow();
@@ -1560,6 +1563,198 @@ function showMetrics(r) {
 }
 
 // =========================================================================
+// the "?" buttons: a short explanation of a term or a plot, in a popover
+// =========================================================================
+// Two different quantities share the letter τ: the Coverage threshold (where coated begins) and the
+// uniformity's real spread (how much particles truly differ). The entries keep them apart.
+const HELP = {
+  "tau-threshold": { title: "Threshold τ (Coverage)", body: [
+    "The coating index (the chosen band over G, for example I(D3)/I(G)) above which a spectrum or a particle counts as coated.",
+    "It comes from an uncoated reference measured in the same session: τ is the 99th percentile of the reference's band/G over its spectra bright enough to judge, so only 1 % of uncoated spectra reach it. That 1 % is the false-detection rate: the share of uncoated spectra that would be called coated by chance.",
+    "Bright enough means G at or above the signal floor: the G height at which a coating at the thinnest-coating level is still found with the chosen detection power (95 %). Dimmer spectra scatter more, so τ and the floor are found together. Without a reference, τ is typed in and 1 % false detections is assumed.",
+    "τ is a level on the band/G scale, not a thickness. It is not the τ of Coating uniformity, which measures how much particles differ.",
+  ] },
+  "tau-spread": { title: "τ, the real spread (Coating uniformity)", body: [
+    "How much the coating index truly differs between particles (on a map: between places), as a standard deviation on the band/G scale, once each value's own measurement noise is taken out (Paule-Mandel estimator).",
+    "τ = 0 means one uniform coating: every particle would carry the same value and differ only by its noise. CV = τ over the mean. I² is the share of the observed spread that is real rather than noise. The band of ± 1.96 τ about the mean holds 95 % of the particles' true values.",
+    "It is not the threshold τ of Coverage, which is the level where coated begins.",
+  ] },
+  "dist-funnel": { title: "The coating funnel", body: [
+    "Each dot is one particle: its coating index (band/G, up the side) against that value's standard error (across: how noisy its spectrum is). Clean spectra sit on the left, noisy ones on the right.",
+    "Solid lines: the mean ± 1.96 standard errors. If every particle carried the same coating, 95 % of the dots would fall inside them; the funnel widens to the right because noisier values scatter more.",
+    "Dashed lines: the same with the real spread τ added, the mean ± 1.96 √(SE² + τ²): where the particles fall once their true differences are counted.",
+    "Colours: above and below are particles outside the solid funnel, so they differ from the mean by more than their own noise (above: more coating, below: less or none); within are the rest. Dots outside the solid funnel on the left are real differences, not noise.",
+  ] },
+  "dist-cater": { title: "The caterpillar plot", body: [
+    "Every particle in order of its coating index, each with its 95 % interval (± 1.96 of its own standard error). The line is the mean; the grey band is the real spread between particles, ± 1.96 τ.",
+    "An interval that misses the mean is a particle that differs beyond its noise (coloured above or below). Short intervals are clean spectra, long ones noisy spectra.",
+  ] },
+  "dist-order": { title: "Along the particle order", body: [
+    "The coating index of each particle in the order ParticleFinder measured them, with a running median. A running median that drifts (rises or falls through the run) is a change during the measurement, such as focus or laser power, not in the sample; when the trend is significant it is taken out before the uniformity statistics.",
+  ] },
+  "dist-dev": { title: "Deviations", body: [
+    "Each particle's distance from the mean in units of its own standard error. With one uniform coating these follow the bell curve drawn (standard normal, SD 1); an SD above 1 is real spread between particles.",
+  ] },
+  "dist-la": { title: "Crystallite size La", body: [
+    "La from the area ratio of the D and G bands (Cançado et al. 2006), particle by particle, on a log scale. It describes the graphitic carbon of each particle, so it uses the D band, not the coating band.",
+  ] },
+  "dist-size": { title: "Particle diameter", body: ["The cumulative distribution of the particles' circle-equivalent diameters, from ParticleFinder's own particle table."] },
+  "band-cal": { title: "Band and calibration", body: [
+    "Band: the band read as the coating, over G, in every section of this tab (coverage, uniformity, populations, the calibrated ratio, the map and the report). D3, the amorphous-carbon band, by default.",
+    "Calibration: which band shapes the heights are read with. None uses the Carbon fit tab's own fit of each spectrum. A calibration holds every band's position and width fixed (baselines from standards, an uncoated and a coated map), so I(band)/I(G) means the same on every sample; only the heights and the background are fitted.",
+  ] },
+  "baselines": { title: "Baselines", body: [
+    "The band shapes (each band's position and width) a calibration holds fixed: baseline 1 refined on an uncoated map, baseline 2 on a coated one. They are asked for with every file so that no file is read with shapes chosen silently: load a file of baselines (saved here, or the baselines_D3G.json of the calibration's scripts), build new ones, reuse the last loaded, or read the file without a calibration.",
+  ] },
+};
+document.addEventListener("click", e => {
+  const b = e.target.closest && e.target.closest(".help-q"); if (!b) return;
+  // before the section headers' own click (they fold the section)
+  e.stopPropagation(); e.preventDefault();
+  const key = b.dataset.help === "dist" ? `dist-${$("#pf-dist").value}` : b.dataset.help, h = HELP[key];
+  $$(".popover").forEach(p => p.remove());
+  if (!h) return;
+  const pop = el("div", { class: "popover help-pop", onclick: ev => ev.stopPropagation() }, el("div", { class: "pop-h" }, h.title), ...h.body.map(t => el("p", {}, t)));
+  document.body.append(pop);
+  const r = b.getBoundingClientRect();
+  pop.style.left = Math.max(8, Math.min(window.innerWidth - pop.offsetWidth - 8, r.left - 20)) + "px";
+  pop.style.top = Math.max(8, Math.min(window.innerHeight - pop.offsetHeight - 8, r.bottom + 6)) + "px";
+  setTimeout(() => document.addEventListener("click", () => pop.remove(), { once: true }));
+}, true);
+
+// =========================================================================
+// the band and the calibration every section of the Particles tab reads
+// =========================================================================
+// One band (read over G as the coating) and one calibration for the whole tab. Without a calibration
+// the sections read the Carbon fit tab's own fit; with one, every spectrum's heights are solved with
+// that calibration's shapes held (d3g-calibration.js) and laid out as a fit result (asFit), so the
+// same analyses run on them. The calibration is chosen per file, and asked for with every file.
+const PT = { fileCal: new Map(), asked: new Set(), cf: new Map(), loadFor: null };
+const ptBand = () => $("#pt-band").value || "D3";
+const PT_WIDE = { pos_min: -1e9, pos_max: 1e9, width_min: -1e9, width_max: 1e9 };
+// the calibration step chosen for the open file, or null for the Carbon fit's own bands
+function ptCal() {
+  const v = $("#pt-cal").value;
+  if (!v || !/^\d+:\d+$/.test(v)) return null;
+  const [ci, si] = v.split(":").map(Number), cal = D3G.cals[ci], step = cal && cal.steps[si];
+  return step ? { cal, step, key: v } : null;
+}
+// a file's heights with a calibration's shapes held, in the layout of its Carbon fit result: every
+// measured spectrum, each with its residual's SD as its error and its heights' covariance
+async function calFitBuild(f, ch) {
+  const prep = await d3gPrep(f, ch.cal.settings), list = [];
+  for (let p = 0; p < prep.P; p++) if (prep.sig[p] > 0) list.push(p);
+  if (!list.length) throw new Error("no measured spectra");
+  const U = unmix(prep, ch.step.shapes, list, { cov: true }), base = f.result || {};
+  // fixed shapes are never on a fit bound, so the bound tests of the analyses see wide windows
+  return { ...d3gAsFit(prep, U, ch.step.shapes), info: f.info, name: f.name, resultsOnly: false, seconds: `calibrated ${ch.key}`,
+           range: [...ch.cal.settings.range], shapes: D3G_BANDS.map(b => ch.cal.settings.bands[b].shape), held: D3G_BANDS.slice(),
+           config: { ...(base.config || S.cfg), smooth_window: 0, spatial_kernel: 0, peaks: D3G_BANDS.map(b => ({ name: b, ...PT_WIDE })) },
+           calibration: `${ch.cal.name} · ${ch.step.name}` };
+}
+// the result if ready; otherwise the work starts and the tab redraws when it ends
+function calFitGet(f, ch) {
+  const key = `${f.id}|${ch.key}`;
+  if (PT.cf.has(key)) return PT.cf.get(key);
+  if (!D3G.running.has(`cf|${key}`)) {
+    D3G.running.add(`cf|${key}`);
+    setTimeout(() => calFitBuild(f, ch).then(r => PT.cf.set(key, r)).catch(e => PT.cf.set(key, { error: e.message }))
+      .finally(() => { D3G.running.delete(`cf|${key}`); if (PT.cf.size > 6) PT.cf.delete(PT.cf.keys().next().value); rerenderParticles(); }), 30);
+  }
+  return null;
+}
+// the fit the tab reads: the Carbon fit's, or the chosen calibration's (null while it is being made)
+function ptFit() {
+  const ch = ptCal(); if (!ch) return S.fit;
+  const cur = S.ds && fileOf(S.ds.id), cf = cur ? calFitGet(cur, ch) : null;
+  return cf && !cf.error ? cf : null;
+}
+// another file's fit read the same way (an uncoated reference): its own result, or its calibrated heights
+function ptFitOf(f) {
+  const ch = ptCal(); if (!ch) return f && f.result;
+  const cf = f ? calFitGet(f, ch) : null;
+  return cf && !cf.error ? cf : null;
+}
+function ptSelects() {
+  const f = ptFit() || S.fit, bands = f ? f.names.filter(b => b.toLowerCase() !== "g") : [];
+  const bs = $("#pt-band"), keep = bs.value;
+  if ([...bs.options].map(o => o.value).join() !== bands.join()) bs.replaceChildren(...bands.map(b => el("option", { value: b }, b)));
+  bs.value = bands.includes(keep) ? keep : (bands.find(b => b.toLowerCase() === "d3") || bands[0] || "");
+  const cs = $("#pt-cal"), opts = [["none", "None: the Carbon fit's own bands"], ...D3G.cals.flatMap((c, ci) => c.steps.map((s, si) => [`${ci}:${si}`, `${c.name} · ${s.name}`])),
+    ["load", "Load baselines…"], ["build", "Build new baselines…"]];
+  const ids = opts.map(o => o[0]).join("|");
+  if (cs.dataset.ids !== ids) { cs.replaceChildren(...opts.map(([v, t]) => el("option", { value: v }, t))); cs.dataset.ids = ids; }
+  cs.value = (S.ds && PT.fileCal.get(S.ds.id)) || "none";
+  const ch = ptCal(), cur = S.ds && fileOf(S.ds.id), cf = ch && cur ? PT.cf.get(`${cur.id}|${ch.key}`) : null;
+  $("#pt-cal-note").textContent = !ch ? "Heights from the Carbon fit tab's own fit of each spectrum." :
+    cf && cf.error ? `Could not apply the calibration: ${cf.error}` : cf ? `Heights solved with the shapes of ${ch.cal.name} · ${ch.step.name} held.${ptWeak(cf)}` : `Solving the heights with ${ch.cal.name} · ${ch.step.name}…`;
+}
+// how far the band stands above its error in one spectrum with these shapes (median over the carbon ones):
+// a broad held band trades off against the background, so a single spectrum may barely carry it
+function ptWeak(cf) {
+  const b = ptBand(), m = cf.m, j = cf.names.indexOf(b), jG = cf.names.findIndex(n => n.toLowerCase() === "g"); if (j < 0 || jG < 0) return "";
+  if (!cf.zMed || cf.zMed.b !== b) {
+    const z = [];
+    for (let p = 0; p < cf.std_error.length; p++) { const g = cf.intensity[p * m + jG], v = cf.cov[p * m * m + j * m + j]; if (g >= 10 * cf.std_error[p] && v > 0) z.push(cf.intensity[p * m + j] / Math.sqrt(v)); }
+    cf.zMed = { b, z: z.length ? median(z) : NaN };
+  }
+  const z = cf.zMed.z;
+  return z < 3 ? ` With these shapes ${b} stands at only ${fmt(z, 2)} × its error in one spectrum (median), so results spectrum by spectrum (coverage, uniformity, detection) lose most of their power; medians over many spectra stay sound.` : "";
+}
+// keep the sections' own band choices on the tab's band (their rows are hidden)
+function ptBandInto(sel) { const b = ptBand(); if ([...sel.options].some(o => o.value === b)) sel.value = b; }
+function ptSetCal(v) {
+  if (!S.ds) return;
+  PT.fileCal.set(S.ds.id, v);
+  if (/^\d+:\d+$/.test(v)) { D3G.pick = v; d3gSelects(); }
+  ptSelects(); rerenderParticles();
+}
+$("#pt-band").onchange = () => { ptSelects(); rerenderParticles(); };
+$("#pt-cal").onchange = e => {
+  const v = e.target.value;
+  if (v === "load") { PT.loadFor = S.ds ? S.ds.id : null; ptSelects(); $("#d3g-json-file").click(); return; }
+  if (v === "build") { ptSelects(); ptOpenBuild(); return; }
+  ptSetCal(v);
+};
+function ptOpenBuild() {
+  const sec = $('[data-sec="d3g"]'); if (!sec) return;
+  sec.classList.remove("closed"); sec.scrollIntoView({ block: "start", behavior: "smooth" });
+  toast("Choose a graphite and a glassy carbon spectrum and an uncoated and a coated map under Build a calibration, then Build.", "info", 8000);
+}
+// asked with every file: which baselines (band shapes) its heights are read with
+function ptAskBaselines() {
+  if (!S.ds || !S.fit || S.fit.resultsOnly || PT.fileCal.has(S.ds.id) || PT.asked.has(S.ds.id) || $(".bl-back")) return;
+  PT.asked.add(S.ds.id);
+  const ds = S.ds, last = D3G.lastLoaded, close = v => { back.remove(); if (v != null && S.ds === ds) ptSetCal(v); };
+  const opt = (label, sub, act) => el("button", { class: "bl-opt", onclick: act }, el("b", {}, label), el("span", {}, sub));
+  const builtIn = D3G.cals.indexOf(PRESET_21OCT);
+  const back = el("div", { class: "bl-back" }, el("div", { class: "bl-card", role: "dialog", "aria-label": "Baselines for this file" },
+    el("h3", {}, "Baselines for ", el("i", {}, ds.name)),
+    el("p", { class: "muted" }, "The band shapes this file's heights are read with in the Particles tab (and its report). Asked with every file, so none is used without your choice."),
+    opt("Load a baselines file…", "saved from this app, or the baselines_D3G.json of the calibration's scripts", () => { close(null); PT.loadFor = ds.id; $("#d3g-json-file").click(); }),
+    last ? opt(`Reuse ${last.name}`, `loaded ${new Date(last.at).toLocaleTimeString()} · ${D3G.cals[last.ci].steps[last.si].name}`, () => close(`${last.ci}:${last.si}`)) : null,
+    opt("Build new baselines…", "from a graphite and a glassy carbon spectrum and an uncoated and a coated map", () => { close("none"); ptOpenBuild(); }),
+    builtIn >= 0 ? opt(`Built in: ${PRESET_21OCT.name} · ${PRESET_21OCT.steps[2].name}`, "the calibration of 21 Oct 2026", () => close(`${builtIn}:2`)) : null,
+    opt("No calibration", "the Carbon fit tab's own fit of each spectrum", () => close("none")),
+    el("div", { class: "bl-foot" }, el("button", { onclick: () => close(null) }, "Decide later"))));
+  document.body.append(back);
+}
+// what the Particles map shows: the band over G, the band's own height, or the map title's choice
+function ptMapR() {
+  const q = $("#pt-mapq").value;               // "coat": the classes are drawn over the ratio
+  if (q === "spec") return resolve(S.pspec);
+  const f = ptFit(), b = ptBand(); if (!f) return resolve(S.pspec);
+  const m = f.m, jB = f.names.indexOf(b), jG = f.names.findIndex(n => n.toLowerCase() === "g"), n = S.nx * S.ny, v = new Float32Array(n).fill(NaN);
+  if (jB < 0 || jG < 0) return resolve(S.pspec);
+  for (let p = 0; p < n; p++) { const h = f.intensity[p * m + jB], g = f.intensity[p * m + jG]; v[p] = q === "signal" ? h : g > 0 ? h / g : NaN; }
+  const cal = ptCal() ? " (calibrated)" : "", label = q === "signal" ? `${b} height` : `I(${b})/I(G)`;
+  return { values: v, label: label + cal, unit: q === "signal" ? "counts" : "", name: label, title: `Particles : <u>${escHTML(label)}</u>${cal}`, useValid: !ptCal() };
+}
+// the map colours by the coating classes, or by a value (the band over G, its height, the title's choice)
+$("#pt-mapq").onchange = () => { const by = $("#pt-mapq").value === "coat" ? "coat" : "value"; $("#seg-colour").value = by; $("#pf-colour").value = by; rerenderParticles(); };
+for (const id of ["#seg-coat-band", "#pf-coat-band", "#pf-pop-ratio", "#d3g-cal"]) { const r = $(id).closest(".frow"); if (r) r.classList.add("hidden"); }
+
+// =========================================================================
 // particles
 // =========================================================================
 const pmap = new MapView($("#map-p"), {
@@ -1581,6 +1776,7 @@ function segSource() {
 
 function particlesInit() {
   if (!S.fit) return;
+  ptAskBaselines();
   if (S.points) { pfInit(); return; }
   const src = $("#pt-src"), cur = src.value;
   src.textContent = "";
@@ -1626,10 +1822,12 @@ function particleStats() {
 
 function renderParticles() {
   if (!S.fit) return;
+  ptSelects();
+  if (!ptFit()) { renderD3g(); return; }                 // the calibrated heights are being solved
   if (S.points) { renderPF(); return; }
   $("#pt-cards-h").textContent = "Pixels vs particles"; $("#pt-strip-h").textContent = "Ratio by particle";
   pmap.categories = null;
-  const r = resolve(S.pspec);
+  const r = ptMapR();
   pmap.setTitle(r.title);
   pmap.overlays = [outlineOverlay(S.seg)];
   if (r.values) pmap.setData(r.values, { valid: r.useValid ? S.valid : null, label: r.label, unit: r.unit });
@@ -1703,7 +1901,7 @@ function ratioAgreement(fit, free) {
 // band over G, and D1 over G, which a height without a fit reads cleanly. A weak band such as D3 sits on
 // the tails of D1 and G, so its height without a fit follows D1/G as well; how far is measured too.
 function fitFreeCheck(list, jG, jC, jD, detected, kd, kq) {
-  const f = S.fit, m = f.m, pos = j => median(list.map(p => f.position[p * m + j]));
+  const f = ptFit(), m = f.m, pos = j => median(list.map(p => f.position[p * m + j]));
   const js = [jG, jC, ...(jD >= 0 && jD !== jC ? [jD] : [])];
   const h = fitFreeHeights(S.cube, S.k, S.wn, list, js.map(pos)); if (!h) return null;
   const fitR = j => list.map(p => f.intensity[p * m + j] / f.intensity[p * m + jG]), freeR = k => list.map((_, i) => h.heights[k][i] / h.heights[0][i]);
@@ -1723,13 +1921,14 @@ function bandOnBound(f, pk, p, j) {
 }
 
 function segCoating() {
-  const f = S.fit, c = S.cfg, seg = S.seg, fc = f.config || c;
+  const f = ptFit(), c = S.cfg, seg = S.seg, fc = f.config || c;
   const sel = $("#seg-coat-band"), others = f.names.filter(b => b.toLowerCase() !== "g");
   if ([...sel.options].map(o => o.value).join() !== others.join()) {
     const keep = sel.value;
     sel.replaceChildren(...others.map(b => el("option", { value: b }, `${b}/G`)));
     sel.value = others.includes(keep) ? keep : (others.find(b => b.toLowerCase() === "d3") || others[0] || "");
   }
+  ptBandInto(sel);
   const band = sel.value;
   if (f.resultsOnly) return { why: "This file holds fitted values without spectra, so no pixel has a standard error. Open the map itself (.l6m) to judge the coating." };
   if (fc.smooth_window || fc.spatial_kernel) return { why: "The spectra were smoothed before the fit, so a pixel's residual no longer measures its noise (and spatial smoothing makes neighbours share it). Switch the smoothing off in the Carbon fit tab to judge the coating." };
@@ -1762,6 +1961,8 @@ function segCoating() {
   const left = groups.map(g => g.filter(cOut));
   // band-height errors, once per fit and pixel (a new threshold only adds pixels)
   const ckey = `${S.ds.id}|${f.seconds}|${f.names.join()}`;
+  // a calibration's heights carry their covariance already (the linear fit's)
+  if (f.cov && (!S.segCov || S.segCov.key !== ckey)) S.segCov = { key: ckey, cov: f.cov, done: new Uint8Array(P()).fill(1) };
   if (!S.segCov || S.segCov.key !== ckey) S.segCov = { key: ckey, cov: new Float64Array(P() * m * m).fill(NaN), done: new Uint8Array(P()) };
   const fill = () => { const todo = used.filter(p => !S.segCov.done[p]); heightCovariances(f, fc, S.wn, todo, S.segCov.cov); for (const p of todo) S.segCov.done[p] = 1; };
   const nTodo = used.filter(p => !S.segCov.done[p]).length;
@@ -2033,7 +2234,7 @@ $("#seg-rim").onchange = () => { if (S.seg) renderParticles(); };
 // abundance of a coating-like component to compare with it, the splats a smooth ratio field and a spatial
 // scale to compare with the within-particle variation.
 const XC_LO = 1100, XC_HI = 1700, XC_BIN = 8;
-const xcKey = () => (S.segCoat && S.segCoat.C && S.segCoat.seg === S.seg && S.fit ? `${S.segCoat.key}|${S.fit.seconds}` : null);
+const xcKey = () => (S.segCoat && S.segCoat.C && S.segCoat.seg === S.seg && ptFit() ? `${S.segCoat.key}|${ptFit().seconds}` : null);
 const xcNow = () => (S.xc && S.xc.key === xcKey() ? S.xc : null);
 const xcTick = () => new Promise(res => setTimeout(res, 0));
 
@@ -2319,7 +2520,7 @@ async function fitSide(f) {
   await fitOne(f, cfg);
   setStatus(f.state === "error" ? `Could not fit ${f.name}: ${f.error}` : `Fitted ${f.name}`, f.state === "error" ? "err" : "");
 }
-const rerenderParticles = () => { if (S.points && S.fit) renderPF(); else if (S.seg) renderParticles(); else renderD3g(); };
+const rerenderParticles = () => { if (S.points && S.fit) renderPF(); else if (S.seg) renderParticles(); else renderD3g(); if ($("#tab-pspec").classList.contains("on")) psRender(); };
 
 // what each list does with a file read for it
 const SIDE_USE = {
@@ -2381,11 +2582,12 @@ function d3gSelects() {
   $("#d3g-ref-med").disabled = !!$("#d3g-ref").value;
 }
 function d3gChoice() {
+  const pc = ptCal(); if (pc) return pc;
   const [ci, si] = ($("#d3g-cal").value || "0:2").split(":").map(Number), cal = D3G.cals[ci] || D3G.cals[0];
   const step = cal.steps[si] || cal.steps[cal.steps.length - 1];
   return { cal, step, key: `${D3G.cals.indexOf(cal)}:${cal.steps.indexOf(step)}` };
 }
-const d3gKey = (f, ch) => `${f.id}|${ch.key}|${$("#pf-incl-excl").checked}`;
+const d3gKey = (f, ch) => `${f.id}|${ch.key}|${$("#pf-incl-excl").checked}|${ptBand()}`;
 
 // a file's spectra cut, despiked and judged (kept for the last few files: every spectrum in double precision)
 async function d3gPrep(f, settings) {
@@ -2400,6 +2602,15 @@ async function d3gPrep(f, settings) {
   }
   return D3G.prep.get(key);
 }
+// why a file has few carbon spectra: a ParticleFinder project opened without its spectra list carries a
+// spectrum for few of its particles (the .l6pf keeps one, the .l6m saved with it every one); otherwise
+// its spectra are weak
+function fewCarbonWhy(prep, n) {
+  let measured = 0; for (let p = 0; p < prep.P; p++) if (prep.sig[p] > 0) measured++;
+  if (prep.place.pf && measured < 0.5 * prep.P)
+    return `only ${fmt(measured)} of its ${fmt(prep.P)} particles carry a spectrum in this file. A ParticleFinder project keeps its particles' spectra in the spectra list (.l6m) saved with it: open the .l6pf and that .l6m together.`;
+  return `${fmt(n)} of its ${fmt(measured)} measured spectra have G at least ${prep.settings.snrMin} × their noise; the rest are too weak (focus, laser power, exposure) or not carbon.`;
+}
 // the spectra a file contributes: carbon ones and, for ParticleFinder data, the particles the rest of
 // this tab uses (measured, off the mosaic's seams, the run's filter-excluded ones when asked for)
 function d3gInRun(pl, p) { return !pl.pf || ((!pl.cls || pl.cls[p] === 1 || ($("#pf-incl-excl").checked && pl.cls[p] === 0)) && !(pl.seam && pl.seam[p])); }
@@ -2412,7 +2623,9 @@ async function d3gResult(f, ch) {
   let measured = 0; for (let p = 0; p < prep.P; p++) if (prep.sig[p] > 0 && d3gInRun(pl, p)) measured++;
   let r = { f, key, prep, n: list.length, measured };
   if (list.length) {
-    const U = unmix(prep, ch.step.shapes, list), r3 = U.ratio["ID3/IG"], nb = D3G_BANDS.length, j3 = D3G_BANDS.indexOf("D3");
+    // the tab's band over G (D3 by default)
+    const U = unmix(prep, ch.step.shapes, list), nb = D3G_BANDS.length, j3 = Math.max(0, D3G_BANDS.indexOf(ptBand())), jG = D3G_BANDS.indexOf("G");
+    const r3 = Float64Array.from(U.list, (_, i) => (U.h[i * nb + jG] ? U.h[i * nb + j3] / U.h[i * nb + jG] : NaN));
     const blocks = blocksOf(Array.from(r3), Array.from(U.list, p => (pl.pf ? stageBlock(pl.x[p], pl.y[p]) : mapBlock(p, pl.nx))));
     const fin = Array.from(r3).filter(Number.isFinite);
     r = { ...r, U, blocks, med: blockMedian(blocks), mean: fin.reduce((t, v) => t + v, 0) / fin.length,
@@ -2496,13 +2709,14 @@ function d3gTop(step) {
 // { pending } while the heights are being fitted, { missing } with the reason when there is none
 function d3gSummary() {
   const ch = d3gChoice(), cur = S.ds && fileOf(S.ds.id);
+  if (!ptCal()) return { ch, missing: S.ds && S.cube ? "No calibration chosen for this file: choose its baselines under Band and calibration at the top of this tab." : "" };
   if (!cur || !S.cube) return { ch, missing: S.fit && S.fit.resultsOnly ? "The calibration needs the spectra: open the map itself." : "" };
   const refF = $("#d3g-ref").value ? fileOf($("#d3g-ref").value) : null, res = d3gGet(cur, ch), ref = refF ? d3gGet(refF, ch) : null;
   if (!res || (refF && !ref)) return { ch, cur, pending: true };
   if (res.error || (ref && ref.error)) return { ch, cur, missing: `Could not apply the calibration: ${res.error || ref.error}` };
   const pf = res.prep.place.pf, unit = pf ? "particles" : "spectra";
-  if (!res.n) return { ch, cur, missing: `No carbon ${unit} here: none has its G at least ${res.prep.settings.snrMin} × its noise.` };
-  const M = res.med, top = d3gTop(ch.step);
+  if (!res.n) return { ch, cur, missing: `No carbon ${unit} here: ${fewCarbonWhy(res.prep, 0)}` };
+  const M = res.med, top = ptBand() === "D3" ? d3gTop(ch.step) : NaN;
   let cmp = null, refMed = NaN, refName = "";
   if (ref && ref.n) {
     const k = `${res.key}~${ref.key}~${top}`;
@@ -2517,7 +2731,7 @@ function d3gSummary() {
     }
     refName = "the median entered";
   }
-  const why = !cmp ? "no uncoated reference" : !Number.isFinite(top) ? "glassy carbon not known for these shapes: choose its spectrum under Build a calibration"
+  const why = !cmp ? "no uncoated reference" : ptBand() !== "D3" ? "the glassy carbon scale reads D3, the amorphous-carbon band" : !Number.isFinite(top) ? "glassy carbon not known for these shapes: choose its spectrum under Build a calibration"
     : `glassy carbon reads ${top.toFixed(4)} with these shapes, not above the reference`;
   // fixed decimals, enough to show the interval's width to two figures
   const dp = Math.min(6, Math.max(2, 1 - Math.floor(Math.log10(M.hi - M.lo || 1e-3))));
@@ -2548,10 +2762,11 @@ function renderD3g() {
   if (ref && ref.n && Math.max(res.snr / ref.snr, ref.snr / res.snr) > 2)
     items.push(`The two were measured at different signal-to-noise (median G ${fmt(res.snr, 3)} × noise here, ${fmt(ref.snr, 3)} × in the reference). Noise raises I(D3)/I(G), since a height cannot go below zero, so the noisier set reads high: compare samples measured alike.`);
   box.className = `verdict${warn ? " warn" : ""}`;
-  box.replaceChildren(el("b", {}, `I(D3)/I(G) ${fx(M.median)} (95 % CI ${fx(M.lo)}–${fx(M.hi)})`), el("div", {}, items[0]), ...items.slice(1).map(t => el("p", {}, t)));
+  const RB = `I(${ptBand()})/I(G)`;
+  box.replaceChildren(el("b", {}, `${RB} ${fx(M.median)} (95 % CI ${fx(M.lo)}–${fx(M.hi)})`), el("div", {}, items[0]), ...items.slice(1).map(t => el("p", {}, t)));
   const card = (k, v, s) => el("div", { class: "card" }, el("div", { class: "k" }, k), el("div", { class: "v" }, v), el("div", { class: "s" }, s));
   cards.replaceChildren(
-    card("I(D3)/I(G)", fx(M.median), `median · 95 % CI ${fx(M.lo)}–${fx(M.hi)} · mean ${fx(res.mean)}`),
+    card(RB, fx(M.median), `median · 95 % CI ${fx(M.lo)}–${fx(M.hi)} · mean ${fx(res.mean)}`),
     card(`Carbon ${unit}`, `${fmt(res.n)} of ${fmt(res.measured)}`, `G ≥ ${res.prep.settings.snrMin} × noise · ${fmt(M.blocks)} blocks${res.prep.spikes ? ` · ${fmt(res.prep.spikes)} spikes removed` : ""}`),
     card("Against the reference", cmp ? signed(cmp.diff) : "–", cmp ? `95 % CI ${fx(cmp.lo)} to ${fx(cmp.hi)} · ${fmt(cmp.ratio, 3)} × ${refName}` : "no reference"),
     card("Uncoated 0 → glassy carbon 1", cmp && Number.isFinite(cmp.index) ? cmp.index.toFixed(3) : "–",
@@ -2677,7 +2892,7 @@ $("#d3g-build").onclick = async () => {
     const step = async (f, prev, what, d3Median) => {
       status.textContent = `${what}: reading ${f.name}…`; await xcTick();
       const prep = await d3gPrep(f, settings), list = d3gList(prep);
-      if (list.length < 20) throw new Error(`${f.name} has only ${list.length} carbon spectra`);
+      if (list.length < 20) throw new Error(`${f.name} has only ${list.length} carbon spectra: ${fewCarbonWhy(prep, list.length)}`);
       const fits = await d3gFreeFits(prep, list, prev, (a, b) => { status.textContent = `${what}: fitting ${f.name} freely, ${fmt(a)} of ${fmt(b)} carbon spectra…`; });
       const shapes = calibrate(fits, prep.sig, prev, settings);
       // D3 too weak in single spectra of the uncoated map: measured on its median spectrum instead
@@ -2692,6 +2907,8 @@ $("#d3g-build").onclick = async () => {
     for (const s of steps) s.glassy = standardRatio(gl, s.shapes).ratio;
     D3G.cals.push({ name: `Built ${stamp(now)}`, date: now.toISOString().slice(0, 10), settings, steps });
     D3G.pick = `${D3G.cals.length - 1}:2`;
+    D3G.lastLoaded = { name: `Built ${stamp(now)}`, at: Date.now(), ci: D3G.cals.length - 1, si: 2 };
+    ptSetCal(D3G.pick);
     const m = r1.median, d3 = !d3Med ? "D3 left to the spectrum-by-spectrum rule. "
       : !m ? `D3 measured spectrum by spectrum on ${f1.name}. `
       : m.shape ? `D3 from the median spectrum of ${f1.name}: ${m.z.toFixed(1)} × that fit's residual, at ${r1.shapes.D3.pos.toFixed(1)} / ${r1.shapes.D3.fwhm.toFixed(1)} cm⁻¹${m.posLim || m.wLim ? " (a value on its window limit kept glassy carbon's)" : ""}. `
@@ -2710,6 +2927,9 @@ $("#d3g-json-file").onchange = async e => {
   try {
     const cal = calFromJSON(await file.text(), file.name.replace(/\.json$/i, "")), use = cal.steps.findIndex(s => /use for all/i.test(s.name));
     D3G.cals.push(cal); D3G.pick = `${D3G.cals.length - 1}:${use >= 0 ? use : cal.steps.length - 1}`;
+    D3G.lastLoaded = { name: cal.name, at: Date.now(), ci: D3G.cals.length - 1, si: use >= 0 ? use : cal.steps.length - 1 };
+    if (PT.loadFor && S.ds && PT.loadFor === S.ds.id) ptSetCal(D3G.pick);
+    PT.loadFor = null;
     toast(`Loaded ${file.name}: ${cal.steps.length} step${cal.steps.length > 1 ? "s" : ""}`, "good");
     renderD3g();
   } catch (err) { toast(err.message, "error"); }
@@ -2732,7 +2952,7 @@ const COV_FPR = 0.01;
 // the seams). Its threshold is the 99th percentile of the index over those at least as bright as
 // the floor, since dim spectra scatter more (floorWithReference).
 function refSpectra(f, band) {
-  const r = f && f.result; if (!r) return null;
+  const r = ptFitOf(f); if (!r) return null;
   const m = r.m, jG = r.names.findIndex(b => b.toLowerCase() === "g"), jC = r.names.indexOf(band);
   if (jG < 0 || jC < 0) return null;
   const I = f32(r.intensity), X = f32(r.position), Wd = f32(r.width), se = f32(r.std_error);
@@ -2796,7 +3016,7 @@ function heightNoise(cov, m, jC, jG, list) {
 
 // ParticleFinder: particle-level coverage with its exact lower bound, and the count that certifies
 function pfCoverage(A, cs, band) {
-  const f = S.fit, m = f.m, cov = S.pfCov.cov, jG = f.names.findIndex(b => b.toLowerCase() === "g"), jC = f.names.indexOf(band);
+  const f = ptFit(), m = f.m, cov = S.pfCov.cov, jG = f.names.findIndex(b => b.toLowerCase() === "g"), jC = f.names.indexOf(band);
   if (jG < 0 || jC < 0) return null;
   // the particles of the analysis (measured, in the run, off the seams) passing the Constraints; those with G on
   // a fit bound, or the coating band on one or fitted with zero height, cannot be judged and are counted apart
@@ -2825,7 +3045,7 @@ function pfCoverage(A, cs, band) {
 // a map: the covered area of each particle above the floor, its lower bound counting the pixels
 // as the independent values they are worth (the effective sample size, from the lag-one correlation)
 function mapCoverage(A2, cs) {
-  const f = S.fit, m = f.m, cov = S.segCov.cov, jG = f.names.findIndex(b => b.toLowerCase() === "g"), jC = f.names.indexOf(A2.band);
+  const f = ptFit(), m = f.m, cov = S.segCov.cov, jG = f.names.findIndex(b => b.toLowerCase() === "g"), jC = f.names.indexOf(A2.band);
   const all = A2.px.groups.flat(); if (!all.length) return null;
   const G = p => f.intensity[p * m + jG], y = A2.px.y, fitNoise = heightNoise(cov, m, jC, jG, all);
   // the noise of the band heights from each fit or, chosen, from neighbouring pixels
@@ -2858,10 +3078,10 @@ function renderCoverage(card) {
   const box = $("#cov-verdict"), cards = $("#cov-cards"), note = $("#cov-note");
   const clear = msg => { box.className = "verdict"; box.textContent = ""; cards.replaceChildren(); note.textContent = msg; $("#cov-mix-h").textContent = ""; $("#cov-mix-cards").replaceChildren(); };
   $("#cov-mix-h").textContent = ""; $("#cov-mix-cards").replaceChildren();
-  const band = S.points ? $("#pf-coat-band").value : $("#seg-coat-band").value;
+  const band = ptBand();
   S.covR = null;
   $("#cov-noise-diff").textContent = S.points ? "a height without a fit" : "neighbouring pixels";
-  if (!S.fit || !band || S.fit.resultsOnly) return clear(S.fit && S.fit.resultsOnly ? "Coverage needs the spectra: open the map itself." : "");
+  if (!ptFit() || !band || ptFit().resultsOnly) return clear(S.fit && S.fit.resultsOnly ? "Coverage needs the spectra: open the map itself." : "");
   const cs = covSettings(band);
   if (!cs.ref && !Number.isFinite(cs.tau)) return clear(`Choose an uncoated reference measured in the same session (an open file, or Choose a file… to read one from disk), or enter its threshold τ: the ${band}/G that only 1 % of uncoated spectra exceed.`);
   const R = S.points ? (S.pfa && S.pfCov ? pfCoverage(S.pfa, cs, band) : null) : (S.segCoat && S.segCoat.C && S.segCov ? mapCoverage(S.segCoat, cs) : null);
@@ -2939,7 +3159,7 @@ for (const id of ["#cov-ref", "#cov-tau", "#cov-rc", "#cov-power", "#cov-spec", 
 // position, and what the run's own size filter removed.
 function renderChecks(card) {
   const box = $("#chk-verdict"), cards = $("#chk-cards"), note = $("#chk-note");
-  const A = S.points ? S.pfa : S.segCoat && S.segCoat.seg === S.seg ? S.segCoat : null, f = S.fit;
+  const A = S.points ? S.pfa : S.segCoat && S.segCoat.seg === S.seg ? S.segCoat : null, f = ptFit();
   if (!A || !f || (!S.points && !A.C)) { box.className = "verdict"; box.textContent = ""; cards.replaceChildren(); note.textContent = ""; return; }
   const b = S.points ? $("#pf-coat-band").value : A.band, m = f.m, f2 = v => fmt(v, 3);
   const jG = f.names.findIndex(q => q.toLowerCase() === "g"), jC = f.names.indexOf(b);
@@ -3235,7 +3455,9 @@ function pfInit() {
 }
 
 function renderPF() {
-  const r = resolve(S.pspec);
+  ptSelects();
+  if (!ptFit()) { renderD3g(); return; }                 // the calibrated heights are being solved
+  const r = ptMapR();
   pmap.setTitle(r.title);
   pmap.overlays = [];
   if (r.values) pmap.setData(r.values, { valid: r.useValid ? S.valid : null, label: r.label, unit: r.unit });
@@ -3348,17 +3570,18 @@ const POP_NAMES = ["A", "B", "C", "D"];
 const pct = v => (Number.isFinite(v) ? `${(100 * v).toFixed(v < 0.1 ? 1 : 0)} %` : "–");
 
 function pfAnalysis() {
-  const f = S.fit, c = S.cfg, pts = S.points, n = S.nx, m = f.m;
+  const f = ptFit(), c = S.cfg, pts = S.points, n = S.nx, m = f.m;
   const kd = Math.max(0.5, +$("#pf-kd").value || 3), kq = Math.max(kd, +$("#pf-kq").value || 10);
   const mode = $("#pf-pop-mode").value, cuts = [parseFloat($("#pf-cut1").value), parseFloat($("#pf-cut2").value)].filter(Number.isFinite).sort((a, b) => a - b);
   const lambda = parseFloat($("#pf-laser").value);
-  // the band the populations are found on, over G (D1 unless chosen otherwise)
+  // the band the populations are found on, over G (the coating band unless chosen otherwise)
   const bandSel = $("#pf-pop-ratio"), others = f.names.filter(b => b.toLowerCase() !== "g");
   if ([...bandSel.options].map(o => o.value).join() !== others.join()) {
     const keep = bandSel.value;
     bandSel.replaceChildren(...others.map(b => el("option", { value: b }, `${b}/G`)));
-    bandSel.value = others.includes(keep) ? keep : (others.find(b => b.toLowerCase() === "d1") || others[0] || "");
+    bandSel.value = others.includes(keep) ? keep : (others.find(b => b.toLowerCase() === "d3") || others[0] || "");
   }
+  ptBandInto(bandSel);
   const popBand = bandSel.value;
   const coatSel = $("#pf-coat-band");
   if ([...coatSel.options].map(o => o.value).join() !== others.join()) {
@@ -3366,6 +3589,7 @@ function pfAnalysis() {
     coatSel.replaceChildren(...others.map(b => el("option", { value: b }, `${b}/G`)));
     coatSel.value = others.includes(keep) ? keep : (others.find(b => b.toLowerCase() === "d3") || others[0] || "");
   }
+  ptBandInto(coatSel);
   const coatBand = coatSel.value;
   // ParticleFinder's status of each particle (1 measured, 2 selected but not measured, 0 excluded by
   // the run's own filter) and objects on the seams of a stitched mosaic: only measured particles off
@@ -3382,7 +3606,7 @@ function pfAnalysis() {
   const fc = f.config || c, gp = fc.peaks.find(q => q.name === f.names[jG]);
   // the uncertainty of every band height, from each particle's own fit (once per fit)
   const ckey = `${S.ds.id}|${f.seconds}|${f.names.join()}`;
-  if (!S.pfCov || S.pfCov.key !== ckey) S.pfCov = { key: ckey, cov: heightCovariances(f, fc, S.wn) };
+  if (!S.pfCov || S.pfCov.key !== ckey) S.pfCov = { key: ckey, cov: f.cov || heightCovariances(f, fc, S.wn) };
   const cov = S.pfCov.cov, zOf = (p, j) => (j < 0 ? NaN : f.intensity[p * m + j] / Math.sqrt(cov[p * m * m + j * m + j]));
   const zG = new Float64Array(n).fill(NaN);
   const near = (v, b, span) => Math.abs(v - b) < 1e-3 * span;
@@ -4198,19 +4422,19 @@ $("#pf-dist").onchange = () => drawPfDist();
 $("#pf-spec-mode").onchange = () => drawPopSpectra();
 $("#pf-scatter").onchange = () => drawScatter();
 $("#pf-csv").onclick = () => {
-  if (!S.points || !S.fit) return;
-  const A = pfAnalysis(), pts = S.points, ratio = A.ratio;
-  const jG = S.fit.names.findIndex(b => b.toLowerCase() === "g"), m = S.fit.m;
+  if (!S.points || !ptFit()) return;
+  const A = pfAnalysis(), pts = S.points, ratio = A.ratio, f = ptFit();
+  const jG = f.names.findIndex(b => b.toLowerCase() === "g"), m = f.m;
   const num = v => (Number.isFinite(v) ? String(+(+v).toPrecision(6)) : "");
   const C = A.coat, ci = C ? new Map(C.Q.map((p, i) => [p, i])) : new Map(), cb = C ? C.band : "coating";
   const rows = [["Particle", "X (um)", "Y (um)", "Diameter (um)", "Volume (um3)", "G signal/noise", "G height/SE", "G on a bound", "Carbon detected", "Quantified",
     "Population", `${A.rlab} intensity`, "G width (cm-1)", "G position (cm-1)", "A_D1/A_G", "La (nm)",
     `${cb}/G`, `${cb}/G SE`, `${cb} height/SE`, `${cb}/G against the noise band`]];
   for (let p = 0; p < S.nx; p++) {
-    const aD = A.jD >= 0 ? S.fit.area[p * m + A.jD] : NaN, aG = jG >= 0 ? S.fit.area[p * m + jG] : NaN;
+    const aD = A.jD >= 0 ? f.area[p * m + A.jD] : NaN, aG = jG >= 0 ? f.area[p * m + jG] : NaN;
     rows.push([String(p + 1), num(pts.x[p]), num(pts.y[p]), num(pts.ecd[p]), num(pts.volume[p]), num(A.snr[p]), num(A.zG[p]), A.atBound[p] ? "yes" : "no",
       A.det[p] ? "yes" : "no", A.quant[p] ? "yes" : "no", A.label[p] >= 0 && A.k ? A.pops[A.label[p]].name : "",
-      ratio ? num(ratio[p]) : "", jG >= 0 ? num(S.fit.width[p * m + jG]) : "", jG >= 0 ? num(S.fit.position[p * m + jG]) : "", num(aD / aG), num(A.la[p]),
+      ratio ? num(ratio[p]) : "", jG >= 0 ? num(f.width[p * m + jG]) : "", jG >= 0 ? num(f.position[p * m + jG]) : "", num(aD / aG), num(A.la[p]),
       ...(ci.has(p) ? [num(C.R[ci.get(p)]), num(C.sR[ci.get(p)]), num(C.zc[ci.get(p)]), ["below", "within", "above"][C.cat[p]]] : ["", "", "", ""])]);
   }
   download(`${S.ds.name}_particles.csv`, rows.map(r => r.join(",")).join("\n") + "\n", "text/csv");
@@ -7138,6 +7362,127 @@ function makeIdentifyReport() {
 }
 
 // =========================================================================
+// Particle spectra (ParticleFinder): every particle's spectrum with its bands and values
+// =========================================================================
+// One row per measured particle (off the mosaic's seams), with the band chosen on the Particles tab
+// over G read the way that tab reads it (the Carbon fit's own heights, or a calibration's), its
+// coverage verdict when Coverage has a threshold, and its size. The spectrum in view is drawn with
+// the fit that gave its values: the Carbon fit's bands, or the calibration's held shapes solved for
+// this particle (background and heights). Arrow keys step through the list.
+const PS = { sel: null, list: [] };
+const psPlot = new SpectrumPlot($("#ps-plot"));
+const psMap = new MapView($("#ps-map"), { onPick: p => { if (p != null && psRow(p)) { PS.sel = p; psRender(); } }, noProfile: true });
+psMap.cmap = "Viridis";
+function psRow(p) { return PS.list.includes(p); }
+// a particle's band over G, its error and its G height from the fit the Particles tab reads
+function psValues(f, p) {
+  const m = f.m, b = ptBand(), j = f.names.indexOf(b), jG = f.names.findIndex(n => n.toLowerCase() === "g");
+  if (j < 0 || jG < 0) return { r: NaN, se: NaN, g: NaN, h: NaN };
+  const h = f.intensity[p * m + j], g = f.intensity[p * m + jG], r = g > 0 ? h / g : NaN;
+  let se = NaN;
+  if (f.cov) { const o = p * m * m; se = Math.sqrt(Math.max(0, ratioVariance(f.cov, o, m, j, jG, h, g))); }
+  else if (S.pfCov && S.pfCov.cov && f === S.fit) { const o = p * m * m; se = Math.sqrt(Math.max(0, ratioVariance(S.pfCov.cov, o, m, j, jG, h, g))); }
+  return { r, se, g, h, snr: g / f.std_error[p] };
+}
+function psBuild() {
+  const f = ptFit(), pts = S.points, cls = pts.cls, seam = pts.seam, R = S.covR && S.covR.mode === "pf" ? S.covR : null;
+  const filt = $("#ps-filter").value, rows = [];
+  for (let p = 0; p < S.nx; p++) {
+    if ((cls && cls[p] !== 1) || (seam && seam[p])) continue;
+    const v = psValues(f, p);
+    if (!Number.isFinite(f.std_error[p])) continue;                      // no spectrum
+    const carbon = v.snr >= 10, judged = R ? R.judged.has(p) : false, coated = R ? R.coated.has(p) : false;
+    if (filt === "carbon" && !carbon) continue;
+    if (filt === "coated" && !coated) continue;
+    if (filt === "uncoated" && !(judged && !coated)) continue;
+    rows.push({ p, ...v, carbon, judged, coated, d: pts.ecd[p] });
+  }
+  const key = { ratio: r => -(Number.isFinite(r.r) ? r.r : -Infinity), "ratio-asc": r => (Number.isFinite(r.r) ? r.r : Infinity), size: r => -r.d, g: r => -(r.g || 0), num: r => r.p }[$("#ps-sort").value];
+  rows.sort((a, b) => key(a) - key(b));
+  PS.rows = rows; PS.list = rows.map(r => r.p);
+  if (!PS.list.includes(PS.sel)) PS.sel = PS.list.length ? PS.list[0] : null;
+}
+// the curves of a particle's fit: the Carbon fit's bands, or the calibration's held shapes solved here
+function psCurves(p) {
+  const ch = ptCal();
+  if (!ch) return S.cube ? { wn: S.wn, raw: S.cube.subarray(p * S.k, (p + 1) * S.k), range: S.fit.range, fit: evalFit(p) } : null;
+  const cur = fileOf(S.ds.id), prep = D3G.prep.get(`${cur.id}|${stableJSON(ch.cal.settings)}`); if (!prep) return null;
+  const one = { nu: prep.nu, N: prep.N, Y: prep.Y.subarray(p * prep.N, (p + 1) * prep.N), settings: prep.settings }, U = unmix(one, ch.step.shapes, [0]);
+  const [lo, hi] = prep.settings.range, mid = (lo + hi) / 2, half = (hi - lo) / 2, n = prep.N;
+  const baseline = Float32Array.from(prep.nu, v => { const t = (v - mid) / half; let s = 0, q = 1; for (let k = 0; k < U.nbase; k++) { s += U.base[k] * q; q *= t; } return s; });
+  const comps = D3G_BANDS.map((b, j) => {
+    const { pos, fwhm } = ch.step.shapes[b], A = U.h[j], lor = prep.settings.bands[b].shape === "Lorentz";
+    const y = Float32Array.from(prep.nu, v => (lor ? A / (1 + (2 * (v - pos) / fwhm) ** 2) : A * Math.exp(-4 * Math.LN2 * ((v - pos) / fwhm) ** 2)));
+    return { name: b, y, A, pos, width: fwhm };
+  });
+  const total = Float32Array.from({ length: n }, (_, c) => baseline[c] + comps.reduce((s, q) => s + q.y[c], 0));
+  return { wn: prep.nu, raw: Float32Array.from(one.Y), range: [lo, hi], fit: { baseline, comps, total } };
+}
+function psRender() {
+  const empty = $("#ps-empty"), why = !S.ds ? "Open a ParticleFinder project (the .l6pf with the spectra list saved with it) first." :
+    !S.points ? "This tab lists the particles of a ParticleFinder project: open a .l6pf with its spectra list." : !S.fit ? "Waiting for the fit…" :
+    S.fit.resultsOnly ? "This file holds fitted values without spectra." : !ptFit() ? "Solving the heights with the calibration chosen on the Particles tab…" : null;
+  empty.classList.toggle("hidden", !why); if (why) { $("#ps-empty-p").textContent = why; return; }
+  psBuild();
+  const f = ptFit(), b = ptBand(), cal = ptCal(), R = S.covR && S.covR.mode === "pf" ? S.covR : null, rl = `I(${b})/I(G)`;
+  $("#ps-count").textContent = `· ${fmt(PS.list.length)} listed · ${cal ? `${cal.cal.name} · ${cal.step.name}` : "Carbon fit heights"}`;
+  const t = $("#ps-table"), withFree = !!cal;
+  t.replaceChildren(el("tr", {}, ...["#", "⌀ µm", rl, ...(withFree ? [`${rl} no cal.`] : []), "G height", "G S/N", "Coverage"].map((h, i) => el("th", { class: i ? "" : "l" }, h))),
+    ...PS.rows.slice(0, 2000).map(r => {
+      const free = withFree ? psValues(S.fit, r.p).r : NaN;
+      return el("tr", { class: `click${r.p === PS.sel ? " on" : ""}`, onclick: () => { PS.sel = r.p; psRender(); } },
+        el("td", { class: "l" }, `#${r.p + 1}`), el("td", {}, fmt(r.d, 3)), el("td", {}, Number.isFinite(r.r) ? fmt(r.r, 3) : "–"),
+        ...(withFree ? [el("td", { class: "sub" }, Number.isFinite(free) ? fmt(free, 3) : "–")] : []),
+        el("td", {}, fmt(r.g, 3)), el("td", { class: r.carbon ? "" : "warn" }, fmt(r.snr, 3)),
+        el("td", { class: "sub" }, !R ? "no τ" : r.coated ? "coated" : r.judged ? "not coated" : "not judged"));
+    }));
+  const p = PS.sel;
+  // the mosaic with every listed particle coloured by its band over G, this one pinned
+  psMap.setGeometry({ nx: S.nx, ny: 1, x: S.x, y: S.y, points: S.points }); psMap.backdrop = pmap.backdrop;
+  const v = new Float32Array(S.nx).fill(NaN); for (const r of PS.rows) v[r.p] = r.r;
+  psMap.setTitle(`Particles : <u>${escHTML(rl)}</u>`); psMap.setData(v, { valid: null, label: rl, unit: "" }); psMap.setCursor(null, p);
+  if (p == null) { psPlot.setData(null); $("#ps-values").textContent = ""; $("#ps-cards").replaceChildren(); return; }
+  const d = psCurves(p), row = PS.rows.find(r => r.p === p), pts = S.points, i = PS.list.indexOf(p);
+  $("#ps-title").textContent = `Particle #${p + 1}`;
+  $("#ps-info").textContent = ` · ${i + 1} of ${PS.list.length} · X ${fmt(pts.x[p], 4)}, Y ${fmt(pts.y[p], 4)} µm`;
+  psPlot.setData(d);
+  const tb = $("#ps-values"); tb.textContent = "";
+  if (d && d.fit) d.fit.comps.forEach((c, j) => tb.append(el("span", {}, el("b", { style: `color:${PEAK_COLOURS[j % PEAK_COLOURS.length]}` }, c.name), ` ${fmt(c.A, 3)} @ ${c.pos.toFixed(1)} w ${c.width.toFixed(1)}`)));
+  const card = (k, val, s) => el("div", { class: "card" }, el("div", { class: "k" }, k), el("div", { class: "v" }, val), el("div", { class: "s" }, s));
+  const free = cal ? psValues(S.fit, p) : null;
+  $("#ps-cards").replaceChildren(
+    card(rl, Number.isFinite(row.r) ? fmt(row.r, 3) : "–", `${Number.isFinite(row.se) ? `± ${fmt(row.se, 2)} · ` : ""}${cal ? "calibrated" : "Carbon fit"}`),
+    ...(free ? [card(`${rl} without calibration`, Number.isFinite(free.r) ? fmt(free.r, 3) : "–", "the Carbon fit's own heights")] : []),
+    card("Coverage", !R ? "–" : row.coated ? "coated" : row.judged ? "not coated" : "not judged", R ? `τ ${fmt(R.F.tau, 3)} · G floor ${fmt(R.gmin, 3)} counts` : "set τ or an uncoated reference under Coverage"),
+    card("G", fmt(row.g, 3), `height · ${fmt(row.snr, 3)} × the residual`),
+    card("Size", `${fmt(pts.ecd[p], 3)} µm`, `convexity ${fmt(pts.convexity[p], 3)} · elongation ${fmt(pts.elongation[p], 3)} %`));
+  $("#ps-note").textContent = `The list follows the band and calibration chosen on the Particles tab (${b}; ${cal ? `${cal.cal.name} · ${cal.step.name}` : "no calibration"}). Click a particle on the mosaic to see it.`;
+}
+function psStep(d) { if (!PS.list.length) return; const i = Math.max(0, Math.min(PS.list.length - 1, PS.list.indexOf(PS.sel) + d)); PS.sel = PS.list[i]; psRender(); const on = $("#ps-table tr.on"); if (on) on.scrollIntoView({ block: "nearest" }); }
+$("#ps-prev").onclick = () => psStep(-1); $("#ps-next").onclick = () => psStep(1);
+$("#ps-filter").onchange = $("#ps-sort").onchange = () => psRender();
+document.addEventListener("keydown", e => {
+  if (!$("#tab-pspec").classList.contains("on") || /input|select|textarea/i.test(document.activeElement && document.activeElement.tagName)) return;
+  if (e.key === "ArrowDown" || e.key === "ArrowRight") { e.preventDefault(); psStep(1); }
+  if (e.key === "ArrowUp" || e.key === "ArrowLeft") { e.preventDefault(); psStep(-1); }
+});
+$("#ps-csv-one").onclick = () => {
+  const p = PS.sel, d = p != null ? psCurves(p) : null; if (!d || !d.fit) { toast("No spectrum to export.", "error"); return; }
+  const rows = [["Raman shift (cm-1)", "Spectrum", "Background", ...d.fit.comps.map(c => c.name), "Fit", "Residual"],
+    ...Array.from(d.wn, (v, c) => [v, d.raw[c], d.fit.baseline[c], ...d.fit.comps.map(q => q.y[c]), d.fit.total[c], d.raw[c] - d.fit.total[c]])];
+  download(`${S.ds.name}_particle_${p + 1}.csv`, rows.map(r => r.map(pkCell).join(",")).join("\n") + "\n", "text/csv");
+};
+$("#ps-csv-all").onclick = () => {
+  if (!PS.rows || !PS.rows.length) { toast("No particles listed.", "error"); return; }
+  const b = ptBand(), cal = ptCal(), pts = S.points;
+  const rows = [["Particle", "X (um)", "Y (um)", "Diameter (um)", `I(${b})/I(G)`, `I(${b})/I(G) SE`, ...(cal ? [`I(${b})/I(G) without calibration`] : []), "G height", "G signal/noise", "Coverage"],
+    ...PS.rows.map(r => [r.p + 1, pts.x[r.p], pts.y[r.p], r.d, r.r, r.se, ...(cal ? [psValues(S.fit, r.p).r] : []), r.g, r.snr, !S.covR ? "" : r.coated ? "coated" : r.judged ? "not coated" : "not judged"])];
+  download(`${S.ds.name}_particles_${b}.csv`, rows.map(r => r.map(pkCell).join(",")).join("\n") + "\n", "text/csv");
+};
+$("#ps-to-map").onclick = () => { const p = PS.sel; if (p == null) return; switchTab("particles"); setPinned(p); pmap.zoomTo(S.points.x[p], S.points.y[p], Math.max(8 * S.points.ecd[p], 15)); renderPF(); };
+function psShow() { if (S.points && S.fit) { particlesInit(); } psRender(); setTimeout(() => { psPlot.render(); psMap.render(); }, 0); }
+
+// =========================================================================
 // Toolbox (spectra.js): spectrum processing, previewed on one spectrum, applied to every one
 // =========================================================================
 const TB_STORE = "carbo-toolbox";
@@ -7421,15 +7766,43 @@ async function reportAnalysis() {
   const Z = d3gSummary();
   if (Z.res) {
     const sh = Z.ch.step.shapes, set = Z.ch.cal.settings;
-    A.calib = { name: `${Z.ch.cal.name} · ${Z.ch.step.name}`, unit: Z.unit, n: Z.res.n, measured: Z.res.measured, median: Z.M.median, lo: Z.M.lo, hi: Z.M.hi,
+    A.calib = { band: ptBand(), name: `${Z.ch.cal.name} · ${Z.ch.step.name}`, unit: Z.unit, n: Z.res.n, measured: Z.res.measured, median: Z.M.median, lo: Z.M.lo, hi: Z.M.hi,
       dp: Z.dp, rn: Z.res.rn, cmp: Z.cmp, refMed: Z.refMed, ref: Z.cmp ? { name: Z.refName } : null,
       bands: D3G_BANDS.map(b => ({ name: b, pos: sh[b].pos, fwhm: sh[b].fwhm, shape: set.bands[b].shape,
         from: /^median spectrum/.test(sh[b].note || "") ? "median spectrum" : sh[b].support > 1 ? `median of ${fmt(sh[b].support)} spectra` : sh[b].note || "" })) };
   } else A.calib = { missing: Z.pending ? "Still fitting the heights: refresh the report in a moment." : Z.missing || "Not available." };
 
+  // the band over G with and without the calibration, on the same spectra: both maps on one colour
+  // scale and their difference (calibrated minus the Carbon fit's own), with the medians
+  A.calCmp = null;
+  const fCal = ptFit(), chCal = ptCal();
+  if (chCal && fCal && fCal !== S.fit) {
+    const b = ptBand(), f0 = S.fit, gi = f => f.names.findIndex(x => x.toLowerCase() === "g"), j0 = f0.names.indexOf(b), j1 = fCal.names.indexOf(b), g0 = gi(f0), g1 = gi(fCal);
+    if (j0 >= 0 && j1 >= 0 && g0 >= 0 && g1 >= 0) {
+      const n = P(), a = new Float32Array(n).fill(NaN), c = new Float32Array(n).fill(NaN), d = new Float32Array(n).fill(NaN), use = [], cls = S.points && S.points.cls;
+      for (let p = 0; p < n; p++) {
+        const G0 = f0.intensity[p * f0.m + g0], G1 = fCal.intensity[p * fCal.m + g1];
+        if (!(G0 >= 10 * f0.std_error[p]) || !(G1 >= 10 * fCal.std_error[p]) || (cls && cls[p] !== 1)) continue;
+        a[p] = f0.intensity[p * f0.m + j0] / G0; c[p] = fCal.intensity[p * fCal.m + j1] / G1; d[p] = c[p] - a[p]; use.push(p);
+      }
+      if (use.length >= 3) {
+        const pool = Float64Array.from([...use.map(p => a[p]), ...use.map(p => c[p])]).sort(), ad = Float64Array.from(use, p => Math.abs(d[p])).sort();
+        const lo = quantileSorted(pool, 0.02), hi = quantileSorted(pool, 0.98), dm = quantileSorted(ad, 0.98) || 1e-6;
+        const style = (cmap, manual) => ({ cmap, scale: "manual", manual, smooth: false, filter: "none", backdrop: pmap.backdrop });
+        const med = v => median(use.map(p => v[p])), rl = `I(${b})/I(G)`;
+        A.calCmp = { band: b, name: `${chCal.cal.name} · ${chCal.step.name}`, n: use.length, unit: S.points ? "particles" : "spectra", free: med(a), cal: med(c), diff: med(d),
+          rho: spearman(use.map(p => a[p]), use.map(p => c[p])), up: use.filter(p => d[p] > 0).length / use.length,
+          maps: [mapFigure(style("Viridis", [lo, hi]), "Without calibration", { values: a, label: `${rl}, the Carbon fit's own`, unit: "" }, S.pinned),
+                 mapFigure(style("Viridis", [lo, hi]), "With calibration", { values: c, label: `${rl}, ${chCal.step.name}`, unit: "" }, S.pinned),
+                 mapFigure(style("Diverging", [-dm, dm]), "Difference", { values: d, label: `${rl}: calibrated minus not`, unit: "" }, S.pinned)],
+          range: [lo, hi], dm };
+      }
+    }
+  } else if (!chCal) A.calCmp = { missing: "No calibration is chosen for this file (Particles tab › Band and calibration): there is nothing to compare." };
+
   // where the amorphous carbon comes from: D3 fitted freely on the median spectrum of the sample and
   // of its uncoated reference (the reference's spectra are needed, not only its median)
-  if (Z.res && Z.ref && Z.ref.n && Z.cmp) {
+  if (Z.res && Z.ref && Z.ref.n && Z.cmp && ptBand() === "D3") {
     const k = `${Z.res.key}~${Z.ref.key}`;
     if (!D3G.attr.has(k)) D3G.attr.set(k, d3gAttribution(Z.res.prep, d3gList(Z.res.prep), Z.ref.prep, d3gList(Z.ref.prep), Z.ch.step.shapes));
     const a = D3G.attr.get(k), t = x => ({ z: x.test.z, pos: x.test.pos, fwhm: x.test.fwhm, h: x.test.h / x.test.hG, posLim: x.test.posLim, wLim: x.test.wLim, present: x.test.present });
@@ -7437,7 +7810,7 @@ async function reportAnalysis() {
       sample: { name: Z.cur.name, n: a.sample.n, held: a.sample.held, nu: a.sample.nu, y: a.sample.y, ...t(a.sample), median: Z.M.median, lo: Z.M.lo, hi: Z.M.hi },
       ref: { name: Z.refName, n: a.ref.n, held: a.ref.held, nu: a.ref.nu, y: a.ref.y, ...t(a.ref), limit: a.ref.limit, median: Z.ref.med.median, lo: Z.ref.med.lo, hi: Z.ref.med.hi },
       cmp: { diff: Z.cmp.diff, lo: Z.cmp.lo, hi: Z.cmp.hi } };
-  } else A.attr = { missing: !Z.res ? "" : Z.ref && !Z.ref.n ? `${Z.refName} has no carbon spectra.` : "Choose the uncoated reference as an open file under Particles › D3/G calibration (not a median typed in): the test needs its spectra." };
+  } else A.attr = { missing: !Z.res ? "" : ptBand() !== "D3" ? `The test reads D3, the amorphous-carbon band; the band chosen is ${ptBand()}.` : Z.ref && !Z.ref.n ? `${Z.refName} has no carbon spectra.` : "Choose the uncoated reference as an open file under Particles › D3/G calibration (not a median typed in): the test needs its spectra." };
 
   // coverage against the uncoated reference: how many particles, or how much of the area, carry the coating
   const R = S.covR, refName = $("#cov-ref").value ? (fileOf($("#cov-ref").value) || {}).name : "";
@@ -7476,7 +7849,7 @@ async function makeReport() {
   const run = ++reportRun;
   $("#report-paper").replaceChildren(el("p", { class: "note" }, "Gathering the analysis…"));
   let analysis = null;
-  try { analysis = await reportAnalysis(); } catch (e) { toast(`Report: ${e.message}`, "error"); }
+  try { analysis = await reportAnalysis(); } catch (e) { console.error(e); toast(`Report: ${e.message}`, "error"); }
   if (run !== reportRun) return;                       // a newer refresh has started
   buildReport($("#report-paper"), {
     title: $("#rp-title").value, ds: S.ds, cfg: S.cfg, fit: S.fit, nx: S.nx, ny: S.ny, x: S.x, y: S.y, points: !!S.points,
@@ -7520,7 +7893,7 @@ function repaintAll() {
   for (const m of pkMaps) m._dirty = true;
   pkRender();
   for (const m of [...grMaps, ...cnMaps, ...siMaps, ...idMaps]) m._dirty = true;
-  grRender(); cnRender(); siRender(); idLibList(); idRender(); tbRender();
+  grRender(); cnRender(); siRender(); psRender(); idLibList(); idRender(); tbRender();
 }
 themeButton();
 

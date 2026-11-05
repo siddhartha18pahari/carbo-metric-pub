@@ -12,6 +12,8 @@ const ANCHORS = {
   Ice: ["#04060f", "#0b1d3f", "#123a72", "#1b5fa6", "#2a8ad0", "#4db6e8", "#8ad9f2", "#cdf1fa", "#ffffff"],
   Red: ["#0a0000", "#3d0000", "#7a0a0a", "#b81414", "#e8331f", "#ff6a4d", "#ffb3a3"],
   Grey: ["#000000", "#ffffff"],
+  // for differences about zero: blue below, white at zero, red above (ColorBrewer RdBu, colour-blind safe)
+  Diverging: ["#2166ac", "#4393c3", "#92c5de", "#d1e5f0", "#f7f7f7", "#fddbc7", "#f4a582", "#d6604d", "#b2182b"],
 };
 
 function hex(c) { return [1, 3, 5].map(i => parseInt(c.slice(i, i + 2), 16)); }
