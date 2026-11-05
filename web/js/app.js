@@ -745,6 +745,13 @@ async function loadDataset(info) {
   $("#welcome").classList.add("hidden"); document.body.classList.remove("no-data");
   setStatus("Loading spectra…", "busy");
   S.cube = new Float32Array(await api(`/api/ds/${info.id}/cube`));
+  // a ParticleFinder project opened without the spectra list saved with it may keep a spectrum for
+  // few of its particles (some .l6pf files carry them all, others one): say so now, not at a build
+  if (info.points) {
+    const P0 = info.nx * info.ny, K0 = info.k; let have = 0;
+    for (let p = 0; p < P0; p++) { const v = S.cube[p * K0 + (K0 >> 1)]; if (Number.isFinite(v) && v !== 0) have++; }
+    if (have < 0.5 * P0) toast(`${info.name}: only ${fmt(have)} of its ${fmt(P0)} particles carry a spectrum in this file. A ParticleFinder project can keep its particles' spectra in the spectra list (.l6m) saved with it: open the .l6pf and that .l6m together.`, "error", 15000);
+  }
   S.video = null;
   if (info.video) {
     // onload, not img.decode(): decode() can stall while the window is in the background
@@ -2894,11 +2901,11 @@ $("#d3g-build").onclick = async () => {
       const prep = await d3gPrep(f, settings), list = d3gList(prep);
       if (list.length < 20) throw new Error(`${f.name} has only ${list.length} carbon spectra: ${fewCarbonWhy(prep, list.length)}`);
       const fits = await d3gFreeFits(prep, list, prev, (a, b) => { status.textContent = `${what}: fitting ${f.name} freely, ${fmt(a)} of ${fmt(b)} carbon spectra…`; });
-      const shapes = calibrate(fits, prep.sig, prev, settings);
+      const shapes = calibrate(fits, prep.sig, prev, settings), snr = median(list.map(p => prep.snr[p]));
       // D3 too weak in single spectra of the uncoated map: measured on its median spectrum instead
-      if (!d3Median) return { shapes, median: null };
+      if (!d3Median) return { shapes, median: null, snr };
       status.textContent = `${what}: D3 on the median spectrum of ${f.name}…`; await xcTick();
-      return refineOnMedian(shapes, prep, list, prev, "D3");
+      return { ...refineOnMedian(shapes, prep, list, prev, "D3"), snr };
     };
     const d3Med = $("#d3g-d3med").checked;
     const r1 = await step(f1, s0.shapes, "Baseline 1", d3Med), r2 = await step(f2, r1.shapes, "Baseline 2", false), now = new Date();
@@ -2913,7 +2920,23 @@ $("#d3g-build").onclick = async () => {
       : !m ? `D3 measured spectrum by spectrum on ${f1.name}. `
       : m.shape ? `D3 from the median spectrum of ${f1.name}: ${m.z.toFixed(1)} × that fit's residual, at ${r1.shapes.D3.pos.toFixed(1)} / ${r1.shapes.D3.fwhm.toFixed(1)} cm⁻¹${m.posLim || m.wLim ? " (a value on its window limit kept glassy carbon's)" : ""}. `
       : `D3 not found on the median spectrum of ${f1.name} (${m.z.toFixed(1)} × that fit's residual, under 3; the fit put it at ${m.pos.toFixed(1)} / ${m.fwhm.toFixed(1)} cm⁻¹): glassy carbon's shape kept. `;
-    status.textContent = `Built from ${g.name}, ${gl.name}, ${f1.name} and ${f2.name}. ${d3}Its baseline 2 is now in use; Save calibration keeps it.`;
+    // G and D1, strong in any carbon, must sit inside their windows: a median shape on a window's limit, or
+    // most spectra fitted on one, means the band lies outside it (a shifted axis, or another material) or
+    // the spectra are too weak to place it. Weak D2, D3 and D4 shapes on a limit are common and not flagged.
+    const limited = sh => ["G", "D1"].filter(b => {
+      const v = sh[b], w = settings.bands[b], near = (x, e) => Math.abs(x - e) <= 0.05;
+      return v.note === "median" && (v.atBound > 0.5 || near(v.pos, w.pos_min) || near(v.pos, w.pos_max) || near(v.fwhm, w.width_min) || near(v.fwhm, w.width_max));
+    });
+    const win = b => `${settings.bands[b].pos_min}–${settings.bands[b].pos_max} cm⁻¹`;
+    const warn = [[f1, r1], [f2, r2]].map(([f, r]) => {
+      const L = limited(r.shapes); if (!L.length) return "";
+      const at = L.map(b => `${b} at ${r.shapes[b].pos.toFixed(1)} (window ${win(b)})`).join(", ");
+      return `${f.name}: ${at} sits on its fitting-window limit, so the shape is not set by its spectra. ` + (r.snr >= 20
+        ? `Its spectra are strong (median G ${fmt(r.snr, 3)} × the noise), so the band most likely lies outside the window: check the wavenumber axis for that session (silicon at 520.7 cm⁻¹; the Toolbox corrects it), or whether the sample differs, before using these baselines.`
+        : `Its spectra are weak (median G ${fmt(r.snr, 3)} × the noise): use a brighter map.`);
+    }).filter(Boolean);
+    status.textContent = `Built from ${g.name}, ${gl.name}, ${f1.name} and ${f2.name}. ${d3}Its baseline 2 is now in use; Save calibration keeps it.${warn.length ? ` Check: ${warn.join(" ")}` : ""}`;
+    if (warn.length) toast(`The calibration was built, but ${warn[0]}`, "error", 15000);
     renderD3g();
   } catch (e) { status.textContent = `Could not build the calibration: ${e.message}`; }
   finally { D3G.building = false; $("#d3g-build").disabled = false; }
