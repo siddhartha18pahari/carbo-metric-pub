@@ -460,6 +460,25 @@ table.stats .sub { color: var(--dim); }
   background: var(--solid); border: 1px solid var(--line-2); box-shadow: var(--shadow-lg);
   backdrop-filter: blur(10px); display: grid; gap: 7px;
 }
+/* the baselines prompt, with every file */
+.bl-back { position: fixed; inset: 0; z-index: 200; display: grid; place-items: center; background: rgba(8, 14, 26, 0.45); backdrop-filter: blur(2px); }
+.bl-card { width: min(520px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow: auto; padding: 20px 22px; border-radius: 14px;
+  background: var(--solid); border: 1px solid var(--line-2); box-shadow: var(--shadow-lg); display: grid; gap: 10px; }
+.bl-card h3 { margin: 0; font-size: 17px; }
+.bl-card h3 i { font-style: normal; color: var(--accent); }
+.bl-card p { margin: 0; font-size: 13px; line-height: 1.5; }
+.bl-opt { display: grid; gap: 2px; text-align: left; padding: 10px 12px; height: auto; border-radius: 10px; border: 1px solid var(--line-2); background: transparent; cursor: pointer; }
+.bl-opt:hover { border-color: var(--accent); background: var(--accent-soft-2); }
+.bl-opt b { font-size: 14px; }
+.bl-opt span { font-size: 12px; color: var(--muted); }
+.bl-foot { display: flex; justify-content: flex-end; }
+.help-q { display: inline-flex; align-items: center; justify-content: center; width: 17px; height: 17px; min-width: 17px; padding: 0; margin-left: 5px; border-radius: 50%;
+  border: 1px solid var(--line-2); background: transparent; color: var(--muted); font-size: 11px; font-weight: 700; line-height: 1; cursor: help; vertical-align: middle; }
+.help-q:hover { color: var(--accent); border-color: var(--accent); }
+.popover.help-pop { width: 360px; max-width: calc(100vw - 16px); max-height: 70vh; overflow: auto; }
+.help-pop p { margin: 0; font-size: 12.5px; line-height: 1.5; text-transform: none; letter-spacing: 0; }
+/* a heading in capitals would turn τ into the capital Τ, which reads as a T */
+.help-pop .pop-h { text-transform: none; letter-spacing: 0; font-size: 13px; font-weight: 700; color: var(--text); }
 .pop-h { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 2px; }
 .cmap-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; }
 .cmap-swatch { height: 18px; border-radius: 4px; border: 1px solid var(--line); padding: 0; }
@@ -698,7 +717,10 @@ table.stats select { height: 26px; font-size: 12.5px; padding: 0 4px; width: aut
 table.stats td.warn { color: var(--warn); }
 
 /* Graphene and Silicon: four maps, then the fits and a plot (DLC's rows) */
-#tab-graphene, #tab-cnt, #tab-si, #tab-id, #tab-tools { grid-template-columns: minmax(0, 1fr) 420px; gap: 12px; padding: 12px; }
+#tab-graphene, #tab-cnt, #tab-si, #tab-id, #tab-tools, #tab-pspec { grid-template-columns: minmax(0, 1fr) 420px; gap: 12px; padding: 12px; }
+.ps-main { position: relative; display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.3fr); gap: 12px; min-height: 0; min-width: 0; }
+.ps-main > .panel { min-height: 0; }
+.ps-mosaic { height: 260px; margin-top: 8px; }
 .gr-lower { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 0.8fr) minmax(0, 0.9fr); gap: 12px; min-height: 0; }
 #gr-status, #gr-res-note, #cn-status, #tb-cal-note, #si-status, #si-res-note, #id-status, #id-mix, #tb-status, #tb-ops-note { margin-top: 6px; line-height: 1.45; }
 .si-cal { margin: 6px 0 8px; padding: 7px 9px; border-radius: 8px; font-size: 12.5px; line-height: 1.45; background: var(--input); border-left: 3px solid var(--line); }
@@ -785,7 +807,9 @@ table.stats td.warn { color: var(--warn); }
   body { overflow: auto; }
   main { height: auto; }
   .tab.on { min-height: calc(100vh - 56px - 24px); }
-  #tab-qc, #tab-splat, #tab-particles, #tab-files, #tab-dlc, #tab-layers, #tab-mva, #tab-fit, #tab-graphene, #tab-cnt, #tab-si, #tab-id, #tab-tools { grid-template-columns: minmax(0, 1fr); }
+  #tab-qc, #tab-splat, #tab-particles, #tab-files, #tab-dlc, #tab-layers, #tab-mva, #tab-fit, #tab-graphene, #tab-cnt, #tab-si, #tab-id, #tab-tools, #tab-pspec { grid-template-columns: minmax(0, 1fr); }
+  .ps-main { grid-template-columns: minmax(0, 1fr); }
+  .ps-main > .panel { height: 380px; }
   .gr-lower { grid-template-columns: minmax(0, 1fr); }
   .gr-lower .panel { height: 300px; }
   .tb-main { grid-template-rows: auto auto; }

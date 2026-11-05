@@ -253,8 +253,9 @@ export function boxSolver(X, N, q, nb, hmax) {
 
 // Apply fixed shapes ({band: {pos, fwhm}}) to the spectra in list: per spectrum the heights,
 // their standard errors (the covariance of the linear fit at its residual variance), the areas
-// of each line shape and the ratios over G. A zero G height gives no ratio (NaN).
-export function unmix(prep, shapes, list = prep.carbon) {
+// of each line shape and the ratios over G. A zero G height gives no ratio (NaN). With cov, also
+// each spectrum's whole covariance of the band heights (nb x nb, BANDS order).
+export function unmix(prep, shapes, list = prep.carbon, { cov = false } = {}) {
   const { nu, N, Y, settings } = prep, nbase = settings.order + 1, nb = BANDS.length, q = nbase + nb;
   const [lo, hi] = settings.range, mid = (lo + hi) / 2, half = (hi - lo) / 2, X = new Float64Array(N * q);
   for (let n = 0; n < N; n++) {
@@ -264,7 +265,8 @@ export function unmix(prep, shapes, list = prep.carbon) {
   }
   const box = boxSolver(X, N, q, nb, settings.hmax), M = list.length;
   const out = { list: Int32Array.from(list), h: new Float64Array(M * nb), se: new Float64Array(M * nb), area: new Float64Array(M * nb),
-                rmse: new Float64Array(M), r2: new Float64Array(M), base: new Float64Array(M * nbase), bands: BANDS, nbase };
+                rmse: new Float64Array(M), r2: new Float64Array(M), base: new Float64Array(M * nbase), bands: BANDS, nbase, dof: N - q };
+  if (cov) out.cov = new Float64Array(M * nb * nb);
   const bv = new Float64Array(q);
   list.forEach((p, i) => {
     const y = Y.subarray(p * N, (p + 1) * N);
@@ -281,9 +283,31 @@ export function unmix(prep, shapes, list = prep.carbon) {
       const h = x[nbase + j];
       out.h[i * nb + j] = h; out.se[i * nb + j] = Math.sqrt(box.cov[(nbase + j) * q + nbase + j] * s2);
       out.area[i * nb + j] = shapeArea(settings.bands[b].shape, h, shapes[b].fwhm);
+      if (cov) for (let k = 0; k < nb; k++) out.cov[(i * nb + j) * nb + k] = box.cov[(nbase + j) * q + nbase + k] * s2;
     });
   });
   return withRatios(out);
+}
+
+// The held-shape heights of every spectrum in the layout of a Carbon fit's result, so analyses written
+// for that result read a calibration's values instead: bands in BANDS order, every position and width
+// the held one, the residual's SD (on the fit's degrees of freedom) as each spectrum's error, and the
+// heights' covariance. Spectra not in U (not measured) stay NaN.
+export function asFit(prep, U, shapes) {
+  const P = prep.P, m = BANDS.length, M = U.list.length;
+  const intensity = new Float32Array(P * m).fill(NaN), area = new Float32Array(P * m).fill(NaN), position = new Float32Array(P * m).fill(NaN);
+  const width = new Float32Array(P * m).fill(NaN), std_error = new Float32Array(P).fill(NaN), cov = new Float64Array(P * m * m).fill(NaN);
+  const k = Math.sqrt(prep.N / Math.max(1, U.dof));
+  for (let i = 0; i < M; i++) {
+    const p = U.list[i];
+    for (let j = 0; j < m; j++) {
+      intensity[p * m + j] = U.h[i * m + j]; area[p * m + j] = U.area[i * m + j];
+      position[p * m + j] = shapes[BANDS[j]].pos; width[p * m + j] = shapes[BANDS[j]].fwhm;
+    }
+    std_error[p] = U.rmse[i] * k;
+    if (U.cov) cov.set(U.cov.subarray(i * m * m, (i + 1) * m * m), p * m * m);
+  }
+  return { names: BANDS.slice(), m, intensity, area, position, width, std_error, cov };
 }
 
 function withRatios(out) {
